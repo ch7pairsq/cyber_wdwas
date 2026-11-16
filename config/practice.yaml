@@ -1,0 +1,7 @@
+# 练习覆盖：可自由读写与重启
+storage:
+  db_path: "data/practice.db"
+
+harness:
+  protocol: "mock"
+  competition_locked: false

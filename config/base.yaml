@@ -1,0 +1,44 @@
+# 基础配置（练习与比赛共用）；覆盖见 practice.yaml / competition.yaml
+run:
+  deadline_epoch: 0          # 正式运行时由启动器按 4h 基线写入
+
+concurrency:
+  max_workers: 4
+  max_project_workers: 2
+  max_running_projects: 3
+  model_max_inflight: 3
+
+budget:
+  per_challenge_seconds: 900
+  per_strategy_seconds: 600
+  tool_timeout: 120
+  grace_seconds: 2
+
+# 下载限额：X 未提供 → 0 = 禁止一切下载（Fail Closed，§15）
+download:
+  max_single_bytes: 0
+  max_total_bytes: 0
+
+policy:
+  # 允许访问的目标；练习/比赛按官方范围填写
+  authorized_scope: []
+  # 命令白名单（basename）
+  command_allowlist: ["python3", "unzip", "strings", "file", "binwalk", "sage", "openssl"]
+
+model:
+  provider: "deepseek"
+  base_url: "https://api.deepseek.com"
+  model: "deepseek-flash"
+  api_key_env: "DEEPSEEK_API_KEY"
+  max_tokens: 4096
+
+storage:
+  db_path: "data/ctf.db"
+  evidence_root: "data/evidence"
+  evidence_max_bytes: 67108864
+
+harness:
+  protocol: "mock"
+  # official 协议需 SDK 与样例；未就绪前禁止启用（§12.5）
+  official_sdk_ready: false
+  competition_locked: false

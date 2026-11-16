@@ -1,0 +1,17 @@
+[project]
+name = "ctf-agent"
+version = "0.1.0"
+description = "CTF AI Agent framework - Cairn-based extension layer initialized from the design doc"
+# 设计文档目标为 Python >= 3.12（随 Cairn）；本机验证环境为 3.9.6，
+# 因此代码按 3.9 兼容编写，生产镜像仍应使用 3.12（见 README「与设计文档的差异」）。
+requires-python = ">=3.9"
+dependencies = [
+  "pyyaml>=6.0",
+  "requests>=2.31",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

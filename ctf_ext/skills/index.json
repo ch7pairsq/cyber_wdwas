@@ -1,0 +1,18 @@
+[
+  {
+    "name": "crypto.rsa.small_e",
+    "domain": "crypto",
+    "prerequisites": ["python3"],
+    "tokens_hint": 1200,
+    "risk": "compute",
+    "file": "crypto.rsa.small_e.md"
+  },
+  {
+    "name": "forensics.zip",
+    "domain": "forensics",
+    "prerequisites": ["unzip"],
+    "tokens_hint": 800,
+    "risk": "read",
+    "file": "forensics.zip.md"
+  }
+]

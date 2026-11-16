@@ -1,0 +1,16 @@
+# 正式覆盖：参赛机会锁 + 官方协议（未就绪前禁止启用，§12.4）
+storage:
+  db_path: "data/competition.db"
+
+budget:
+  per_challenge_seconds: 900   # §23.3 基线：单题 ≤ 900s
+
+download:
+  # X 未确认前保持 0 = 禁止下载
+  max_single_bytes: 0
+  max_total_bytes: 0
+
+harness:
+  protocol: "official"
+  official_sdk_ready: false    # 官方 SDK 就绪后由负责人改为 true
+  competition_locked: true     # 参赛机会锁：整场一次正式提交
