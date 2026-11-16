@@ -17,15 +17,16 @@ def recover_expired_leases(board, now: float = None, hard_limit_seconds: float =
         for r in rows:
             if r["lease_until"] is not None and r["lease_until"] < now:
                 db.execute(
-                    "UPDATE intents_ext SET status='READY', owner=NULL, note='lease_expired:'||COALESCE(owner,''),"
-                    " updated_at=? WHERE id=?",
+                    # 回收必须同时清空 lease_until，否则新 Worker 仍会被旧租约挡住
+                    "UPDATE intents_ext SET status='READY', owner=NULL, lease_until=NULL,"
+                    " note='lease_expired:'||COALESCE(owner,''), updated_at=? WHERE id=?",
                     (now, r["id"]),
                 )
                 requeued += 1
             elif now - r["updated_at"] > hard_limit_seconds:
                 db.execute(
-                    "UPDATE intents_ext SET status='FAILED_RETRYABLE', owner=NULL, note='stale_orphan',"
-                    " updated_at=? WHERE id=?",
+                    "UPDATE intents_ext SET status='FAILED_RETRYABLE', owner=NULL, lease_until=NULL,"
+                    " note='stale_orphan', updated_at=? WHERE id=?",
                     (now, r["id"]),
                 )
                 orphaned += 1

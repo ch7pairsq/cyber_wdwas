@@ -44,6 +44,13 @@ class StaleWrite(Exception):
     pass
 
 
+class EvidenceNotRegistered(Exception):
+    """引用未登记/哈希不匹配的证据（附录 D.1-3：写入 Fact 前证据必须已存在）。"""
+    def __init__(self, evidence_ids):
+        super().__init__("evidence not registered or hash mismatch: {}".format(list(evidence_ids)))
+        self.evidence_ids = list(evidence_ids)
+
+
 @dataclass
 class IntentDraft:
     challenge_id: str
@@ -85,6 +92,7 @@ class WorkerResult:
     next_best_action: str = ""
     evidence_ids: List[str] = field(default_factory=list)
     candidate_answer: Optional[str] = None
+    facts: List[Dict[str, Any]] = field(default_factory=list)
     resource_usage: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -103,10 +111,13 @@ def compute_priority(draft: IntentDraft) -> float:
 
 
 class Blackboard:
-    def __init__(self, db: sqlite3.Connection, lease_default: float = 180.0):
+    def __init__(self, db: sqlite3.Connection, lease_default: float = 180.0, evidence_check=None):
         self._db = db
         self._lock = threading.RLock()
         self._lease_default = lease_default
+        # evidence_check: evidence_id -> bool（通常是 EvidenceStore.verify）；
+        # 配置后所有结果引用的证据都必须通过校验（D.1-3）
+        self._evidence_check = evidence_check
 
     @contextmanager
     def _write(self):
@@ -245,6 +256,10 @@ class Blackboard:
                     or row["status"] != RUNNING):
                 raise StaleWrite("intent {} is owned by {} (attempt {}), writer is {} (attempt {})".format(
                     result.intent_id, row["owner"], row["attempt_no"], result.owner, result.attempt_no))
+            if self._evidence_check is not None and result.evidence_ids:
+                bad = [e for e in result.evidence_ids if not self._evidence_check(e)]
+                if bad:
+                    raise EvidenceNotRegistered(bad)
             cur = db.execute(
                 "INSERT OR IGNORE INTO results_ext(idempotency_key, intent_id, payload, created_at)"
                 " VALUES (?,?,?,?)",
@@ -303,6 +318,53 @@ class Blackboard:
                 (challenge_id, max_items),
             ).fetchall(),
         }
+
+    def get_challenge(self, challenge_id: str) -> Optional[Dict[str, Any]]:
+        row = self._db.execute("SELECT * FROM challenges WHERE id=?", (challenge_id,)).fetchone()
+        return dict(row) if row else None
+
+    def claim_intent_for(self, challenge_id: str, worker: str,
+                         lease_seconds: Optional[float] = None) -> Optional[Claim]:
+        """附录 B.1 契约签名：按题目领取。"""
+        return self.claim_intent(worker, lease_seconds=lease_seconds, challenge_ids=[challenge_id])
+
+    # ------------------------------------------------------------------- facts
+    def write_facts(self, challenge_id: str, facts: List[Dict[str, Any]],
+                    source_attempt_id: Optional[str] = None) -> List[str]:
+        """写入已验证事实；每条事实必须带已登记证据（D.1-3、B.2）。"""
+        ids: List[str] = []
+        for fact in facts:
+            evidence_ids = list(fact.get("evidence_ids") or [])
+            if not evidence_ids:
+                raise EvidenceNotRegistered(["<empty>"])
+            if self._evidence_check is None:
+                raise EvidenceNotRegistered(evidence_ids)  # 未配置校验器 → 无法证明，拒绝
+            bad = [e for e in evidence_ids if not self._evidence_check(e)]
+            if bad:
+                raise EvidenceNotRegistered(bad)
+            fid = new_id("fact")
+            ids.append(fid)
+        with self._write() as db:
+            now = time.time()
+            for fid, fact in zip(ids, facts):
+                db.execute(
+                    "INSERT INTO facts(id, challenge_id, statement, confidence, evidence_ids,"
+                    " source_attempt_id, created_at) VALUES (?,?,?,?,?,?,?)",
+                    (fid, challenge_id, str(fact.get("statement", "")),
+                     float(fact.get("confidence", 0.0)),
+                     json.dumps(list(fact.get("evidence_ids") or [])), source_attempt_id, now),
+                )
+        return ids
+
+    # ------------------------------------------------------------------ events
+    def append_event(self, event_type: str, entity_id: str = "", payload: Optional[Dict[str, Any]] = None) -> int:
+        """追加审计事件（§17.2 events 表：只追加，不改写历史）。"""
+        with self._write() as db:
+            cur = db.execute(
+                "INSERT INTO events(event_type, entity_id, payload, created_at) VALUES (?,?,?,?)",
+                (event_type, entity_id, json.dumps(payload or {}, ensure_ascii=False), time.time()),
+            )
+            return int(cur.lastrowid)
 
     def close(self) -> None:
         self._db.close()

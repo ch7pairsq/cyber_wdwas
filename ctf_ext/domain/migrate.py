@@ -99,6 +99,36 @@ MIGRATIONS = [
         );
         """,
     ),
+    (
+        2,
+        """
+        CREATE TABLE IF NOT EXISTS facts (
+            id TEXT PRIMARY KEY,
+            challenge_id TEXT NOT NULL,
+            statement TEXT NOT NULL,
+            confidence REAL NOT NULL DEFAULT 0,
+            evidence_ids TEXT NOT NULL DEFAULT '[]',
+            source_attempt_id TEXT,
+            created_at REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_facts_challenge ON facts(challenge_id, created_at);
+        CREATE TABLE IF NOT EXISTS events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type TEXT NOT NULL,
+            entity_id TEXT,
+            payload TEXT NOT NULL DEFAULT '{}',
+            created_at REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type, created_at);
+        CREATE TABLE IF NOT EXISTS config_snapshots (
+            version INTEGER PRIMARY KEY AUTOINCREMENT,
+            config_hash TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT '',
+            payload TEXT NOT NULL DEFAULT '{}',
+            created_at REAL NOT NULL
+        );
+        """,
+    ),
 ]
 
 

@@ -65,12 +65,15 @@ class Submitter:
             self._record(sub, SENDING, None)
             existing = self._adapter.submit_answer(sub)
             self._record(sub, existing.status, existing)
-        elif existing.status == UNKNOWN:
-            # 只查询回执，不重发（附录 E：UNKNOWN 是最危险状态）
+        elif existing.status in (UNKNOWN, SENDING):
+            # SENDING 说明上次发送后进程中断：已发出的事实必须保留，
+            # 只能查询回执，绝不能重发（附录 E：UNKNOWN/SENDING 等同处理）
             receipt = self._adapter.get_receipt(sub.idempotency_key)
             if receipt is not None:
                 self._record(sub, receipt.status, receipt)
                 existing = receipt
+            elif existing.status == SENDING:
+                existing = SubmitReceipt(status=UNKNOWN, detail="sending interrupted; receipt unknown")
         self._sent[sub.idempotency_key] = existing
         return existing
 

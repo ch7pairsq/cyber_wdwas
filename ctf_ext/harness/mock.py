@@ -19,6 +19,26 @@ from .schema import (
 )
 
 
+def default_practice_challenges():
+    """内置练习题目：附件是 base64，解码后得到 flag（F-4 端到端用）。"""
+    import base64
+    flag = "flag{mock_base64_001}"
+    encoded = base64.b64encode(
+        ("练习赛热身题\n本题只需解码附件即可得到提交答案。\n" + flag + "\n").encode("utf-8")
+    ).decode("ascii")
+    return [{
+        "challenge_id": "ch-mock-1",
+        "name": "base64 starter",
+        "category": "misc",
+        "description": "附件是一段 base64 文本，解码后可见 flag。",
+        "attachments": ["mock://ch-mock-1/note.b64"],
+        "points_hint": 950.0,
+        "difficulty_level": 1,
+        "metadata": {"files": {"mock://ch-mock-1/note.b64": encoded}},
+        "flag": flag,
+    }]
+
+
 class MockHarnessAdapter(HarnessAdapter):
     def __init__(self, challenges: List[Dict[str, object]], competition_id: str = "practice-mock"):
         self._raw = challenges
@@ -52,6 +72,17 @@ class MockHarnessAdapter(HarnessAdapter):
                 receipt = SubmitReceipt(status="REJECTED", detail="flag mismatch")
         self._receipts[key] = receipt
         return receipt
+
+    def read_attachment(self, ref: str, *, max_bytes: int):
+        """按 ref 返回附件字节；缺失即失败（不伪造内容）。"""
+        for raw in self._raw:
+            files = (raw.get("metadata") or {}).get("files") or {}
+            if ref in files:
+                data = str(files[ref]).encode("utf-8")
+                if len(data) > max_bytes:
+                    raise ValueError("attachment {} exceeds {} bytes".format(ref, max_bytes))
+                return data
+        raise FileNotFoundError(ref)
 
     def get_receipt(self, idempotency_key: str) -> Optional[SubmitReceipt]:
         return self._receipts.get(idempotency_key)

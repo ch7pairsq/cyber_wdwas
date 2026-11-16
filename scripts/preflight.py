@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Day-0 赛前自检（附录 F-10）：环境、配置、Fail-Closed、存储、Key。
+"""Day-0 赛前自检（附录 F-10）：环境、配置、策略、存储、工具、密钥。
 
-只读检查 + 临时目录验证，不产生付费调用；退出码 0 = 可启动。
+只读检查 + 临时目录验证，不产生付费调用、不联网；退出码 0 = 可启动。
 """
 import os
 import pathlib
@@ -41,8 +41,9 @@ def main() -> int:
     du = shutil.disk_usage(ROOT)
     check("disk>1GB", du.free > 1 << 30, "free={}MB".format(du.free // (1 << 20)))
 
+    cfg = {}
     if yaml_ok:
-        from ctf_ext.config import load_yaml, validate_config, deep_merge
+        from ctf_ext.config import deep_merge, load_yaml, validate_config
         base = load_yaml(ROOT / "config" / "base.yaml")
         overlay = load_yaml(ROOT / "config" / "practice.yaml")
         cfg = deep_merge(base, overlay)
@@ -51,7 +52,12 @@ def main() -> int:
         dl = cfg["download"]
         check("download fail-closed", dl["max_single_bytes"] == 0 and dl["max_total_bytes"] == 0,
               "X 未配置 → 禁止下载")
-        check("competition lock explicit", "competition_locked" in cfg["harness"])
+        check("competition lock explicit", "competition_locked" in cfg["harness"],
+              "locked={}".format(cfg["harness"].get("competition_locked")))
+        allowlist = (cfg.get("policy") or {}).get("command_allowlist") or []
+        missing = [b for b in allowlist if shutil.which(b) is None]
+        check("allowlisted tools installed", not missing,
+              "missing={} (按需安装，不临时下载)".format(missing), warn=True)
 
     # migration + 证据库可写
     tmp = tempfile.mkdtemp(prefix="preflight-")
@@ -62,13 +68,27 @@ def main() -> int:
     check("migrate ok", True, "tables={}".format(
         len(conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall())))
 
+    from ctf_ext.store.evidence import EvidenceStore
+    ev = EvidenceStore(os.path.join(tmp, "evidence"), db=conn)
+    sha = ev.put_bytes(b"preflight")
+    check("evidence store writable", ev.verify(sha))
+
     from ctf_ext.gateway.policy import PolicyConfig, PolicyDenied, PolicyEngine
-    eng = PolicyEngine(PolicyConfig(authorized_scope=("example.com",)))
+    eng = PolicyEngine(PolicyConfig(authorized_scope=("example.com",)),
+                       resolver=lambda host: ["93.184.216.34"])
     try:
         eng.enforce(eng.decide_download("https://example.com/x"))
         check("policy fail-closed", False, "download allowed with unset limits!")
     except PolicyDenied as exc:
         check("policy fail-closed", exc.reason_code == "QUOTA_UNSET", exc.reason_code)
+
+    private = PolicyEngine(PolicyConfig(authorized_scope=("internal.example",)),
+                           resolver=lambda host: ["10.0.0.5"])
+    try:
+        private.enforce(private.decide_download("https://internal.example/x"))
+        check("ssrf private-network blocked", False, "private address allowed!")
+    except PolicyDenied as exc:
+        check("ssrf private-network blocked", exc.reason_code == "PRIVATE_NETWORK", exc.reason_code)
 
     key = os.environ.get("DEEPSEEK_API_KEY", "")
     check("DEEPSEEK_API_KEY", bool(key), "set before running real model calls", warn=True)

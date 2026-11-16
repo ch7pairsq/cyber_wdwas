@@ -21,12 +21,19 @@ class Scheduler:
         return counter
 
     def eligible_challenges(self) -> List[str]:
-        """按轮转游标挑题：跑满的题不再投喂，未跑满的题按剩余名额排序。"""
+        """按并发题目数封顶 + 单题并发上限挑题（§5.4 背压）。
+
+        - 单题：RUNNING 数达到 max_project_workers 后不再投喂；
+        - 全局：已在跑的题目数达到 max_running_projects 后，不再开启新题目。
+        """
         counter = self._running_per_challenge()
+        running = set(counter)
         challenges = [r["challenge_id"] for r in self._board._db.execute(
             "SELECT DISTINCT challenge_id FROM intents_ext WHERE status IN ('READY','FAILED_RETRYABLE')"
         )]
         eligible = [c for c in challenges if counter.get(c, 0) < self._max_project_workers]
+        if len(running) >= self._max_running_projects:
+            eligible = [c for c in eligible if c in running]
         eligible.sort(key=lambda c: counter.get(c, 0))  # 少的优先，避免单题垄断
         return eligible[: self._max_running_projects]
 
