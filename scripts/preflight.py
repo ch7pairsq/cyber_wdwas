@@ -5,6 +5,7 @@
 """
 import os
 import pathlib
+import re
 import shutil
 import sqlite3
 import sys
@@ -72,6 +73,41 @@ def main() -> int:
     ev = EvidenceStore(os.path.join(tmp, "evidence"), db=conn)
     sha = ev.put_bytes(b"preflight")
     check("evidence store writable", ev.verify(sha))
+
+    # §15.1 解压炸弹防护：路径穿越与压缩比必须在写出前拦截
+    import io
+    import zipfile
+    from ctf_ext.gateway.archive import ArchiveRejected, extract_zip
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("../escape.txt", b"x")
+    try:
+        extract_zip(buf.getvalue(), os.path.join(tmp, "unz"))
+        check("archive guard", False, "path traversal accepted!")
+    except ArchiveRejected as exc:
+        check("archive guard", exc.reason_code == "ZIP_TRAVERSAL", exc.reason_code)
+
+    # §12.5 官方协议未就绪时必须 fail closed，不能静默降级
+    from ctf_ext.harness.official import OfficialHarnessAdapter
+    report = OfficialHarnessAdapter().capability_report()
+    check("official harness fail-closed", report["ready"] is False,
+          "missing methods={}".format(len(report["missing"])))
+
+    # §13 示例键名 → 规范键
+    from ctf_ext.config import normalize_config
+    mapped = normalize_config({"downloads": {"max_single_download_bytes": 123}})
+    check("config aliases", mapped["download"]["max_single_bytes"] == 123, "downloads.* → download.*")
+
+    # F-1：上游 Cairn 已 vendored，但运行需要 >=3.12（本机 3.9）
+    cairn_pyproject = ROOT / "cairn" / "cairn" / "pyproject.toml"
+    check("cairn vendored", cairn_pyproject.exists(), "commit=8e7e0ea")
+    if cairn_pyproject.exists():
+        match = re.search(r'requires-python\s*=\s*"([^"]+)"',
+                          cairn_pyproject.read_text(encoding="utf-8"))
+        check("cairn requires-python", bool(match), match.group(1) if match else "unknown")
+        check("cairn runnable here", sys.version_info >= (3, 12),
+              "serve/dispatch needs >=3.12; local {}".format(
+                  "{}.{}".format(v.major, v.minor)), warn=True)
 
     from ctf_ext.gateway.policy import PolicyConfig, PolicyDenied, PolicyEngine
     eng = PolicyEngine(PolicyConfig(authorized_scope=("example.com",)),

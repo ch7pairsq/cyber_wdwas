@@ -1,0 +1,30 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install pinned deps
+        run: python -m pip install -r requirements-lock.txt
+      - name: Lock consistency
+        run: python scripts/check_lock.py
+      - name: Syntax scan
+        run: python -m compileall -q ctf_ext scripts tests
+      - name: Test suite
+        run: python scripts/run_checks.py
+      - name: Concurrency bench (smoke)
+        run: python scripts/bench.py --workers 2 --intents 8 --work-ms 1 --out build/bench-ci.json
+      - name: Preflight
+        run: python scripts/preflight.py

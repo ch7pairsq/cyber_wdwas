@@ -24,7 +24,7 @@ class Orchestrator:
     def __init__(self, harness, board, submitter, scheduler, worker,
                  evidence=None, metrics: Optional[Metrics] = None,
                  worker_name: str = "worker-1", lease_seconds: float = 60.0,
-                 clock=time.time):
+                 clock=time.time, hot_config=None, policy_engine=None, db=None):
         self._harness = harness
         self._board = board
         self._submitter = submitter
@@ -36,6 +36,35 @@ class Orchestrator:
         self._lease = lease_seconds
         self._clock = clock
         self._challenges: Dict[str, Dict] = {}
+        self._hot = hot_config
+        self._policy = policy_engine
+        self._db = db
+        self._config_version = hot_config.version if hot_config else 0
+
+    # ------------------------------------------------------------ hot config
+    def apply_config(self, cfg: Dict) -> None:
+        """把通过校验的配置应用到调度/租约/下载限额（§13 动态配置）。"""
+        conc = cfg.get("concurrency") or {}
+        self._scheduler.set_limits(conc.get("max_project_workers"),
+                                   conc.get("max_running_projects"))
+        if (cfg.get("runtime") or {}).get("worker_lease_seconds"):
+            self._lease = float(cfg["runtime"]["worker_lease_seconds"])
+        dl = cfg.get("download") or {}
+        if self._policy is not None:
+            self._policy.update_limits(dl.get("max_single_bytes"), dl.get("max_total_bytes"))
+
+    def reload_config_if_changed(self) -> bool:
+        if self._hot is None or not self._hot.reload_if_changed():
+            return False
+        self.apply_config(self._hot.config)
+        self._config_version = self._hot.version
+        self._board.append_event("config_reloaded", "", {
+            "version": self._hot.version, "hash": self._hot.hash,
+        })
+        self._metrics.incr("config.reloads")
+        if self._db is not None:
+            self._hot.snapshot(self._db, source="hot_reload")
+        return True
 
     # ------------------------------------------------------------------ setup
     def bootstrap(self) -> List[Dict]:
@@ -104,6 +133,17 @@ class Orchestrator:
             result.candidate_answer = None
             result.failure_reason = "failed_contract: " + "; ".join(exc.errors)
 
+        usage = result.resource_usage or {}
+        tokens = int(usage.get("model_tokens") or 0)
+        if tokens:
+            self._metrics.incr("model.tokens", tokens)
+        tool_calls = int(usage.get("tool_calls") or 0)
+        if tool_calls:
+            self._metrics.incr("tools.calls", tool_calls)
+        wall = float(usage.get("wall_seconds") or 0)
+        if wall:
+            self._metrics.observe("attempt.wall_seconds", wall)
+
         key = "{}-{}".format(claim.intent_id, claim.attempt_no)
         receipt: WriteReceipt = self._board.write_result(result, key)
         self._metrics.incr("intents.completed" if receipt.first else "intents.duplicate_write")
@@ -145,6 +185,7 @@ class Orchestrator:
         results: List[Dict] = []
         solved = set()
         while self._clock() < deadline and len(solved) < len(tasks):
+            self.reload_config_if_changed()
             recover_expired_leases(self._board)
             out = self.step()
             if out is None:

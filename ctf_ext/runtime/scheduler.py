@@ -13,6 +13,13 @@ class Scheduler:
         self._max_project_workers = max_project_workers
         self._max_running_projects = max_running_projects
 
+    def set_limits(self, max_project_workers=None, max_running_projects=None) -> None:
+        """运行期热更新并发上限（§13 动态配置），无需重启。"""
+        if max_project_workers is not None:
+            self._max_project_workers = max(1, int(max_project_workers))
+        if max_running_projects is not None:
+            self._max_running_projects = max(1, int(max_running_projects))
+
     def _running_per_challenge(self) -> Counter:
         counter: Counter = Counter()
         for row in self._board.list_open():

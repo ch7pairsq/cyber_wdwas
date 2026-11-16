@@ -54,6 +54,13 @@ class PolicyEngine:
         self._resolver = resolver or self._default_resolver
         self._dns_cache = {}
 
+    def update_limits(self, max_single_bytes=None, max_total_bytes=None) -> None:
+        """运行期热更新下载限额（§13）：只允许收紧或按运维指令放宽，均由调用方负责审计。"""
+        if max_single_bytes is not None:
+            self._cfg.max_single_bytes = int(max_single_bytes)
+        if max_total_bytes is not None:
+            self._cfg.max_total_bytes = int(max_total_bytes)
+
     def bind_total_used(self, ref) -> None:
         """绑定运行期已用字节来源（如 DownloadController.total_used）。"""
         self._total_used_ref = ref

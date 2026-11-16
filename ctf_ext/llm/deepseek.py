@@ -63,9 +63,12 @@ class DeepSeekProvider(ModelProvider):
             self._limiter.on_success()
             usage = data.get("usage") or {}
             text = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
+            prompt_tokens = int(usage.get("prompt_tokens", 0))
+            completion_tokens = int(usage.get("completion_tokens", 0))
             return ProviderResponse(text=text, usage={
-                "prompt_tokens": usage.get("prompt_tokens", 0),
-                "completion_tokens": usage.get("completion_tokens", 0),
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
             }, raw=data)
         except requests.Timeout as exc:
             raise ProviderTimeout(str(exc)) from exc

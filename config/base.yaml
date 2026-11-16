@@ -2,6 +2,16 @@
 run:
   deadline_epoch: 0          # 正式运行时由启动器按 4h 基线写入
 
+# 运行期参数：也接受 §13 示例写法 runtime.worker_lease_seconds / heartbeat_seconds
+runtime:
+  worker_lease_seconds: 180
+  heartbeat_seconds: 15
+  intent_poll_seconds: 2
+
+app:
+  mode: "practice"
+  run_deadline_seconds: 14400   # 4h 基线，含优雅停机余量
+
 concurrency:
   max_workers: 4
   max_project_workers: 2

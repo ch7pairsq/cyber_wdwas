@@ -4,3 +4,5 @@ __pycache__/
 data/
 build/
 .pytest_cache/
+.venv*
+*.egg-info/

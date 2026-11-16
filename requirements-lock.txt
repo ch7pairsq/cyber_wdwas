@@ -1,0 +1,4 @@
+# 依赖锁（CI 与生产镜像按此安装）：改动 pyproject 下限时必须同步本文件
+pyyaml==6.0.2
+requests==2.32.3
+pytest==8.3.3
