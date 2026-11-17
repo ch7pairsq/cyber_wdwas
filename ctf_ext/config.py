@@ -192,7 +192,12 @@ class HotConfig:
         return load_config(*self._paths)
 
     def reload_if_changed(self) -> bool:
-        candidate = self._read()
+        try:
+            candidate = self._read()
+        except (ConfigError, OSError, ValueError) as exc:
+            # 文件被替换/写了一半/暂时不可读：保留旧值，下一轮再试
+            self.last_error = "{}: {}".format(type(exc).__name__, exc)
+            return False
         candidate_hash = config_hash(candidate)
         if candidate_hash == self.hash:
             return False

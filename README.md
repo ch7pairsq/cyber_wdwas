@@ -10,7 +10,7 @@
 cd ctf-agent
 python3 -m ctf_ext run --db /tmp/p.db --evidence /tmp/ev        # 端到端冒烟（mock，无需 Key）
 python3 -m ctf_ext run --mode llm --config config/base.yaml     # 需要 DEEPSEEK_API_KEY
-python3 scripts/run_checks.py     # 65 项零依赖检查（unit + integration + chaos）
+python3 scripts/run_checks.py     # 66 项零依赖检查（unit + integration + chaos）
 python3 scripts/bench.py --workers 4,6,8 --intents 48          # 并发压测 → build/bench.json
 python3 scripts/dashboard.py --db /tmp/p.db --out build/dashboard.html --bench build/bench.json
 python3 scripts/preflight.py      # Day-0 赛前自检
@@ -35,7 +35,7 @@ bash scripts/ci.sh                # 本地 CI：语法 → 依赖锁 → 测试 
 | scripts/ | F-9/10：冻结、预检、压测、看板、依赖锁、CI |
 | docs/ | 核对报告、指标基线 |
 
-## 已验证行为（65/65 全绿）
+## 已验证行为（66/66 全绿）
 
 - 双 Worker 并发领取互不重复；结果幂等写入；attempt_key 去重（D.1–D.3）
 - 租约回收清空 lease_until，崩溃任务可立即接续；过期写入拒绝（D.4）
@@ -79,4 +79,4 @@ bash scripts/ci.sh                # 本地 CI：语法 → 依赖锁 → 测试 
 - [x] F-8 崩溃恢复（租约回收、过期写入、SENDING 恢复）
 - [ ] F-2 serve/dispatch 冒烟：需 Python ≥3.12 + 依赖或 Docker
 - [ ] F-5 DeepSeek 真实连通性（tool calls / JSON / 429）
-- [ ] 官方协议映射表（阻塞项见文档 §22）
+- [ ] 官方协议映射表（阻塞项见文档 §22；所需信息见 [docs/HARNESS-CHECKLIST.md](docs/HARNESS-CHECKLIST.md)）

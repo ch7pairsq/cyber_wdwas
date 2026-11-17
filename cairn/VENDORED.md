@@ -19,6 +19,7 @@
 uv run --project cairn cairn dispatch --config dispatch.yaml
 ```
 
-当前开发机为 Python 3.9.6 且无 Docker，**无法在本机执行 serve/dispatch 冒烟**；
-生产镜像须用 3.12+（或不低于上游要求的 3.13 容器）。该项不是代码缺陷，是环境阻塞，
-已在 README「与设计文档的差异」与 preflight 中标注为 WARN。
+当前开发机为 Python 3.9.6，未安装 3.12/3.13、uv、pyenv/conda，且无 Docker，
+**无法在本机执行 serve/dispatch 冒烟**。已尝试下载 python-build-standalone 的可移植
+CPython 3.12.16，连接 objects.githubusercontent.com 超时失败（网络限制），不是代码问题。
+生产镜像须用 3.12+（或上游的 3.13 容器）；preflight 将该项标为 WARN。

@@ -112,3 +112,15 @@ def test_hot_reload_keeps_invalid_config_and_snapshots():
     hot.snapshot(conn, source="test")
     row = conn.execute("SELECT config_hash, source FROM config_snapshots").fetchone()
     assert row[0] == config_hash(hot.config) and row[1] == "test"
+
+
+def test_hot_reload_survives_broken_file():
+    tmp = tempfile.mkdtemp(prefix="hotcfg-")
+    path = os.path.join(tmp, "config.json")
+    _write(path, _base())
+    hot = HotConfig(path)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("{not valid json")
+    assert hot.reload_if_changed() is False
+    assert hot.config["concurrency"]["max_workers"] == 4
+    assert hot.last_error
