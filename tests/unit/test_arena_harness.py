@@ -1,0 +1,187 @@
+"""Arena harness 单元测试：stub HTTP 服务验证映射、409 语义、token 不泄漏。
+
+不访问真实网络；token 用假值，断言它不出现在任何异常文本中。
+"""
+from __future__ import annotations
+
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+import pytest
+
+from ctf_ext.harness.arena import ArenaHarnessAdapter, ArenaProtocolError
+from ctf_ext.harness.schema import Submission, parse_challenge
+
+TOKEN = "st_test_token_must_not_leak"
+
+
+class _StubArena(BaseHTTPRequestHandler):
+    started: set = set()
+    submissions: list = []
+    finished: list = []
+
+    def log_message(self, *args):  # 静默
+        pass
+
+    def _auth_ok(self):
+        return self.headers.get("Authorization") == "Bearer " + TOKEN
+
+    def _json(self, obj, code=200):
+        body = json.dumps(obj).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        if not self._auth_ok():
+            return self._json({"error": "unauthorized"}, 401)
+        if self.path.startswith("/openapi/v1/challenges/help"):
+            return self._json({"workflow": "1. start 2. solve 3. submit"})
+        if self.path.startswith("/openapi/v1/challenges/files"):
+            if "path=" in self.path:
+                return self._json({"content": "flag{arena_stub_1}\n"})
+            return self._json({"files": ["handouts/note.txt"]})
+        if self.path.startswith("/openapi/v1/challenges") or self.path == "/openapi/v1/challenges":
+            return self._json({"challenges": [{
+                "unique_code": "CH-1", "name": "stub base64", "category": "misc",
+                "description": "decode me", "files": ["handouts/note.txt"], "points": 100,
+            }]})
+        return self._json({"error": "not found"}, 404)
+
+    def do_POST(self):
+        if not self._auth_ok():
+            return self._json({"error": "unauthorized"}, 401)
+        length = int(self.headers.get("Content-Length") or 0)
+        payload = json.loads(self.rfile.read(length) or b"{}") if length else {}
+        if self.path.startswith("/openapi/v1/challenges/start"):
+            code = self.path.split("unique_code=")[-1].split("&")[0]
+            _StubArena.started.add(code)
+            return self._json({"started": True})
+        if self.path.startswith("/openapi/v1/challenges/submit"):
+            code = self.path.split("unique_code=")[-1].split("&")[0]
+            if code not in _StubArena.started:
+                return self._json({"error": "challenge_not_started"}, 409)
+            _StubArena.submissions.append(payload)
+            if payload.get("flag") == "flag{arena_stub_1}":
+                return self._json({"status": "ACCEPTED"})
+            return self._json({"status": "REJECTED", "detail": "flag mismatch"})
+        if self.path.startswith("/openapi/v1/challenges/finish"):
+            _StubArena.finished.append(payload)
+            return self._json({"finished": True})
+        return self._json({"error": "not found"}, 404)
+
+
+@pytest.fixture()
+def arena_url():
+    _StubArena.started = set()
+    _StubArena.submissions = []
+    _StubArena.finished = []
+    server = HTTPServer(("127.0.0.1", 0), _StubArena)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield "http://127.0.0.1:{}".format(server.server_address[1])
+    server.shutdown()
+
+
+def _adapter(url, **kw):
+    return ArenaHarnessAdapter(url, token=TOKEN, client_timeout=5.0, **kw)
+
+
+def test_startup_reads_help_and_context(arena_url):
+    ad = _adapter(arena_url)
+    ctx = ad.startup()
+    assert ctx.protocol == "v1-arena"
+    assert ad.help_text["workflow"].startswith("1. start")
+
+
+def test_read_tasks_maps_arena_fields_and_auto_starts(arena_url):
+    ad = _adapter(arena_url)
+    ad.startup()
+    tasks = ad.read_tasks()
+    assert len(tasks) == 1
+    task = tasks[0]
+    assert task.challenge_id == "CH-1"
+    assert task.category == "misc"
+    assert task.attachments == ("arena://CH-1/handouts/note.txt",)
+    assert "CH-1" in _StubArena.started  # 离线题也需要 start
+    assert task.metadata["help"]["workflow"].startswith("1. start")
+
+
+def test_parse_challenge_accepts_v1_arena(arena_url):
+    raw = {"challenge_id": "CH-9", "name": "x"}
+    assert parse_challenge(raw, protocol="v1-arena").challenge_id == "CH-9"
+
+
+def test_read_attachment_returns_content(arena_url):
+    ad = _adapter(arena_url)
+    ad.startup()
+    ad.read_tasks()
+    data = ad.read_attachment("arena://CH-1/handouts/note.txt", max_bytes=4096)
+    assert b"flag{arena_stub_1}" in data
+
+
+def test_read_attachment_rejects_unlisted_path(arena_url):
+    ad = _adapter(arena_url)
+    ad.startup()
+    ad.read_tasks()
+    with pytest.raises(FileNotFoundError):
+        ad.read_attachment("arena://CH-1/evil/../etc/passwd", max_bytes=4096)
+
+
+def test_submit_success_and_idempotency(arena_url):
+    ad = _adapter(arena_url)
+    ad.startup()
+    ad.read_tasks()
+    sub = Submission(challenge_id="CH-1", answer="flag{arena_stub_1}",
+                     idempotency_key="k-1")
+    r1 = ad.submit_answer(sub)
+    assert r1.status == "ACCEPTED"
+    assert _StubArena.submissions and _StubArena.submissions[0]["flag"] == "flag{arena_stub_1}"
+    r2 = ad.submit_answer(sub)  # 幂等：不产生第二次判定
+    assert r2 is r1
+    assert len(_StubArena.submissions) == 1
+
+
+def test_submit_not_started_retries_after_start(arena_url):
+    ad = _adapter(arena_url, auto_start=False)
+    ad.startup()
+    ad.read_tasks()
+    assert "CH-1" not in _StubArena.started
+    sub = Submission(challenge_id="CH-1", answer="flag{arena_stub_1}",
+                     idempotency_key="k-2")
+    receipt = ad.submit_answer(sub)
+    assert receipt.status == "ACCEPTED"
+    assert "CH-1" in _StubArena.started  # 409 后自动 start 重试一次
+
+
+def test_finish_not_sent_by_default(arena_url):
+    # 默认绝不自动 finish：本地运行结束不等于比赛收尾（防止误关 attempt）。
+    ad = _adapter(arena_url)
+    ad.startup()
+    from ctf_ext.harness.schema import RunSummary
+    out = ad.finalize(RunSummary(results=[{"challenge_id": "CH-1", "status": "completed"}],
+                                 notes="done"))
+    assert out["protocol"] == "v1-arena"
+    assert out["arena_finish_sent"] is False
+    assert _StubArena.finished == []
+
+
+def test_finish_posts_only_when_explicit(arena_url):
+    ad = _adapter(arena_url, auto_finish=True)
+    ad.startup()
+    from ctf_ext.harness.schema import RunSummary
+    out = ad.finalize(RunSummary(results=[{"challenge_id": "CH-1", "status": "completed"}],
+                                 notes="done"))
+    assert out["arena_finish_sent"] is True
+    assert _StubArena.finished
+
+
+def test_token_never_leaks_into_errors(arena_url):
+    # 关闭 stub 后触发网络错误，断言异常文本里没有 token。
+    ad = _adapter("http://127.0.0.1:1")
+    with pytest.raises(ArenaProtocolError) as exc:
+        ad.startup()
+    assert TOKEN not in str(exc.value)

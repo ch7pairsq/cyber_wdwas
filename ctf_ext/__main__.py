@@ -83,6 +83,7 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
     download = cfg.get("download") or {}
     policy = PolicyEngine(PolicyConfig(
         authorized_scope=tuple(policy_cfg.get("authorized_scope") or ()),
+        authorized_arena_targets=tuple(policy_cfg.get("authorized_arena_targets") or ()),
         command_allowlist=tuple(policy_cfg.get("command_allowlist") or ()),
         max_single_bytes=int(download.get("max_single_bytes") or 0),
         max_total_bytes=int(download.get("max_total_bytes") or 0),
@@ -95,7 +96,28 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
     if protocol == "official":
         raise SystemExit("official harness is fail-closed: SDK/samples missing (design §12.5); "
                          "use harness.protocol=mock until the official adapter is provided")
-    harness = MockHarnessAdapter(default_practice_challenges())
+    if protocol == "arena":
+        from .harness.arena import ArenaHarnessAdapter, ArenaProtocolError
+        arena_cfg = (cfg.get("harness") or {}).get("arena") or {}
+        base_url = os.environ.get("ARENA_BASE_URL") or arena_cfg.get("base_url") or ""
+        token = os.environ.get("ARENA_SOLVER_TOKEN") or ""
+        if not base_url or not token:
+            raise SystemExit("arena harness requires ARENA_BASE_URL and ARENA_SOLVER_TOKEN (runtime env only)")
+        arena_kwargs = {k: arena_cfg[k] for k in
+                        ("help_path", "list_path", "start_path", "files_path",
+                         "submit_path", "finish_path", "download_template")
+                        if arena_cfg.get(k)}
+        proxy = os.environ.get("ARENA_PROXY") or arena_cfg.get("proxy") or ""
+        try:
+            harness = ArenaHarnessAdapter(base_url, token, proxy=proxy,
+                                          auto_start=bool(arena_cfg.get("auto_start", True)),
+                                          auto_finish=bool(arena_cfg.get("auto_finish", False)),
+                                          client_timeout=float(arena_cfg.get("client_timeout_seconds") or 30),
+                                          **arena_kwargs)
+        except ArenaProtocolError as exc:
+            raise SystemExit("arena harness init failed: {}".format(exc))
+    else:
+        harness = MockHarnessAdapter(default_practice_challenges())
     state = StateStore(board, evidence, os.path.join(os.path.dirname(db_path), "workspaces"))
     tool_registry = None
     if bool((cfg.get("model") or {}).get("tools_enabled", True)):

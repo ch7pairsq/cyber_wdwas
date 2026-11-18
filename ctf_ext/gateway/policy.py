@@ -35,6 +35,7 @@ class PolicyConfig:
     sandbox_required: bool = True
     # 目标范围校验：拒绝解析到私网/回环/链路本地/保留地址的主机（§15.1 SSRF 防护）
     block_private_networks: bool = True
+    authorized_arena_targets: tuple = ()  # 例如 ("10.201.0.0/16",)；空 = 禁用 arena_http
     # execute 类工具是否需要人工审批（附录 B.4 require_approval）
     require_approval_for_execute: bool = False
 
@@ -167,6 +168,11 @@ class PolicyEngine:
         """B.4：execute 类工具在无沙箱时拒绝，需要审批时返回 require_approval。"""
         if risk_level == "network":
             return Decision(DENY, "GENERIC_NETWORK_TOOL_FORBIDDEN")
+        if risk_level == "arena_target":
+            # 题目专属受限 HTTP：只有显式配置授权网段时才放行（fail-closed）。
+            if getattr(self._cfg, "authorized_arena_targets", ()):
+                return Decision(ALLOW)
+            return Decision(DENY, "ARENA_TARGET_UNAUTHORIZED")
         if risk_level == "execute":
             if self._cfg.require_approval_for_execute:
                 return Decision(REQUIRE_APPROVAL, "TOOL_APPROVAL")

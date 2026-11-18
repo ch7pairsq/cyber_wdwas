@@ -26,6 +26,8 @@ def test_catalog_covers_ctf_recon_tools_and_hides_builders():
     for spec in registry.specs():
         if spec.name in EXECUTE_TOOLS:
             assert spec.risk_level == "execute" and not spec.idempotent
+        elif spec.name == "arena_http":
+            assert spec.risk_level == "arena_target"
         else:
             assert spec.risk_level == "read"
     assert all("argv_builder" not in definition for definition in registry.tool_definitions())

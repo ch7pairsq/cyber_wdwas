@@ -1,0 +1,91 @@
+runtime:
+  worker_lease_seconds: 180
+  heartbeat_seconds: 15
+  intent_poll_seconds: 2
+  retry_backoff_seconds: 2
+app:
+  mode: practice
+concurrency:
+  max_workers: 4
+  max_project_workers: 2
+  max_running_projects: 3
+  executor: serial
+budget:
+  per_challenge_seconds: 1800
+  claim_timeout_seconds: 300
+  max_model_tokens_per_intent: 400000
+  max_tools_per_intent: 300
+download:
+  max_single_bytes: 20971520
+  max_total_bytes: 104857600
+policy:
+  authorized_scope: []
+  web_search: false
+  runtime_install: false
+  sandbox_required: false
+  command_allowlist:
+  - python3
+  - unzip
+  - zip
+  - xz
+  - bzip2
+  - zstd
+  - strings
+  - objdump
+  - readelf
+  - nm
+  - file
+  - binwalk
+  - foremost
+  - fls
+  - icat
+  - mmls
+  - exiftool
+  - 7z
+  - steghide
+  - pngcheck
+  - openssl
+  - xxd
+  - jq
+  - gdb
+  - pwn
+  - ROPgadget
+  - cstool
+  - checksec
+  - patchelf
+  - z3
+  - strace
+  - ltrace
+  - qemu-x86_64
+  - qemu-aarch64
+  - pdftotext
+  - pdfinfo
+  - qrencode
+  - zbarimg
+  authorized_arena_targets:
+  - 10.201.0.0/16
+model:
+  provider: baizhi_anthropic
+  base_url: https://ai-api-gateway.app.baizhi.cloud/api/anthropic
+  model: deepseek-flash
+  api_key_env: BAIZHI_API_KEY
+  max_tokens: 4096
+  tools_enabled: true
+storage:
+  db_path: data/practice.db
+controller:
+  thresholds:
+  - 30
+  - 50
+  - 70
+  - 100
+  max_steps: 200
+  parallel_agents: 1
+harness:
+  protocol: arena
+  competition_locked: false
+  arena:
+    base_url: http://10.201.0.105:8090
+    auto_start: true
+    max_envs: 3
+    client_timeout_seconds: 40

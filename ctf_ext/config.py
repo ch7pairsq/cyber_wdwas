@@ -159,7 +159,7 @@ def _validate_config(cfg):
             errors.append("download.{} must be >= 0 (0 = fail closed)".format(key))
 
     harness = cfg.get("harness") or {}
-    if harness.get("protocol") not in ("mock", "official"):
+    if harness.get("protocol") not in ("mock", "official", "arena"):
         errors.append("harness.protocol must be 'mock' or 'official'")
     if harness.get("protocol") == "official" and not harness.get("official_sdk_ready"):
         errors.append("harness.protocol=official requires official_sdk_ready=true (SDK not yet obtained)")

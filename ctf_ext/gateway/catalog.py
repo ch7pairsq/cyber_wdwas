@@ -177,8 +177,44 @@ def _spec(name: str, description: str, command: str, builder, schema: Dict[str, 
     )
 
 
+def _arena_http_argv(arguments, root):
+    """把模型参数转成 arena_http.py 的固定 argv；host 必须是 IP。"""
+    host = str(arguments.get("host") or "").strip()
+    port = int(arguments.get("port"))
+    method = str(arguments.get("method") or "GET").upper()
+    path = str(arguments.get("path") or "/")
+    body = str(arguments.get("body") or "")
+    headers = arguments.get("headers") or []
+    argv = ["python3", "/app/ctf_ext/gateway/arena_http.py",
+            "--host", host, "--port", str(port), "--method", method, "--path", path]
+    if body:
+        argv += ["--body", body]
+    if isinstance(headers, list):
+        for h in headers[:10]:
+            if isinstance(h, str) and ":" in h:
+                argv += ["--header", h]
+    return argv
+
+
+_ARENA_HTTP_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "host": {"type": "string", "description": "题目服务 IP（start 返回的 container_addr）"},
+        "port": {"type": "integer"},
+        "method": {"type": "string", "enum": ["GET", "POST", "PUT", "HEAD", "OPTIONS"]},
+        "path": {"type": "string"},
+        "body": {"type": "string"},
+        "headers": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["host", "port"],
+}
+
+
 def default_specs() -> List[ToolSpec]:
     return [
+        _spec("arena_http", "向本次题目的服务地址发送受限 HTTP 请求（仅限 attempt 网段，走隧道）。响应为 JSON：status_line/headers/body。",
+              "python3", _arena_http_argv, _ARENA_HTTP_SCHEMA,
+              risk_level="arena_target", timeout=30.0, max_output_bytes=120_000),
         _spec("file_info", "识别文件类型与魔数。", "file", _file_info, _schema()),
         _spec("strings", "提取可打印字符串，可限制最小长度。", "strings", _strings, _schema("min_len")),
         _spec("hexdump", "按字节查看文件头部或片段。", "xxd", _hexdump, _schema("length")),

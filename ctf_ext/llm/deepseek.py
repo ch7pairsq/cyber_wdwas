@@ -177,6 +177,8 @@ class DeepSeekProvider(ModelProvider):
                                 or not isinstance(arguments, dict)):
                             raise ProviderError("tool call is not permitted")
                         tool_calls.append({"id": call_id, "name": name, "input": arguments})
+                    elif block.get("type") in ("thinking", "redacted_thinking"):
+                        continue  # 网关可返回推理块；跳过，不参与文本拼接
                     else:
                         raise ProviderError("non-text/tool response is not permitted")
                 text = "".join(text_parts)

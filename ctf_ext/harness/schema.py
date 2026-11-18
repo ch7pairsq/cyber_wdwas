@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-SUPPORTED_PROTOCOLS = {"v1-mock"}
+SUPPORTED_PROTOCOLS = {"v1-mock", "v1-arena"}
 
 EXIT_OK = 0
 EXIT_CONFIG_ERROR = 2
