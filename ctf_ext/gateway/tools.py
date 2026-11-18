@@ -1,7 +1,7 @@
 """工具注册表：ToolSpec / ToolResult 与执行护栏（附录 B.3、§15.3、§16.2）。
 
 执行前必须通过：注册检查 → 风险评估 → 工作目录约束 → 并发上限 → 命令白名单。
-证据策略：raw 存原文；summary 存截断预览；hash_only 只登记哈希。
+证据策略：raw/summary 均归档原文；summary 只在活跃上下文截断；hash_only 只登记哈希。
 """
 from __future__ import annotations
 
@@ -16,9 +16,6 @@ from typing import Any, Callable, Dict, Optional, Sequence
 from .policy import REQUIRE_APPROVAL, Decision, PolicyDenied, PolicyEngine
 from .sandbox import run_command
 from ..runtime.control import BudgetExceeded, LoopDetected
-
-SUMMARY_PREVIEW_BYTES = 12000
-
 
 @dataclass
 class ToolSpec:
@@ -38,6 +35,10 @@ class ToolSpec:
     command: str = ""
     # 只接受结构化参数，由调用方在进入 shell 前构造固定 argv。
     argv_builder: Optional[Callable[[Dict[str, Any], Optional[Path]], Sequence[str]]] = None
+    # 指定某个字符串参数经 stdin 传给固定 argv（如 python_exec 的代码体），
+    # 避免代码进 argv 撞引号/长度限制。空串 = 不经 stdin。
+    stdin_argument: str = ""
+    stdin_max_bytes: int = 0
 
 
 @dataclass
@@ -120,10 +121,18 @@ class ToolRegistry:
             return ToolResult(status="denied", error_code="INVALID_ARGUMENTS")
         if not argv or (spec.command and Path(argv[0]).name != spec.command):
             return ToolResult(status="denied", error_code="TOOL_COMMAND_MISMATCH")
-        return self.execute(name, argv, cwd=cwd, control=control)
+        stdin_data = b""
+        if spec.stdin_argument:
+            value = arguments.get(spec.stdin_argument)
+            if not isinstance(value, str) or not value.strip():
+                return ToolResult(status="denied", error_code="INVALID_ARGUMENTS")
+            if spec.stdin_max_bytes and len(value.encode("utf-8")) > spec.stdin_max_bytes:
+                return ToolResult(status="denied", error_code="INVALID_ARGUMENTS")
+            stdin_data = value.encode("utf-8")
+        return self.execute(name, argv, cwd=cwd, control=control, stdin_data=stdin_data)
 
     def execute(self, name: str, argv: Sequence[str], cwd: Optional[str] = None, *,
-                control=None) -> ToolResult:
+                control=None, stdin_data: bytes = b"") -> ToolResult:
         name_decision = self._policy.decide_tool_name(name)
         if name_decision.action != "allow":
             return ToolResult(status="denied", error_code=name_decision.reason_code)
@@ -166,7 +175,8 @@ class ToolRegistry:
                                       evidence_id=cached["evidence_id"], command_id=cached["id"],
                                       bytes_read=len(output.encode("utf-8")))
             raw = run_command(argv, self._policy, timeout=spec.timeout_seconds,
-                              max_output_bytes=spec.max_output_bytes, cwd=cwd)
+                              max_output_bytes=spec.max_output_bytes, cwd=cwd,
+                              input_data=stdin_data)
             duration = int((time.time() - started) * 1000)
             output = str(raw["output"])
             evidence_id = self._store_evidence(spec, output)
@@ -219,4 +229,5 @@ class ToolRegistry:
             return self._evidence.put_bytes(data, kind=kind)
         if spec.evidence_policy == "hash_only":
             return self._evidence.put_hash(hashlib.sha256(data).hexdigest(), kind="hash:" + spec.name)
-        return self._evidence.put_bytes(data[:SUMMARY_PREVIEW_BYTES], kind="summary:" + spec.name)
+        # 预览在 Worker 层生成；归档不能截断，否则尾部线索无法回读或通过 Gate。
+        return self._evidence.put_bytes(data, kind="tool:" + spec.name)

@@ -7,13 +7,15 @@ from .policy import PolicyEngine
 
 
 def run_command(argv: Sequence[str], policy: PolicyEngine, timeout: float = 30.0,
-                max_output_bytes: int = 200_000, cwd: Optional[str] = None) -> Dict[str, object]:
+                max_output_bytes: int = 200_000, cwd: Optional[str] = None,
+                input_data: bytes = b"") -> Dict[str, object]:
     """先过策略，再执行；超时杀整个进程组；输出超限截断并标记。"""
     from .execution import capture
     policy.enforce(policy.decide_command(argv))
     # 本地执行器不是安全沙箱，不能把 cwd/进程组当作容器隔离。
     policy.enforce(policy.decide_sandbox(available=False))
-    result = capture(argv, cwd=cwd, timeout=timeout, limit=max_output_bytes)
+    result = capture(argv, cwd=cwd, timeout=timeout, limit=max_output_bytes,
+                     input_data=input_data)
     return {
         "status": "timeout" if result["timed_out"] else "ok",
         "returncode": result["returncode"],

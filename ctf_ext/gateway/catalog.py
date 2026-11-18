@@ -169,12 +169,14 @@ def _schema_bytes() -> Dict[str, Any]:
 
 def _spec(name: str, description: str, command: str, builder, schema: Dict[str, Any],
           *, timeout: float = 30.0, max_output_bytes: int = 200_000,
-          risk_level: str = "read", idempotent: bool = True) -> ToolSpec:
+          risk_level: str = "read", idempotent: bool = True,
+          stdin_argument: str = "", stdin_max_bytes: int = 0) -> ToolSpec:
     return ToolSpec(
         name=name, version="debian-bookworm", description=description + DESCRIPTION_PREFIX,
         risk_level=risk_level, allowed_scope="challenge", timeout_seconds=timeout,
         max_output_bytes=max_output_bytes, concurrency_limit=1, idempotent=idempotent,
         evidence_policy="raw", command=command, input_schema=schema, argv_builder=builder,
+        stdin_argument=stdin_argument, stdin_max_bytes=stdin_max_bytes,
     )
 
 
@@ -250,8 +252,32 @@ _EVIDENCE_DIGEST_SCHEMA = {
 }
 
 
+def _python_exec_argv(arguments, root):
+    """python_exec：固定 argv，代码体经 stdin（stdin_argument 管道），不进 argv。"""
+    # 用系统解释器（与 pwntools 同环境，含预装 crypto/图像库），不用 venv。
+    return ["/usr/bin/python3",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "python_exec.py")]
+
+
+_PYTHON_EXEC_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "code": {
+            "type": "string",
+            "maxLength": 20000,
+            "description": "完整解题代码（一次一段）；print() 输出到 stdout 会被回传，报错时 traceback 会回传，据此修改重试",
+        },
+    },
+    "required": ["code"],
+}
+
+
 def default_specs() -> List[ToolSpec]:
     return [
+        _spec("python_exec", "在工作区内执行一段 Python 解题代码（crypto 运算、编码链、自定义解析、隐写像素处理等），代码经 stdin 提交；print 输出与 traceback 都会回传。",
+              "python3", _python_exec_argv, _PYTHON_EXEC_SCHEMA,
+              risk_level="execute", idempotent=False, timeout=120.0,
+              max_output_bytes=130_000, stdin_argument="code", stdin_max_bytes=20000),
         _spec("evidence_digest", "按证据 id 一次性汇总多个证据文件原文，供跨文件证据关联与矛盾排查（只读）。连续卡住或线索多时优先使用。",
               "python3", _evidence_digest_argv, _EVIDENCE_DIGEST_SCHEMA,
               risk_level="read", timeout=30.0, max_output_bytes=130_000),
