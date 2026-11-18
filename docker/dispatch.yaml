@@ -1,0 +1,33 @@
+# local 指子进程在 dispatcher 容器内运行，不是回到宿主机。
+# 默认只用确定性 Mock；不挂载 Docker socket，也不创建子 Docker 容器。
+server: "http://cairn-server:8000"
+runtime:
+  execution: local
+  worker_healthcheck: startup_only
+  interval: 2
+  max_workers: 1
+  max_running_projects: 1
+  max_project_workers: 1
+  healthcheck_timeout: 5
+  prompt_group: mock
+tasks:
+  bootstrap:
+    timeout: 20
+    conclude_timeout: 10
+  reason:
+    timeout: 10
+    max_intents: 1
+  explore:
+    timeout: 20
+    conclude_timeout: 10
+local:
+  workspace_root: /workspaces
+  completed_action: keep
+common_env: {}
+workers:
+  - name: container-mock
+    type: mock
+    task_types: [bootstrap, reason, explore]
+    max_running: 1
+    priority: 0
+    env: {}

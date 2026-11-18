@@ -115,12 +115,12 @@ def test_timeout_and_rate_limit_are_reported_not_retried():
     board, ev, claim, sha = _setup()
     provider = FakeProvider([ProviderTimeout("slow")])
     result = LlmWorker(provider, evidence_check=ev.verify).work(claim, {})
-    assert result.status == "blocked" and result.outcome == "timeout"
+    assert result.status == "failed" and result.outcome == "timeout"
     assert len(provider.calls) == 1
 
     provider = FakeProvider([RateLimited("429")])
     result = LlmWorker(provider, evidence_check=ev.verify).work(claim, {})
-    assert result.status == "blocked" and result.failure_reason == "rate_limited"
+    assert result.status == "failed" and result.failure_reason == "rate_limited"
 
 
 def test_prompt_file_is_used_as_system_prompt():

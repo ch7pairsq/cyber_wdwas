@@ -10,7 +10,8 @@ from ctf_ext.store.evidence import EvidenceStore
 
 
 def _registry(evidence=None, work_root=None, **policy_kwargs):
-    kwargs = dict(command_allowlist=("echo",), sandbox_required=True)
+    # 本组只测试本地 echo 的注册/证据；真实隔离要求由框架安全回归单独覆盖。
+    kwargs = dict(command_allowlist=("echo",), sandbox_required=False)
     kwargs.update(policy_kwargs)
     policy = PolicyEngine(PolicyConfig(**kwargs))
     return ToolRegistry(policy, evidence_store=evidence, work_root=work_root)

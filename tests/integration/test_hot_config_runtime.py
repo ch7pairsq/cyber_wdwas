@@ -14,7 +14,7 @@ def _config():
         "budget": {"per_intent_seconds": 600, "per_challenge_seconds": 900},
         "download": {"max_single_bytes": 0, "max_total_bytes": 0},
         "policy": {"authorized_scope": [], "command_allowlist": []},
-        "model": {"provider": "deepseek"},
+        "model": {"provider": "baizhi_anthropic"},
         "storage": {"db_path": "unused.db"},
         "harness": {"protocol": "mock", "official_sdk_ready": False, "competition_locked": False},
     }

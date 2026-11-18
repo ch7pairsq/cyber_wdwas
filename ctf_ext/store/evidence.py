@@ -13,6 +13,7 @@ import os
 import shutil
 import sqlite3
 import time
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -26,9 +27,18 @@ class EvidenceStore:
 
     def __init__(self, root, db: sqlite3.Connection, max_bytes: int = 64 * 1024 * 1024):
         self._root = Path(root)
-        self._root.mkdir(parents=True, exist_ok=True)
+        self._ensure_private_dir(self._root)
         self._db = db
         self._max_bytes = max_bytes
+
+    @staticmethod
+    def _ensure_private_dir(path: Path) -> None:
+        """证据可能含 Flag/凭据：目录 0700，文件 0600（§15.2）。"""
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            os.chmod(str(path), 0o700)
+        except OSError:
+            pass
 
     def put_bytes(self, data: bytes, kind: str = "raw") -> str:
         if len(data) > self._max_bytes:
@@ -36,12 +46,39 @@ class EvidenceStore:
         sha = hashlib.sha256(data).hexdigest()
         path = self._root / sha[:2] / sha
         if not path.exists():
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_suffix(".tmp")
-            tmp.write_bytes(data)
-            os.replace(str(tmp), str(path))
+            self._ensure_private_dir(path.parent)
+            self._atomic_write(path, data)
         self._register(sha, kind, str(path), len(data))
         return sha
+
+    @staticmethod
+    def _fsync_dir(path: Path) -> None:
+        try:
+            fd = os.open(str(path), os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        except OSError:
+            pass
+
+    @classmethod
+    def _atomic_write(cls, path: Path, data: bytes) -> None:
+        temporary = path.with_name(path.name + ".tmp-" + uuid.uuid4().hex)
+        try:
+            with temporary.open("wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            try:
+                os.chmod(str(temporary), 0o600)
+            except OSError:
+                pass
+            os.replace(str(temporary), str(path))
+            cls._fsync_dir(path.parent)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
 
     def put_file(self, path, kind: str = "raw") -> str:
         """复制文件到证据库，源文件保持不变。"""
@@ -56,10 +93,21 @@ class EvidenceStore:
         sha = h.hexdigest()
         dest = self._root / sha[:2] / sha
         if not dest.exists():
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            tmp = dest.with_suffix(".tmp")
-            shutil.copyfile(str(p), str(tmp))
-            os.replace(str(tmp), str(dest))
+            self._ensure_private_dir(dest.parent)
+            tmp = dest.with_name(dest.name + ".tmp-" + uuid.uuid4().hex)
+            try:
+                shutil.copyfile(str(p), str(tmp))
+                try:
+                    os.chmod(str(tmp), 0o600)
+                except OSError:
+                    pass
+                with tmp.open("rb") as handle:
+                    os.fsync(handle.fileno())
+                os.replace(str(tmp), str(dest))
+                self._fsync_dir(dest.parent)
+            finally:
+                if tmp.exists():
+                    tmp.unlink()
         self._register(sha, kind, str(dest), size)
         return sha
 
@@ -75,8 +123,10 @@ class EvidenceStore:
             return False
         if not row["path"]:
             return True  # hash_only：只证明当时计算过该哈希
-        path = Path(row["path"])
-        if not path.exists() or path.stat().st_size != row["bytes"]:
+        raw = Path(row["path"])
+        path = raw.resolve()
+        root = self._root.resolve()
+        if raw.is_symlink() or root not in path.parents or not path.exists() or path.stat().st_size != row["bytes"]:
             return False
         h = hashlib.sha256()
         with path.open("rb") as fh:
@@ -93,4 +143,6 @@ class EvidenceStore:
             "INSERT OR IGNORE INTO evidence(sha256, kind, path, bytes, created_at) VALUES (?,?,?,?,?)",
             (sha, kind, path, size, time.time()),
         )
-        self._db.commit()
+        # 若调用方已开启事务（例如结果写入），由调用方统一提交，避免提前提交半笔状态。
+        if not self._db.in_transaction:
+            self._db.commit()

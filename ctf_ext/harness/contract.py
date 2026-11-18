@@ -93,6 +93,10 @@ def validate_worker_output(payload: Dict[str, Any], evidence_check=None) -> Dict
     if answer is not None:
         _error(errors, isinstance(answer, str) and bool(answer.strip()),
                "candidate_answer must be a non-empty string or null")
+        # 平台提交与证据匹配都只接受 flag{...}（见 flag_gate.normalized_flag）；
+        # 在契约层拦截格式错误，可让它进入修复轮而不是到 Gate 才静默拒绝。
+        _error(errors, isinstance(answer, str) and bool(FLAG_RE.fullmatch(answer.strip())),
+               "candidate_answer must look like flag{...}")
         _error(errors, bool(evidence_ids),
                "candidate_answer requires at least one evidence_id")
 

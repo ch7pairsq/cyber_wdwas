@@ -1,0 +1,490 @@
+{
+  "schema_version": 1,
+  "description": "离线 CTF 工具链清单：构建期安装，运行期只调用；版本与许可由包管理器及镜像内 copyright 固化。",
+  "policy": {
+    "install_phase": "docker-build",
+    "runtime_install": false,
+    "runtime_download": false,
+    "runtime_network": false,
+    "package_sources": [
+      "debian-apt-official"
+    ],
+    "notes": "比赛容器不得执行 pip/apt/uv/npm；工具必须来自基础镜像或构建期 apt。"
+  },
+  "tiers": [
+    "core",
+    "ctf",
+    "optional"
+  ],
+  "tools": [
+    {
+      "name": "file",
+      "package": "file",
+      "source": "apt",
+      "bins": [
+        "file"
+      ],
+      "tier": "core",
+      "installed_by_default": true,
+      "allowlist": true,
+      "risk": "read",
+      "license": "BSD-2-Clause",
+      "notes": "文件类型识别"
+    },
+    {
+      "name": "binutils",
+      "package": "binutils",
+      "source": "apt",
+      "bins": [
+        "strings",
+        "objdump",
+        "readelf",
+        "nm"
+      ],
+      "tier": "core",
+      "installed_by_default": true,
+      "allowlist": true,
+      "risk": "read",
+      "license": "GPL-3.0-or-later",
+      "notes": "strings/objdump/readelf/nm"
+    },
+    {
+      "name": "unzip",
+      "package": "unzip",
+      "source": "apt",
+      "bins": [
+        "unzip"
+      ],
+      "tier": "core",
+      "installed_by_default": true,
+      "allowlist": true,
+      "risk": "read",
+      "license": "Info-ZIP",
+      "notes": "ZIP 解压"
+    },
+    {
+      "name": "zip",
+      "package": "zip",
+      "source": "apt",
+      "bins": [
+        "zip"
+      ],
+      "tier": "core",
+      "installed_by_default": true,
+      "allowlist": true,
+      "risk": "read",
+      "license": "Info-ZIP",
+      "notes": "ZIP 打包"
+    },
+    {
+      "name": "xz-utils",
+      "package": "xz-utils",
+      "source": "apt",
+      "bins": [
+        "xz"
+      ],
+      "tier": "core",
+      "installed_by_default": true,
+      "allowlist": true,
+      "risk": "read",
+      "license": "Public-Domain AND LGPL-2.1-or-later",
+      "notes": "xz 压缩"
+    },
+    {
+      "name": "bzip2",
+      "package": "bzip2",
+      "source": "apt",
+      "bins": [
+        "bzip2"
+      ],
+      "tier": "core",
+      "installed_by_default": true,
+      "allowlist": true,
+      "risk": "read",
+      "license": "BSD-4-Clause",
+      "notes": "bzip2 压缩"
+    },
+    {
+      "name": "zstd",
+      "package": "zstd",
+      "source": "apt",
+      "bins": [
+        "zstd"
+      ],
+      "tier": "core",
+      "installed_by_default": true,
+      "allowlist": true,
+      "risk": "read",
+      "license": "BSD-3-Clause OR GPL-2.0-only",
+      "notes": "zstd 压缩"
+    },
+    {
+      "name": "openssl",
+      "package": "openssl",
+      "source": "apt",
+      "bins": [
+        "openssl"
+      ],
+      "tier": "core",
+      "installed_by_default": true,
+      "allowlist": true,
+      "risk": "compute",
+      "license": "Apache-2.0",
+      "notes": "证书/编码/摘要"
+    },
+    {
+      "name": "xxd",
+      "package": "xxd",
+      "source": "apt",
+      "bins": [
+        "xxd"
+      ],
+      "tier": "core",
+      "installed_by_default": true,
+      "allowlist": true,
+      "risk": "read",
+      "license": "Vim",
+      "notes": "十六进制查看"
+    },
+    {
+      "name": "jq",
+      "package": "jq",
+      "source": "apt",
+      "bins": [
+        "jq"
+      ],
+      "tier": "core",
+      "installed_by_default": true,
+      "allowlist": true,
+      "risk": "read",
+      "license": "MIT",
+      "notes": "JSON 查询"
+    },
+    {
+      "name": "ca-certificates",
+      "package": "ca-certificates",
+      "source": "apt",
+      "bins": [
+        "update-ca-certificates"
+      ],
+      "tier": "core",
+      "installed_by_default": true,
+      "allowlist": false,
+      "risk": "read",
+      "license": "MPL-2.0",
+      "notes": "TLS 根证书"
+    },
+    {
+      "name": "python3",
+      "package": null,
+      "source": "base",
+      "bins": [
+        "python3"
+      ],
+      "tier": "core",
+      "installed_by_default": true,
+      "allowlist": true,
+      "risk": "execute",
+      "license": "PSF-2.0",
+      "notes": "基础解释器；不用于安装依赖"
+    },
+    {
+      "name": "binwalk",
+      "package": "binwalk",
+      "source": "apt",
+      "bins": [
+        "binwalk"
+      ],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": true,
+      "risk": "read",
+      "license": "MIT",
+      "notes": "固件/嵌套文件识别"
+    },
+    {
+      "name": "foremost",
+      "package": "foremost",
+      "source": "apt",
+      "bins": [
+        "foremost"
+      ],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": true,
+      "risk": "read",
+      "license": "Public-Domain",
+      "notes": "文件雕复"
+    },
+    {
+      "name": "sleuthkit",
+      "package": "sleuthkit",
+      "source": "apt",
+      "bins": [
+        "fls",
+        "icat",
+        "mmls"
+      ],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": true,
+      "risk": "read",
+      "license": "CPL-1.0",
+      "notes": "磁盘镜像/文件系统取证"
+    },
+    {
+      "name": "exiftool",
+      "package": "libimage-exiftool-perl",
+      "source": "apt",
+      "bins": [
+        "exiftool"
+      ],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": true,
+      "risk": "read",
+      "license": "Artistic-2.0 OR GPL-1.0-or-later",
+      "notes": "元数据读取"
+    },
+    {
+      "name": "7zip",
+      "package": "p7zip-full",
+      "source": "apt",
+      "bins": [
+        "7z"
+      ],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": true,
+      "risk": "read",
+      "license": "LGPL-2.1-or-later",
+      "notes": "多格式归档"
+    },
+    {
+      "name": "steghide",
+      "package": "steghide",
+      "source": "apt",
+      "bins": [
+        "steghide"
+      ],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": true,
+      "risk": "read",
+      "license": "GPL-2.0-only",
+      "notes": "隐写提取"
+    },
+    {
+      "name": "pngcheck",
+      "package": "pngcheck",
+      "source": "apt",
+      "bins": [
+        "pngcheck"
+      ],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": true,
+      "risk": "read",
+      "license": "MIT",
+      "notes": "PNG 结构检查"
+    },
+    {
+      "name": "gdb",
+      "package": "gdb",
+      "source": "apt",
+      "bins": [
+        "gdb"
+      ],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": true,
+      "risk": "execute",
+      "license": "GPL-3.0-or-later",
+      "notes": "动态调试；不得联网"
+    },
+    {
+      "name": "strace",
+      "package": "strace",
+      "source": "apt",
+      "bins": [
+        "strace"
+      ],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": true,
+      "risk": "execute",
+      "license": "LGPL-2.1-or-later",
+      "notes": "系统调用跟踪"
+    },
+    {
+      "name": "ltrace",
+      "package": "ltrace",
+      "source": "apt",
+      "bins": [
+        "ltrace"
+      ],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": true,
+      "risk": "execute",
+      "license": "GPL-2.0-only",
+      "notes": "库调用跟踪"
+    },
+    {
+      "name": "upx",
+      "package": null,
+      "source": "manual",
+      "bins": [
+        "upx"
+      ],
+      "tier": "optional",
+      "installed_by_default": false,
+      "allowlist": false,
+      "risk": "execute",
+      "license": "GPL-2.0-or-later",
+      "notes": "bookworm-backports 才提供；默认不装，避免基础源不稳定"
+    },
+    {
+      "name": "qemu-user",
+      "package": "qemu-user",
+      "source": "apt",
+      "bins": [
+        "qemu-x86_64",
+        "qemu-aarch64"
+      ],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": true,
+      "risk": "execute",
+      "license": "GPL-2.0-only",
+      "notes": "跨架构运行；仅本地题目"
+    },
+    {
+      "name": "poppler-utils",
+      "package": "poppler-utils",
+      "source": "apt",
+      "bins": [
+        "pdftotext",
+        "pdfinfo"
+      ],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": true,
+      "risk": "read",
+      "license": "GPL-2.0-or-later",
+      "notes": "PDF 取证"
+    },
+    {
+      "name": "qrencode",
+      "package": "qrencode",
+      "source": "apt",
+      "bins": [
+        "qrencode"
+      ],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": true,
+      "risk": "read",
+      "license": "LGPL-2.1-or-later",
+      "notes": "QR 生成"
+    },
+    {
+      "name": "zbar-tools",
+      "package": "zbar-tools",
+      "source": "apt",
+      "bins": [
+        "zbarimg"
+      ],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": true,
+      "risk": "read",
+      "license": "LGPL-2.1-or-later",
+      "notes": "QR/条码识别"
+    },
+    {
+      "name": "reverse-pwntools",
+      "package": "python3-pwntools",
+      "source": "apt",
+      "bins": [
+        "pwn"
+      ],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": true,
+      "risk": "execute",
+      "license": "MIT",
+      "notes": "pwntools 4.9（Debian）：ELF/ROP/汇编辅助；依赖 capstone 与 ROPgadget"
+    },
+    {
+      "name": "ropgadget",
+      "package": "python3-ropgadget",
+      "source": "apt",
+      "bins": [
+        "ROPgadget"
+      ],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": true,
+      "risk": "read",
+      "license": "BSD-3-Clause",
+      "notes": "ROP gadget 搜索"
+    },
+    {
+      "name": "checksec",
+      "package": "checksec",
+      "source": "apt",
+      "bins": [
+        "checksec"
+      ],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": true,
+      "risk": "read",
+      "license": "BSD-3-Clause",
+      "notes": "ELF 缓解措施检查"
+    },
+    {
+      "name": "patchelf",
+      "package": "patchelf",
+      "source": "apt",
+      "bins": [
+        "patchelf"
+      ],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": true,
+      "risk": "execute",
+      "license": "GPL-3.0-or-later",
+      "notes": "ELF 解释器/RPATH 调整；白名单仅用于受控 pwn 场景"
+    },
+    {
+      "name": "capstone-tool",
+      "package": "capstone-tool",
+      "source": "apt",
+      "bins": [
+        "cstool"
+      ],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": true,
+      "risk": "read",
+      "license": "BSD-3-Clause",
+      "notes": "Capstone CLI 反汇编（架构 + 字节输入）"
+    },
+    {
+      "name": "z3",
+      "package": "z3",
+      "source": "apt",
+      "bins": [
+        "z3"
+      ],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": true,
+      "risk": "compute",
+      "license": "MIT",
+      "notes": "SMT 求解器；用于约束求解"
+    }
+  ]
+}

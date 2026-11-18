@@ -4,27 +4,37 @@
 - 主循环不持有唯一状态，一切以黑板（SQLite）为准；
 - 每轮先回收过期租约，崩溃 Worker 的 Intent 会被重新派发；
 - 结果先过 B.2 契约校验，再幂等写入；事实写入前校验证据（D.1-3）；
-- 提交走 Submitter 状态机，UNKNOWN 只查询不重发（附录 E）。
+- 提交走 Submitter 状态机，UNKNOWN 只查询不重发（附录 E）；
+- 单题执行有硬超时，超时只放出该题，不拖死整场；
+- 单次异常只记录并继续，连续失败达到上限才停止主循环。
 """
 from __future__ import annotations
 
-import hashlib
 import time
 from typing import Dict, List, Optional
 
 from ..domain.models import Challenge
 from ..harness.contract import ContractViolation, validate_worker_output
-from ..harness.schema import RunSummary, Submission
-from ..store.blackboard import DuplicateStrategy, IntentDraft, WriteReceipt
-from .metrics import Metrics
-from .watchdog import recover_expired_leases
+from ..harness.schema import RunSummary
+from ..store import lessons as lesson_store
+from ..store.blackboard import (
+    DuplicateStrategy, EvidenceNotRegistered, IntentDraft, StaleWrite, WriteReceipt, WorkerResult,
+)
+from .heartbeat import HeartbeatFile
+from .lease import LeaseHeartbeat
+from .metrics import Metrics, framework_metrics
+from .watchdog import ClaimTimeout, DeadlineGuard, recover_expired_leases
 
 
 class Orchestrator:
     def __init__(self, harness, board, submitter, scheduler, worker,
                  evidence=None, metrics: Optional[Metrics] = None,
                  worker_name: str = "worker-1", lease_seconds: float = 60.0,
-                 clock=time.time, hot_config=None, policy_engine=None, db=None):
+                 clock=time.time, hot_config=None, policy_engine=None, db=None,
+                 state_store=None, flag_gate=None, gateway=None, reviewer_factory=None,
+                 claim_timeout_seconds: float = 90.0, configured_max_workers: int = 1,
+                 heartbeat_path: Optional[str] = None, max_consecutive_errors: int = 3,
+                 retry_backoff_seconds: float = 0.0, poll_seconds: float = 0.1):
         self._harness = harness
         self._board = board
         self._submitter = submitter
@@ -40,18 +50,33 @@ class Orchestrator:
         self._policy = policy_engine
         self._db = db
         self._config_version = hot_config.version if hot_config else 0
+        self._state, self._gate, self._gateway = state_store, flag_gate, gateway
+        self._reviewer_factory = reviewer_factory
+        self._claim_timeout = max(0.0, float(claim_timeout_seconds))
+        self._configured_max_workers = max(1, int(configured_max_workers))
+        self._heartbeat = HeartbeatFile(heartbeat_path) if heartbeat_path else None
+        self._max_consecutive_errors = max(1, int(max_consecutive_errors))
+        self._retry_backoff = max(0.0, float(retry_backoff_seconds))
+        self._poll_seconds = max(0.01, float(poll_seconds))
 
     # ------------------------------------------------------------ hot config
     def apply_config(self, cfg: Dict) -> None:
         """把通过校验的配置应用到调度/租约/下载限额（§13 动态配置）。"""
         conc = cfg.get("concurrency") or {}
         self._scheduler.set_limits(conc.get("max_project_workers"),
-                                   conc.get("max_running_projects"))
+                                   conc.get("max_running_projects"),
+                                   (cfg.get("runtime") or {}).get("retry_backoff_seconds"))
+        self._retry_backoff = max(0.0, float((cfg.get("runtime") or {}).get("retry_backoff_seconds")
+                                             if (cfg.get("runtime") or {}).get("retry_backoff_seconds") is not None
+                                             else self._retry_backoff))
         if (cfg.get("runtime") or {}).get("worker_lease_seconds"):
             self._lease = float(cfg["runtime"]["worker_lease_seconds"])
+        budget = cfg.get("budget") or {}
+        if budget.get("claim_timeout_seconds"):
+            self._claim_timeout = max(0.0, float(budget["claim_timeout_seconds"]))
         dl = cfg.get("download") or {}
         if self._policy is not None:
-            self._policy.update_limits(dl.get("max_single_bytes"), dl.get("max_total_bytes"))
+            self._policy.update_limits(dl.get("max_single_bytes", 0), dl.get("max_total_bytes", 0))
 
     def reload_config_if_changed(self) -> bool:
         if self._hot is None or not self._hot.reload_if_changed():
@@ -79,7 +104,8 @@ class Orchestrator:
             ))
             self._challenges[task.challenge_id] = {
                 "challenge_id": task.challenge_id, "name": task.name,
-                "category": task.category, "attachments": list(task.attachments),
+                "category": task.category, "description": task.description,
+                "attachments": list(task.attachments), "difficulty_level": task.difficulty_level,
             }
             try:
                 self._board.add_intent(IntentDraft(
@@ -89,6 +115,18 @@ class Orchestrator:
                 ))
             except DuplicateStrategy:
                 pass  # 重启后复用已存在的探索方向
+        if self._gateway is not None:
+            self._gateway.recover_legacy()
+            try:
+                self._collect_submissions(self._gateway.pump())
+            except Exception as exc:  # 提交恢复失败不能阻断解题
+                self._board.append_event("gateway_recover_failed", "", {"error": type(exc).__name__})
+        if self._state is not None:
+            for row in self._state.db.execute("SELECT challenge_id FROM sessions"):
+                _, saved = self._state.load(row["challenge_id"])
+                self._board.append_event("session_resumed", row["challenge_id"],
+                                         {"steps": saved["steps"], "evidence_ids": saved["evidence_ids"]})
+                self._metrics.incr("sessions.resumed")
         self._board.append_event("run_started", "", {"tasks": len(tasks)})
         return tasks
 
@@ -115,12 +153,63 @@ class Orchestrator:
 
     def step(self) -> Optional[Dict]:
         """领取并执行一个 Intent；无可用任务返回 None。"""
+        if self._gateway is not None:
+            try:
+                self._collect_submissions(self._gateway.pump())
+            except Exception as exc:  # 单个提交状态异常不能拖垮主循环
+                self._board.append_event("gateway_pump_failed", "", {"error": type(exc).__name__})
+                self._metrics.incr("submissions.pump_errors")
         claim = self._scheduler.pick_next(self._worker_name, lease_seconds=self._lease)
         if claim is None:
             return None
         self._metrics.incr("intents.claimed")
-        challenge = self._challenges.get(claim.challenge_id) or self._board.get_challenge(claim.challenge_id) or {}
-        result = self._worker.work(claim, challenge)
+        with LeaseHeartbeat(self._board, claim, self._worker_name, self._lease):
+            return self._execute_claim(claim)
+
+    def _challenge_context(self, claim) -> Dict:
+        challenge = dict(self._challenges.get(claim.challenge_id)
+                         or self._board.get_challenge(claim.challenge_id) or {})
+        try:
+            challenge["handoff"] = self._board.handoff(claim.challenge_id)
+        except Exception as exc:
+            self._board.append_event("handoff_failed", claim.intent_id, {"error": type(exc).__name__})
+        return challenge
+
+    def _timeout_result(self, claim, started: float) -> WorkerResult:
+        return WorkerResult(
+            claim.intent_id, self._worker_name, claim.attempt_no, claim.challenge_id,
+            claim.strategy_key, "failed", summary=["单题执行超时，已释放该题供后续重试"],
+            outcome="timeout", failure_reason="claim_timeout",
+            preconditions=[], actions=["执行单题"], ruled_out=[],
+            next_best_action="缩小尝试范围或提高单题预算后重试",
+            resource_usage={"wall_seconds": round(max(0.0, self._clock() - started), 3),
+                            "model_tokens": 0, "tool_calls": 0},
+        )
+
+    def _execute_claim(self, claim):
+        challenge = self._challenge_context(claim)
+        started = self._clock()
+        try:
+            if self._claim_timeout:
+                with DeadlineGuard(self._claim_timeout):
+                    result = self._worker.work(claim, challenge)
+            else:
+                result = self._worker.work(claim, challenge)
+        except ClaimTimeout:
+            result = self._timeout_result(claim, started)
+            self._metrics.incr("claim.timeouts")
+            self._board.append_event("claim_timeout", claim.intent_id,
+                                     {"seconds": self._claim_timeout})
+        except Exception as exc:
+            # 单次 Worker 异常只让该 Intent 可重试；不能把整个题目永久 stopped。
+            result = WorkerResult(claim.intent_id, self._worker_name, claim.attempt_no,
+                claim.challenge_id, claim.strategy_key, "failed",
+                summary=["执行中断，证据与状态已保留"], outcome="error",
+                failure_reason=type(exc).__name__, actions=["执行单题"],
+                next_best_action="按退避策略重试",
+                resource_usage={"wall_seconds": round(max(0.0, self._clock() - started), 3),
+                                "model_tokens": 0, "tool_calls": 0})
+            self._board.append_event("worker_failed", claim.intent_id, {"error": type(exc).__name__})
         result.owner = self._worker_name
 
         check = self._evidence.verify if self._evidence is not None else None
@@ -132,6 +221,10 @@ class Orchestrator:
             result.status, result.outcome = "failed", "error"
             result.candidate_answer = None
             result.failure_reason = "failed_contract: " + "; ".join(exc.errors)
+            result.facts = []
+            result.evidence_ids = [eid for eid in result.evidence_ids if check is not None and check(eid)]
+            # 契约失败是可重试的单次失败；终态由控制器的预算/停滞策略决定，
+            # 不能因为一次格式错误就把整题永久 stopped。
 
         usage = result.resource_usage or {}
         tokens = int(usage.get("model_tokens") or 0)
@@ -145,7 +238,80 @@ class Orchestrator:
             self._metrics.observe("attempt.wall_seconds", wall)
 
         key = "{}-{}".format(claim.intent_id, claim.attempt_no)
-        receipt: WriteReceipt = self._board.write_result(result, key)
+        decision = None
+        submission_key = []
+        if result.candidate_answer:
+            if self._gate is None or self._gateway is None:
+                self._board.append_event("candidate_rejected", claim.challenge_id, {"reason": "校验器或提交网关未配置"})
+            else:
+                if self._reviewer_factory is not None:
+                    self._gate.reviewer = self._reviewer_factory(claim.challenge_id)
+                try:
+                    gate_budget = max(0.05, self._claim_timeout - (self._clock() - started)) if self._claim_timeout else 0
+                    if gate_budget:
+                        with DeadlineGuard(gate_budget):
+                            decision = self._gate.evaluate(claim.challenge_id, result.candidate_answer, result.evidence_ids)
+                    else:
+                        decision = self._gate.evaluate(claim.challenge_id, result.candidate_answer, result.evidence_ids)
+                except ClaimTimeout:
+                    self._metrics.incr("gates.timeout")
+                    self._board.append_event("gate_timeout", claim.intent_id, {"seconds": gate_budget})
+                    result.status, result.outcome = "failed", "timeout"
+                    result.failure_reason = "gate_timeout"
+                    result.candidate_answer = None
+                    decision = None
+        if decision is not None and decision.status == "confirmed":
+            # Gate 已确认时 Intent 必须终止；否则 Worker 写 partial 会让同一候选
+            # 在租约释放后再次被领取，重复消耗预算。
+            result.status = "completed"
+        def persist_gate(db):
+            if decision is not None:
+                self._gate.record(db, decision)
+                if decision.status == "confirmed":
+                    submission_key.append(self._gateway.enqueue(db, decision))
+
+        receipt = None
+        try:
+            receipt = self._board.write_result(result, key, transaction_hook=persist_gate)
+        except (StaleWrite, EvidenceNotRegistered, KeyError) as exc:
+            self._metrics.incr("results.write_failed")
+            self._board.append_event("result_write_failed", claim.intent_id,
+                                     {"error": type(exc).__name__})
+            self._release_write_failure(claim)
+            return {"intent_id": claim.intent_id, "challenge_id": claim.challenge_id,
+                    "status": "write_failed", "outcome": result.outcome,
+                    "candidate_answer": None, "submission": None, "gate": None,
+                    "write_error": type(exc).__name__}
+        except Exception as exc:
+            self._metrics.incr("results.write_failed")
+            self._board.append_event("result_write_failed", claim.intent_id,
+                                     {"error": type(exc).__name__})
+            self._release_write_failure(claim)
+            return {"intent_id": claim.intent_id, "challenge_id": claim.challenge_id,
+                    "status": "write_failed", "outcome": result.outcome,
+                    "candidate_answer": None, "submission": None, "gate": None,
+                    "write_error": type(exc).__name__}
+
+        if receipt.first and receipt.attempt_id:
+            try:
+                with self._board._write() as db:
+                    lesson_store.record_attempt(db, receipt.attempt_id,
+                                                challenge.get("category"), commit=False)
+                self._metrics.incr("knowledge.lessons")
+            except Exception as exc:
+                self._board.append_event("lesson_failed", claim.intent_id,
+                                         {"error": type(exc).__name__})
+
+        if decision is not None:
+            self._metrics.incr("gates." + decision.level + "." + decision.status)
+            self._board.append_event("flag_gate", claim.challenge_id, {
+                "decision_id": decision.id, "status": decision.status, "level": decision.level,
+                "command_id": decision.command_id, "evidence_ids": decision.evidence_ids,
+                "reason": decision.reason, "gates": decision.gates})
+            if decision.status == "confirmed" and self._state is not None:
+                self._state.patch(claim.challenge_id, lambda s: s.update(status="confirmed"))
+                _, current = self._state.load(claim.challenge_id)
+                self._metrics.observe("challenge.steps", current["steps"])
         self._metrics.incr("intents.completed" if receipt.first else "intents.duplicate_write")
         self._board.append_event("result_written", claim.intent_id, {
             "status": result.status, "outcome": result.outcome, "first": receipt.first,
@@ -160,41 +326,104 @@ class Orchestrator:
                                          {"error": type(exc).__name__})
 
         submission = None
-        if result.candidate_answer:
-            idem = "sub-" + hashlib.sha256(
-                (claim.challenge_id + "|" + result.candidate_answer).encode("utf-8")
-            ).hexdigest()[:16]
-            receipt_sub = self._submitter.submit(Submission(
-                challenge_id=claim.challenge_id, answer=result.candidate_answer,
-                idempotency_key=idem, evidence_ids=list(result.evidence_ids),
-            ))
-            submission = {"status": receipt_sub.status, "receipt_id": receipt_sub.receipt_id,
-                          "idempotency_key": idem}
-            self._metrics.incr("submissions." + receipt_sub.status.lower())
-            self._board.append_event("submission", claim.challenge_id, submission)
+        if submission_key:
+            submission = {"status": "DRAFT", "receipt_id": "", "idempotency_key": submission_key[0]}
+            try:
+                self._collect_submissions(self._gateway.pump())
+            except Exception as exc:
+                self._board.append_event("gateway_pump_failed", "", {"error": type(exc).__name__})
 
         return {"intent_id": claim.intent_id, "challenge_id": claim.challenge_id,
                 "status": result.status, "outcome": result.outcome,
-                "candidate_answer": result.candidate_answer, "submission": submission}
+                "candidate_answer": result.candidate_answer, "submission": submission,
+                "gate": {"status": decision.status, "level": decision.level} if decision else None}
+
+    def _release_write_failure(self, claim) -> None:
+        """写结果失败时释放 Intent，避免白等整个租约；租约已被别人拿走则安全失败。"""
+        try:
+            self._board.release(claim.intent_id, self._worker_name, "write_failed",
+                                attempt_no=claim.attempt_no)
+        except Exception as exc:
+            self._board.append_event("release_failed", claim.intent_id,
+                                     {"error": type(exc).__name__})
+
+    def _solved(self):
+        return {r[0] for r in self._board._db.execute("SELECT DISTINCT challenge_id FROM submissions WHERE status='ACCEPTED'")}
+
+    def _collect_submissions(self, events):
+        for event in events:
+            status = event.get("status", "unknown")
+            self._metrics.incr("submissions." + str(status).lower())
+            self._metrics.observe("submissions.latency_seconds", float(event.get("latency_seconds") or 0))
 
     # ---------------------------------------------------------------- run loop
     def run(self, max_seconds: float = 120.0) -> Dict:
         deadline = self._clock() + max_seconds
+        factory = getattr(self._worker, "_control_factory", None)
+        if factory is not None:
+            factory.deadline = deadline
+        self._touch_heartbeat()
         tasks = self.bootstrap()
-        recover_expired_leases(self._board)  # 启动即恢复未完成租约（§17.4）
+        try:
+            recover_expired_leases(self._board)  # 启动即恢复未完成租约（§17.4）
+        except Exception as exc:
+            self._board.append_event("watchdog_failed", "", {"error": type(exc).__name__})
         results: List[Dict] = []
-        solved = set()
+        solved = self._solved()
+        consecutive_errors = 0
         while self._clock() < deadline and len(solved) < len(tasks):
-            self.reload_config_if_changed()
-            recover_expired_leases(self._board)
-            out = self.step()
+            self._touch_heartbeat()
+            try:
+                self.reload_config_if_changed()
+                recover_expired_leases(self._board)
+                out = self.step()
+            except KeyboardInterrupt:
+                raise
+            except Exception as exc:
+                consecutive_errors += 1
+                self._board.append_event("step_failed", "", {"error": type(exc).__name__,
+                                                             "consecutive": consecutive_errors})
+                self._metrics.incr("runtime.step_errors")
+                if consecutive_errors >= self._max_consecutive_errors:
+                    self._board.append_event("run_aborted", "", {"reason": "consecutive_errors",
+                                                                  "count": consecutive_errors})
+                    break
+                continue
+            consecutive_errors = 0
             if out is None:
+                if self._scheduler.has_waiting_work() and self._clock() < deadline:
+                    time.sleep(min(self._poll_seconds, max(0.0, deadline - self._clock())))
+                    continue
                 break
             results.append(out)
             if out["submission"] and out["submission"]["status"] == "ACCEPTED":
                 solved.add(out["challenge_id"])
+        if self._gateway is not None:
+            try:
+                self._collect_submissions(self._gateway.flush(timeout=min(1, max(0, deadline - self._clock()))))
+            except Exception as exc:
+                self._board.append_event("gateway_flush_failed", "", {"error": type(exc).__name__})
+            self._gateway.close()
+        solved = self._solved()
+        for result in results:
+            if result["submission"]:
+                row = self._board._db.execute("SELECT status,receipt_id,idempotency_key FROM submissions WHERE challenge_id=? ORDER BY updated_at DESC LIMIT 1", (result["challenge_id"],)).fetchone()
+                if row:
+                    result["submission"] = dict(row)
+        self._metrics.incr("submissions.pending", self._board._db.execute("SELECT COUNT(*) FROM submissions WHERE status IN ('DRAFT','SENDING','UNKNOWN')").fetchone()[0])
         summary = RunSummary(results=results, notes="orch:{}".format(self._worker_name))
         finalized = self._harness.finalize(summary)
         self._board.append_event("run_finished", "", {"results": len(results), "solved": sorted(solved)})
         return {"tasks": len(tasks), "solved": sorted(solved), "results": results,
-                "metrics": self._metrics.snapshot(), "finalized": finalized}
+                "metrics": self._metrics.snapshot(), "finalized": finalized,
+                "quality": framework_metrics(self._board._db, len(tasks)) if self._state else {},
+                "execution": {"mode": "serial", "configured_max_workers": self._configured_max_workers,
+                              "effective_parallel": 1,
+                              "claim_timeout_seconds": self._claim_timeout,
+                              "retry_backoff_seconds": self._retry_backoff,
+                              "isolation": {"agent": "per_challenge_workspace",
+                                            "container": "not_verified"}}}
+
+    def _touch_heartbeat(self) -> None:
+        if self._heartbeat is not None:
+            self._heartbeat.touch()

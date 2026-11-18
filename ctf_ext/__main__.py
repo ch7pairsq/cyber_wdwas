@@ -1,7 +1,7 @@
 """命令行入口：python3 -m ctf_ext run [--mode mock|llm] [--config FILE] ...
 
 无模型凭证时用 Mock Harness + RuleBasedWorker 跑通完整链路（附录 F-4）；
---mode llm 需要 DEEPSEEK_API_KEY 与 requests，缺少时明确报错而不是静默降级。
+--mode llm 仅使用公司代理与 DeepSeek；缺少 BAIZHI_API_KEY 时拒绝调用。
 """
 from __future__ import annotations
 
@@ -14,14 +14,21 @@ import sys
 from .config import HotConfig
 from .domain.migrate import migrate
 from .gateway.policy import PolicyConfig, PolicyEngine
+from .gateway.catalog import register_default_tools
+from .gateway.tools import ToolRegistry
 from .harness.mock import MockHarnessAdapter, default_practice_challenges
 from .harness.submit import Submitter
-from .llm.deepseek import DEFAULT_BASE_URL, DEFAULT_MODEL, DeepSeekProvider
+from .harness.flag_gate import FlagGate, ProviderReviewer
+from .harness.gateway import SubmitGateway
+from .store.session import StateStore
+from .runtime.control import SessionControl, StepPolicy
+from .llm.deepseek import DEFAULT_BASE_URL, DEFAULT_MODEL, DEFAULT_KEY_ENV, PROVIDER_NAME, DeepSeekProvider
 from .runtime.dashboard import write_dashboard
 from .runtime.llm_worker import LlmWorker
 from .runtime.orchestrator import Orchestrator
 from .runtime.scheduler import Scheduler
 from .runtime.worker import RuleBasedWorker
+from .skills.loader import SkillLoader
 from .store.blackboard import Blackboard
 from .store.evidence import EvidenceStore
 
@@ -30,10 +37,13 @@ PROMPT_PATH = os.path.join(os.path.dirname(__file__), "prompts", "worker.md")
 
 def _make_provider(cfg):
     model = cfg.get("model") or {}
-    key_env = model.get("api_key_env", "DEEPSEEK_API_KEY")
+    if model.get("provider", PROVIDER_NAME) != PROVIDER_NAME:
+        raise SystemExit("only the company Anthropic-compatible gateway is allowed")
+    key_env = model.get("api_key_env", DEFAULT_KEY_ENV)
     if not os.environ.get(key_env):
         raise SystemExit("model key missing: export {} before --mode llm".format(key_env))
     return DeepSeekProvider(
+        api_key=os.environ[key_env],
         base_url=model.get("base_url", DEFAULT_BASE_URL),
         model=model.get("model", DEFAULT_MODEL),
         timeout=float(model.get("request_timeout_seconds") or 120),
@@ -41,9 +51,11 @@ def _make_provider(cfg):
 
 
 def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
-                  config_path: str = None, data_root: str = "."):
+                  config_path: str = None, data_root: str = ".",
+                  heartbeat_path: str = None, claim_timeout_seconds: float = None):
     os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
-    conn = sqlite3.connect(db_path, check_same_thread=False)
+    # 显式事务模式：黑板用 BEGIN IMMEDIATE 控制边界，证据登记不能留下隐式事务。
+    conn = sqlite3.connect(db_path, isolation_level=None, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     migrate(conn)
 
@@ -63,6 +75,7 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
         max_single_bytes=int(download.get("max_single_bytes") or 0),
         max_total_bytes=int(download.get("max_total_bytes") or 0),
         competition_locked=bool((cfg.get("harness") or {}).get("competition_locked", False)),
+        sandbox_required=bool(policy_cfg.get("sandbox_required", True)),
     ))
     board = Blackboard(conn, evidence_check=evidence.verify)
 
@@ -72,20 +85,68 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
                          "use harness.protocol=mock until the official adapter is provided")
     harness = MockHarnessAdapter(default_practice_challenges())
     submitter = Submitter(harness, policy_engine=policy, db=conn)
+    state = StateStore(board, evidence, os.path.join(os.path.dirname(db_path), "workspaces"))
+    tool_registry = None
+    if bool((cfg.get("model") or {}).get("tools_enabled", True)):
+        tool_registry = ToolRegistry(policy, evidence_store=evidence, work_root=str(state.root),
+                                     state_store=state, environment="offline-image")
+        register_default_tools(tool_registry)
+    budget = cfg.get("budget") or {}
+    controller = cfg.get("controller") or {}
+    step_policy = StepPolicy(tuple(controller.get("thresholds", (30, 50, 70, 100))))
+    state.pin_policy({"thresholds": list(step_policy.thresholds), "model": DEFAULT_MODEL, "parallel_agents": 1})
+    def control_factory(challenge_id):
+        return SessionControl(state, challenge_id, policy=step_policy,
+            max_steps=int(controller.get("max_steps", 100)),
+            max_tokens=int(budget.get("max_model_tokens_per_intent") or 50000),
+            max_tools=int(budget.get("max_tool_calls_per_intent") or 100),
+            seconds=float(budget.get("per_challenge_seconds") or 900),
+            absolute_deadline=getattr(control_factory, "deadline", None))
+    gate = FlagGate(state)
+    gateway = SubmitGateway(state, harness, policy)
 
     conc = cfg.get("concurrency") or {}
+    runtime_cfg = cfg.get("runtime") or {}
     scheduler = Scheduler(board,
                           max_project_workers=int(conc.get("max_project_workers") or 1),
-                          max_running_projects=int(conc.get("max_running_projects") or 1))
+                          max_running_projects=int(conc.get("max_running_projects") or 1),
+                          state_store=state, step_policy=step_policy,
+                          retry_backoff_seconds=float(runtime_cfg.get("retry_backoff_seconds") or 0))
+    if mode == "fallback":
+        scheduler.set_limits(1, 1)
     if mode == "llm":
-        worker = LlmWorker(_make_provider(cfg), prompt_path=PROMPT_PATH,
-                           evidence_check=evidence.verify)
+        provider = _make_provider(cfg)
+        try:
+            skill_loader = SkillLoader()
+        except (OSError, ValueError):
+            skill_loader = None  # 技能索引损坏不能阻断解题
+        worker = LlmWorker(provider, prompt_path=PROMPT_PATH,
+                           state_store=state, control_factory=control_factory,
+                           evidence_check=evidence.verify,
+                           timeout=float((cfg.get("model") or {}).get("request_timeout_seconds") or 120),
+                           max_tokens=int((cfg.get("model") or {}).get("max_tokens") or 4096),
+                           skill_loader=skill_loader,
+                           tool_registry=tool_registry,
+                           tool_cwd=lambda cid: str(state.workspace(cid)))
     else:
-        worker = RuleBasedWorker(harness, evidence_store=evidence)
+        worker = RuleBasedWorker(harness, evidence_store=evidence,
+                                 state_store=state, control_factory=control_factory)
+    if claim_timeout_seconds is None:
+        claim_timeout_seconds = float(budget.get("claim_timeout_seconds")
+                                      or budget.get("per_intent_seconds") or 90)
     orch = Orchestrator(harness, board, submitter, scheduler, worker, evidence=evidence,
-                        hot_config=hot, policy_engine=policy, db=conn)
+                        hot_config=hot, policy_engine=policy, db=conn,
+                        state_store=state, flag_gate=gate, gateway=gateway,
+                        claim_timeout_seconds=claim_timeout_seconds,
+                        configured_max_workers=int(conc.get("max_workers") or 1),
+                        heartbeat_path=heartbeat_path,
+                        retry_backoff_seconds=float(runtime_cfg.get("retry_backoff_seconds") or 0),
+                        poll_seconds=float(runtime_cfg.get("intent_poll_seconds") or 0.1),
+                        reviewer_factory=(lambda cid: ProviderReviewer(provider, control_factory(cid))) if mode == "llm" else None)
     if hot is not None:
         orch.apply_config(hot.config)
+    if mode == "fallback":
+        scheduler.set_limits(1, 1)
     return orch
 
 
@@ -103,16 +164,20 @@ def main(argv=None) -> int:
     run.add_argument("--seconds", type=float, default=60.0)
     run.add_argument("--db", default="data/practice.db")
     run.add_argument("--evidence", default="data/evidence")
-    run.add_argument("--mode", choices=("mock", "llm"), default="mock")
+    run.add_argument("--mode", choices=("mock", "llm", "fallback"), default="mock")
     run.add_argument("--config", default=None, help="JSON/YAML 配置；热更新按文件内容变化生效")
     run.add_argument("--report", default=None, help="把运行结果写成 JSON")
     run.add_argument("--dashboard", default=None, help="生成静态 HTML 看板")
     run.add_argument("--bench", default=None, help="压测结果 JSON，供看板展示")
+    run.add_argument("--heartbeat-file", default=None, help="写入进程心跳，供外部 supervisor 判活")
+    run.add_argument("--claim-timeout", type=float, default=None, help="单题硬超时秒数；0 表示关闭")
     args = parser.parse_args(argv)
     if args.command != "run":
         parser.print_help()
         return 2
-    orch = build_runtime(args.db, args.evidence, mode=args.mode, config_path=args.config)
+    orch = build_runtime(args.db, args.evidence, mode=args.mode, config_path=args.config,
+                         heartbeat_path=args.heartbeat_file,
+                         claim_timeout_seconds=args.claim_timeout)
     out = orch.run(max_seconds=args.seconds)
     _emit(out, args.report)
     if args.dashboard:

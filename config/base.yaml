@@ -7,20 +7,24 @@ runtime:
   worker_lease_seconds: 180
   heartbeat_seconds: 15
   intent_poll_seconds: 2
+  retry_backoff_seconds: 2    # 失败/超时后的重试冷却，避免故障热循环和单题饿死
 
 app:
   mode: "practice"
   run_deadline_seconds: 14400   # 4h 基线，含优雅停机余量
 
 concurrency:
+  # max_workers 是容量上限；当前执行器固定串行，实际并行度见运行报告 execution。
   max_workers: 4
   max_project_workers: 2
   max_running_projects: 3
   model_max_inflight: 3
+  executor: "serial"          # 单引擎验收前不启用并行执行器
 
 budget:
   per_challenge_seconds: 900
   per_strategy_seconds: 600
+  claim_timeout_seconds: 120  # 单题硬超时：到点释放该题，避免拖死整场
   tool_timeout: 120
   grace_seconds: 2
 
@@ -32,20 +36,69 @@ download:
 policy:
   # 允许访问的目标；练习/比赛按官方范围填写
   authorized_scope: []
-  # 命令白名单（basename）
-  command_allowlist: ["python3", "unzip", "strings", "file", "binwalk", "sage", "openssl"]
+  web_search: false
+  runtime_install: false
+  sandbox_required: true   # 本地执行器不是安全沙箱；工具调用默认拒绝，只有测试/显式配置才关闭
+  # 命令白名单（basename）：只能调用镜像内已预装的工具；运行期禁止安装。
+  # 与 docker/toolchain.json 的 allowlist=true 条目保持同步；sage/ghidra 等重型工具不入默认镜像。
+  command_allowlist:
+    - python3
+    - unzip
+    - zip
+    - xz
+    - bzip2
+    - zstd
+    - strings
+    - objdump
+    - readelf
+    - nm
+    - file
+    - binwalk
+    - foremost
+    - fls
+    - icat
+    - mmls
+    - exiftool
+    - 7z
+    - steghide
+    - pngcheck
+    - openssl
+    - xxd
+    - jq
+    - gdb
+    - pwn
+    - ROPgadget
+    - cstool
+    - checksec
+    - patchelf
+    - z3
+    - strace
+    - ltrace
+    - qemu-x86_64
+    - qemu-aarch64
+    - pdftotext
+    - pdfinfo
+    - qrencode
+    - zbarimg
 
 model:
-  provider: "deepseek"
-  base_url: "https://api.deepseek.com"
+  provider: "baizhi_anthropic"
+  base_url: "https://ai-api-gateway.app.baizhi.cloud/api/anthropic"
   model: "deepseek-flash"
-  api_key_env: "DEEPSEEK_API_KEY"
+  api_key_env: "BAIZHI_API_KEY"  # 仅运行时注入，不写进镜像或配置快照
   max_tokens: 4096
+  tools_enabled: true        # 网关不支持 Anthropic tools 时可显式关闭；关闭后不发送工具定义
 
 storage:
   db_path: "data/ctf.db"
   evidence_root: "data/evidence"
   evidence_max_bytes: 67108864
+
+# 优化 1.0：默认阈值仅是候选，需用真实 10–20 题校准；运行数据库内冻结。
+controller:
+  thresholds: [30, 50, 70, 100]
+  max_steps: 100
+  parallel_agents: 1          # 单引擎验收前禁止开启多路对冲
 
 harness:
   protocol: "mock"

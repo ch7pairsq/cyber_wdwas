@@ -143,16 +143,31 @@ class PolicyEngine:
         if not argv:
             return Decision(DENY, "COMMAND_EMPTY")
         program = argv[0].rsplit("/", 1)[-1]
+        installers = {"pip", "pip3", "uv", "uvx", "apt", "apt-get", "dpkg", "yum", "dnf", "apk", "conda", "mamba", "poetry", "npm", "npx", "pnpm", "yarn", "easy_install"}
+        if program in installers or program.startswith(("pip3.", "pip2.")):
+            return Decision(DENY, "RUNTIME_INSTALL_FORBIDDEN")
+        if program.startswith("python"):
+            args = list(argv[1:])
+            for index, arg in enumerate(args):
+                module = args[index + 1] if arg == "-m" and index + 1 < len(args) else (arg[2:] if arg.startswith("-m") else "")
+                if module.split(".", 1)[0] in {"pip", "ensurepip", "uv", "poetry"}:
+                    return Decision(DENY, "RUNTIME_INSTALL_FORBIDDEN")
         if program not in self._cfg.command_allowlist:
             return Decision(DENY, "COMMAND_NOT_ALLOWED")
+        return Decision(ALLOW)
+
+    def decide_tool_name(self, name: str) -> Decision:
+        normalized = name.lower().replace("-", "_").replace(".", "_")
+        if "search" in normalized or normalized.startswith(("browser", "browse", "web_")):
+            return Decision(DENY, "WEB_SEARCH_FORBIDDEN")
         return Decision(ALLOW)
 
     # --------------------------------------------------------------- tool risk
     def decide_tool_risk(self, risk_level: str) -> Decision:
         """B.4：execute 类工具在无沙箱时拒绝，需要审批时返回 require_approval。"""
+        if risk_level == "network":
+            return Decision(DENY, "GENERIC_NETWORK_TOOL_FORBIDDEN")
         if risk_level == "execute":
-            if not self._cfg.sandbox_required:
-                return Decision(ALLOW)
             if self._cfg.require_approval_for_execute:
                 return Decision(REQUIRE_APPROVAL, "TOOL_APPROVAL")
         return Decision(ALLOW)

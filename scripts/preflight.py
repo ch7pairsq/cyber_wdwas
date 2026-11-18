@@ -13,7 +13,9 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "docker"))
 
+STRICT = "--strict" in sys.argv
 results = []
 
 
@@ -56,9 +58,20 @@ def main() -> int:
         check("competition lock explicit", "competition_locked" in cfg["harness"],
               "locked={}".format(cfg["harness"].get("competition_locked")))
         allowlist = (cfg.get("policy") or {}).get("command_allowlist") or []
-        missing = [b for b in allowlist if shutil.which(b) is None]
+        missing_allow = [b for b in allowlist if shutil.which(b) is None]
+        try:
+            from install_toolchain import load_manifest, verify_tools
+            manifest = load_manifest(ROOT / "docker" / "toolchain.json")
+            missing_toolchain = verify_tools(manifest, "ctf")
+            check("toolchain manifest", True, "{} tools; build-time install only".format(
+                len(manifest["tools"])))
+        except Exception as exc:  # noqa: BLE001
+            missing_toolchain = ["manifest:" + type(exc).__name__]
+            check("toolchain manifest", False, str(exc), warn=not STRICT)
+        missing = sorted(set(missing_allow + missing_toolchain))
         check("allowlisted tools installed", not missing,
-              "missing={} (按需安装，不临时下载)".format(missing), warn=True)
+              "missing={} (工具随镜像构建，不临时下载；--strict 时缺失即失败)".format(missing),
+              warn=not STRICT)
 
     # migration + 证据库可写
     tmp = tempfile.mkdtemp(prefix="preflight-")
@@ -126,8 +139,8 @@ def main() -> int:
     except PolicyDenied as exc:
         check("ssrf private-network blocked", exc.reason_code == "PRIVATE_NETWORK", exc.reason_code)
 
-    key = os.environ.get("DEEPSEEK_API_KEY", "")
-    check("DEEPSEEK_API_KEY", bool(key), "set before running real model calls", warn=True)
+    key = os.environ.get("BAIZHI_API_KEY", "")
+    check("BAIZHI_API_KEY", bool(key), "inject company gateway key at runtime only", warn=True)
 
     failed = [r for r in results if r[0] == "FAIL"]
     print("-" * 50)

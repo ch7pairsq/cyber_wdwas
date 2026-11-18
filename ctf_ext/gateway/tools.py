@@ -6,14 +6,16 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Optional, Sequence
+from typing import Any, Callable, Dict, Optional, Sequence
 
 from .policy import REQUIRE_APPROVAL, Decision, PolicyDenied, PolicyEngine
 from .sandbox import run_command
+from ..runtime.control import BudgetExceeded, LoopDetected
 
 SUMMARY_PREVIEW_BYTES = 12000
 
@@ -32,6 +34,10 @@ class ToolSpec:
     concurrency_limit: int = 1
     idempotent: bool = True
     evidence_policy: str = "summary"  # raw | summary | hash_only
+    # 固定主命令可防止同名工具被替换为另一个白名单命令。
+    command: str = ""
+    # 只接受结构化参数，由调用方在进入 shell 前构造固定 argv。
+    argv_builder: Optional[Callable[[Dict[str, Any], Optional[Path]], Sequence[str]]] = None
 
 
 @dataclass
@@ -46,13 +52,19 @@ class ToolResult:
     bytes_written: int = 0
     retryable: bool = False
     error_code: str = ""
+    command_id: Optional[str] = None
 
 
 class ToolRegistry:
-    def __init__(self, policy: PolicyEngine, evidence_store=None, work_root: Optional[str] = None):
+    def __init__(self, policy: PolicyEngine, evidence_store=None, work_root: Optional[str] = None,
+                 state_store=None, environment: str = "offline-image",
+                 target_revision: str = "runtime"):
         self._policy = policy
         self._evidence = evidence_store
         self._work_root = Path(work_root).resolve() if work_root else None
+        self._state = state_store
+        self._environment = environment
+        self._target_revision = target_revision
         self._specs: Dict[str, ToolSpec] = {}
         self._semaphores: Dict[str, threading.BoundedSemaphore] = {}
         self._lock = threading.Lock()
@@ -65,6 +77,11 @@ class ToolRegistry:
     def specs(self):
         return list(self._specs.values())
 
+    def tool_definitions(self):
+        """供模型使用的工具定义；不暴露 argv 构造器。"""
+        return [{"name": spec.name, "description": spec.description,
+                 "input_schema": dict(spec.input_schema)} for spec in self._specs.values()]
+
     def _check_cwd(self, cwd: Optional[str]):
         if not cwd or self._work_root is None:
             return
@@ -72,7 +89,44 @@ class ToolRegistry:
         if self._work_root not in target.parents and target != self._work_root:
             raise PolicyDenied("PATH", "cwd outside work root: {}".format(target))
 
-    def execute(self, name: str, argv: Sequence[str], cwd: Optional[str] = None) -> ToolResult:
+    def execute_arguments(self, name: str, arguments: Dict[str, Any],
+                          cwd: Optional[str] = None, *, control=None) -> ToolResult:
+        """把模型给的 JSON 参数转成固定 argv；未知工具/参数一律拒绝。"""
+        spec = self._specs.get(name)
+        if not spec:
+            return ToolResult(status="denied", error_code="TOOL_UNAVAILABLE")
+        if not isinstance(arguments, dict) or spec.argv_builder is None:
+            return ToolResult(status="denied", error_code="INVALID_ARGUMENTS")
+        schema = spec.input_schema or {}
+        properties = schema.get("properties") or {}
+        required = schema.get("required") or []
+        if any(name not in arguments for name in required) or any(name not in properties for name in arguments):
+            return ToolResult(status="denied", error_code="INVALID_ARGUMENTS")
+        # 路径必须以当前题目工作区为基准，而不是全局 work_root：
+        # 否则相对路径会落到共享根目录，绝对路径还能跨题读取。
+        root = self._work_root
+        challenge_id = getattr(control, "challenge_id", None)
+        if challenge_id and self._state is not None:
+            try:
+                root = self._state.workspace(challenge_id)
+            except (OSError, ValueError):
+                return ToolResult(status="denied", error_code="PATH")
+        if root is None and any(key in properties for key in ("path", "file", "dir")):
+            # 没有工作区基准时不能安全解析路径，模型调用必须拒绝而不是放行。
+            return ToolResult(status="denied", error_code="PATH")
+        try:
+            argv = [str(item) for item in spec.argv_builder(arguments, root)]
+        except (TypeError, ValueError, KeyError):
+            return ToolResult(status="denied", error_code="INVALID_ARGUMENTS")
+        if not argv or (spec.command and Path(argv[0]).name != spec.command):
+            return ToolResult(status="denied", error_code="TOOL_COMMAND_MISMATCH")
+        return self.execute(name, argv, cwd=cwd, control=control)
+
+    def execute(self, name: str, argv: Sequence[str], cwd: Optional[str] = None, *,
+                control=None) -> ToolResult:
+        name_decision = self._policy.decide_tool_name(name)
+        if name_decision.action != "allow":
+            return ToolResult(status="denied", error_code=name_decision.reason_code)
         spec = self._specs.get(name)
         if not spec:
             return ToolResult(status="denied", error_code="TOOL_UNAVAILABLE")
@@ -90,16 +144,46 @@ class ToolRegistry:
             return ToolResult(status="denied", error_code="TOOL_BUSY", retryable=True)
         started = time.time()
         try:
+            if cwd is None and self._state is not None and control is not None:
+                cwd = str(self._state.workspace(control.challenge_id))
+            input_hash = hashlib.sha256(json.dumps(
+                {"argv": list(argv), "cwd": str(cwd or "")}, sort_keys=True).encode()).hexdigest()
+            cache_key = None
+            if self._state is not None and control is not None:
+                cache_key = self._state.cache_key(
+                    control.challenge_id, self._target_revision, self._environment,
+                    spec.name, spec.version, argv, input_hash)
+                try:
+                    control.reserve(spec.name, spec.version, argv, input_hash)
+                except BudgetExceeded:
+                    return ToolResult(status="denied", error_code="BUDGET_EXCEEDED")
+                except LoopDetected:
+                    return ToolResult(status="denied", error_code="LOOP_DETECTED")
+                cached = self._state.cached(cache_key)
+                if cached:
+                    output = self._state.restore_evidence(cached["evidence_id"]).decode("utf-8", "replace")
+                    return ToolResult(status="ok", summary=output[:200], output=output,
+                                      evidence_id=cached["evidence_id"], command_id=cached["id"],
+                                      bytes_read=len(output.encode("utf-8")))
             raw = run_command(argv, self._policy, timeout=spec.timeout_seconds,
                               max_output_bytes=spec.max_output_bytes, cwd=cwd)
             duration = int((time.time() - started) * 1000)
             output = str(raw["output"])
             evidence_id = self._store_evidence(spec, output)
+            complete = (raw["status"] != "timeout" and raw["returncode"] == 0
+                        and not raw["truncated"])
+            command_id = self._record_command(spec, argv, cwd, evidence_id, cache_key, complete,
+                                             raw["returncode"], control)
+            if complete and evidence_id and control is not None:
+                control.progress(evidence_id, "tool:" + spec.name)
+            status = "timeout" if raw["status"] == "timeout" else ("ok" if complete else "error")
             return ToolResult(
-                status="timeout" if raw["status"] == "timeout" else "ok",
+                status=status,
                 summary=output[:200], output=output,
                 truncated=bool(raw["truncated"]), duration_ms=duration,
-                evidence_id=evidence_id, bytes_read=len(output.encode("utf-8")),
+                evidence_id=evidence_id, command_id=command_id,
+                bytes_read=len(output.encode("utf-8")),
+                error_code="" if complete else ("TIMEOUT" if raw["status"] == "timeout" else "COMMAND_FAILED"),
                 retryable=bool(raw["status"] == "timeout" and spec.idempotent),
             )
         except PolicyDenied as exc:
@@ -108,6 +192,23 @@ class ToolRegistry:
             return ToolResult(status="error", error_code=type(exc).__name__, retryable=spec.idempotent)
         finally:
             sem.release()
+
+    def _record_command(self, spec: ToolSpec, argv, cwd, evidence_id, cache_key, complete,
+                        returncode, control) -> Optional[str]:
+        """把工具执行写入 command_log；FlagGate 只认这张表里的完整成功输出。"""
+        if self._state is None or control is None or not evidence_id:
+            return None
+        import uuid
+        command_id = "cmd-" + uuid.uuid4().hex
+        with self._state.board._write() as db:
+            db.execute("INSERT INTO command_log VALUES(?,?,?,?,?,?,?,?,?,?)",
+                       (command_id, control.challenge_id, evidence_id, json.dumps(list(argv)),
+                        spec.version, self._target_revision, self._environment,
+                        returncode, int(bool(complete)), time.time()))
+            if complete and cache_key:
+                db.execute("INSERT OR REPLACE INTO tool_cache VALUES(?,?,?)",
+                           (cache_key, command_id, time.time() + 300))
+        return command_id
 
     def _store_evidence(self, spec: ToolSpec, output: str) -> Optional[str]:
         if self._evidence is None or not output:

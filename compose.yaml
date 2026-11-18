@@ -1,0 +1,86 @@
+name: cyber-wdwas
+
+x-common: &common
+  image: cyber-wdwas:dev
+  build:
+    context: .
+    dockerfile: Dockerfile
+    target: development
+  init: true
+  user: "10001:10001"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  pids_limit: 256
+  mem_limit: 512m
+  cpus: 1.0
+  tmpfs:
+    - /tmp:rw,nosuid,nodev,size=128m,mode=1777
+  networks: [private]
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "2"
+
+services:
+  cairn-server:
+    <<: *common
+    command: ["cairn", "serve", "--host", "0.0.0.0", "--port", "8000", "--db-path", "/var/lib/cairn/cairn.db"]
+    # internal 网络不依赖宿主端口发布；远程访问通过 SSH 到容器 IP。
+    volumes: ["cairn-data:/var/lib/cairn"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/projects', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 6
+    restart: unless-stopped
+
+  cairn-dispatcher:
+    <<: *common
+    command: ["cairn", "dispatch", "--config", "/app/docker/dispatch.yaml"]
+    depends_on:
+      cairn-server:
+        condition: service_healthy
+    volumes: ["cairn-workspaces:/workspaces"]
+    restart: unless-stopped
+
+  ctf-agent:
+    <<: *common
+    profiles: [tools]
+    volumes: ["agent-data:/data"]
+    restart: "no"
+
+  tests:
+    <<: *common
+    profiles: [tools]
+    command: ["bash", "scripts/ci.sh"]
+    # 上游测试需要执行临时假 CLI；仅使用测试卷，保留公共 /tmp 的 noexec。
+    environment:
+      TMPDIR: /app/build
+    volumes: ["test-results:/app/build"]
+    restart: "no"
+
+  ctf-debug:
+    <<: *common
+    profiles: [debug]
+    command: ["python", "-Xfrozen_modules=off", "-m", "debugpy", "--listen", "0.0.0.0:5678", "--wait-for-client", "-m", "ctf_ext", "run", "--mode", "mock", "--seconds", "30", "--db", "/tmp/debug.db", "--evidence", "/tmp/debug-evidence", "--report", "/data/debug-report.json"]
+    # 5678 仅在 internal 网络内监听；SSH 隧道只绑定客户端回环。
+    volumes:
+      - debug-data:/data
+      - ./ctf_ext:/app/ctf_ext:ro
+      - ./config:/app/config:ro
+      - ./cairn/cairn/src:/app/cairn/cairn/src:ro
+    restart: "no"
+
+volumes:
+  cairn-data:
+  cairn-workspaces:
+  agent-data:
+  debug-data:
+  test-results:
+
+networks:
+  private:
+    internal: true

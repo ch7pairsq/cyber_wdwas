@@ -1,4 +1,19 @@
-# 正式覆盖：参赛机会锁 + 官方协议（未就绪前禁止启用，§12.4）
+# 正式覆盖：赛前构建、仅公司 DeepSeek、禁止搜索与运行时安装。
+# 第 2.2 节 Harness 规范待提供；此配置保持 fail closed。
+app:
+  mode: "competition"
+
+model:
+  provider: "baizhi_anthropic"
+  base_url: "https://ai-api-gateway.app.baizhi.cloud/api/anthropic"
+  model: "deepseek-flash"
+  api_key_env: "BAIZHI_API_KEY"
+
+policy:
+  web_search: false
+  runtime_install: false
+  authorized_scope: []  # 官方 Harness 端点待确认；不启用公共网页访问
+
 storage:
   db_path: "data/competition.db"
 

@@ -175,17 +175,31 @@ class Blackboard:
             return intent_id
 
     def claim_intent(self, worker: str, lease_seconds: Optional[float] = None,
-                     challenge_ids: Optional[Sequence[str]] = None) -> Optional[Claim]:
-        """领取一个可执行 Intent；无可用任务返回 None（附录 B.1）。"""
+                     challenge_ids: Optional[Sequence[str]] = None,
+                     max_project_workers=None, max_running_projects=None,
+                     retry_backoff_seconds: float = 0.0) -> Optional[Claim]:
+        """领取一个可执行 Intent；无可用任务返回 None（附录 B.1）。
+
+        FAILED_RETRYABLE 在退避窗口内不可领取，避免故障时热循环和单题饿死。
+        """
         now = time.time()
         lease = lease_seconds or self._lease_default
         with self._write() as db:
             sql = ("SELECT id FROM intents_ext WHERE status IN ('READY','FAILED_RETRYABLE')"
                    " AND (lease_until IS NULL OR lease_until < ?)")
             args: List[Any] = [now]
+            if retry_backoff_seconds and retry_backoff_seconds > 0:
+                sql += " AND (status='READY' OR updated_at <= ?)"
+                args.append(now - float(retry_backoff_seconds))
             if challenge_ids:
                 sql += " AND challenge_id IN ({})".format(",".join("?" * len(challenge_ids)))
                 args.extend(challenge_ids)
+            if max_project_workers is not None:
+                sql += " AND (SELECT COUNT(*) FROM intents_ext r WHERE r.challenge_id=intents_ext.challenge_id AND r.status='RUNNING' AND r.lease_until>?)<?"
+                args.extend([now, max_project_workers])
+            if max_running_projects is not None:
+                sql += " AND ((SELECT COUNT(DISTINCT r.challenge_id) FROM intents_ext r WHERE r.status='RUNNING' AND r.lease_until>?)<? OR EXISTS(SELECT 1 FROM intents_ext r WHERE r.challenge_id=intents_ext.challenge_id AND r.status='RUNNING' AND r.lease_until>?))"
+                args.extend([now, max_running_projects, now])
             sql += " ORDER BY priority DESC, est_tokens ASC, created_at ASC LIMIT 1"
             row = db.execute(sql, args).fetchone()
             if not row:
@@ -209,19 +223,24 @@ class Blackboard:
         with self._write() as db:
             cur = db.execute(
                 "UPDATE intents_ext SET lease_until=MAX(lease_until, ?), updated_at=?"
-                " WHERE id=? AND owner=? AND status='RUNNING'",
-                (time.time() + extend, time.time(), intent_id, worker),
+                " WHERE id=? AND owner=? AND status='RUNNING' AND lease_until>?",
+                (time.time() + extend, time.time(), intent_id, worker, time.time()),
             )
             return cur.rowcount == 1
 
-    def release(self, intent_id: str, worker: str, outcome: str) -> None:
+    def release(self, intent_id: str, worker: str, outcome: str,
+                attempt_no: Optional[int] = None) -> None:
         status = {"success": COMPLETED, "no_signal": COMPLETED}.get(outcome, FAILED_RETRYABLE)
+        sql = ("UPDATE intents_ext SET status=?, owner=NULL, lease_until=NULL, note=?, updated_at=?"
+               " WHERE id=? AND owner=? AND status='RUNNING'")
+        args = (status, "released:" + outcome, time.time(), intent_id, worker)
+        if attempt_no is not None:
+            # 多个进程可能共用 llm/rule-based 名称，必须带 attempt_no 才能
+            # 避免释放另一个进程刚领取的同一 Intent。
+            sql += " AND attempt_no=?"
+            args += (int(attempt_no),)
         with self._write() as db:
-            db.execute(
-                "UPDATE intents_ext SET status=?, owner=NULL, note=?, updated_at=?"
-                " WHERE id=? AND owner=? AND status='RUNNING'",
-                (status, "released:" + outcome, time.time(), intent_id, worker),
-            )
+            db.execute(sql, args)
 
     def list_open(self, challenge_id: Optional[str] = None) -> List[Dict[str, Any]]:
         sql = "SELECT * FROM intents_ext WHERE status IN ('READY','RUNNING','FAILED_RETRYABLE')"
@@ -233,7 +252,7 @@ class Blackboard:
         return [dict(r) for r in self._db.execute(sql, args)]
 
     # ----------------------------------------------------------------- result
-    def write_result(self, result: WorkerResult, idempotency_key: str) -> WriteReceipt:
+    def write_result(self, result: WorkerResult, idempotency_key: str, transaction_hook=None) -> WriteReceipt:
         """幂等写入：同 key 只落库一次；错主/过期写入拒绝（D.1-2、D.4）。"""
         payload = json.dumps({
             "status": result.status, "summary": result.summary, "outcome": result.outcome,
@@ -253,7 +272,8 @@ class Blackboard:
             if not row:
                 raise KeyError("intent not found: " + result.intent_id)
             if (row["owner"] != result.owner or row["attempt_no"] != result.attempt_no
-                    or row["status"] != RUNNING):
+                    or row["status"] != RUNNING or row["lease_until"] is None
+                    or row["lease_until"] <= time.time()):
                 raise StaleWrite("intent {} is owned by {} (attempt {}), writer is {} (attempt {})".format(
                     result.intent_id, row["owner"], row["attempt_no"], result.owner, result.attempt_no))
             if self._evidence_check is not None and result.evidence_ids:
@@ -272,7 +292,14 @@ class Blackboard:
                 return WriteReceipt(first=False, idempotency_key=idempotency_key,
                                     attempt_id=prev["attempt_id"] if prev else None)
             attempt_id = new_id("attempt")
-            new_status = {"completed": COMPLETED, "blocked": READY}.get(result.status, FAILED_RETRYABLE)
+            # 终态由 Worker 的 status 与 outcome 共同决定：completed 但 outcome=error
+            # 仍应重试；blocked 表示需要外部条件（缺附件、预算耗尽），不能留在可领取状态。
+            if result.status == "completed":
+                new_status = COMPLETED if result.outcome in _SUCCESS_LIKE else FAILED_RETRYABLE
+            elif result.status == "blocked":
+                new_status = FAILED
+            else:
+                new_status = FAILED_RETRYABLE
             db.execute(
                 "INSERT INTO attempts(id, intent_id, challenge_id, strategy_key, attempt_key, outcome,"
                 " failure_reason, preconditions, actions, ruled_out, next_best_action, evidence_ids,"
@@ -291,10 +318,16 @@ class Blackboard:
                 "UPDATE results_ext SET attempt_id=? WHERE idempotency_key=?", (attempt_id, idempotency_key)
             )
             db.execute(
-                "UPDATE intents_ext SET status=?, owner=NULL, updated_at=? WHERE id=?",
+                "UPDATE intents_ext SET status=?, owner=NULL, lease_until=NULL, updated_at=? WHERE id=?",
                 (new_status, time.time(), result.intent_id),
             )
+            if transaction_hook is not None:
+                transaction_hook(db)  # 校验决策与 Outbox 同结果原子提交，避免完成后断电丢候选
             return WriteReceipt(first=True, idempotency_key=idempotency_key, attempt_id=attempt_id)
+
+    def get_attempt(self, attempt_id: str) -> Optional[Dict[str, Any]]:
+        row = self._db.execute("SELECT * FROM attempts WHERE id=?", (attempt_id,)).fetchone()
+        return dict(row) if row else None
 
     def recent_attempts(self, challenge_id: str, strategy_key: Optional[str] = None,
                         limit: int = 20) -> List[Dict[str, Any]]:
@@ -307,16 +340,46 @@ class Blackboard:
         args.append(limit)
         return [dict(r) for r in self._db.execute(sql, args)]
 
+    def lesson_context(self, challenge_id: str, limit: int = 6) -> List[Dict[str, Any]]:
+        """本题 + 同领域历史教训；只返回脱敏文本，不返回其他题号。"""
+        from . import lessons as lesson_store
+        challenge = self.get_challenge(challenge_id) or {}
+        return lesson_store.lesson_context(self._db, challenge_id,
+                                           domain=challenge.get("category"), limit=limit)
+
+    def handoff(self, challenge_id: str, max_attempts: int = 5,
+                max_lessons: int = 6) -> Dict[str, Any]:
+        """给 Worker 的最小交接包：近期尝试、教训与开 Intent，均有限量且脱敏。"""
+        from . import lessons as lesson_store
+        def safe(value, limit=300):
+            return lesson_store.sanitize_lesson_text(str(value or ""), limit)
+        attempts = []
+        for row in self.recent_attempts(challenge_id, limit=max_attempts):
+            attempts.append({
+                "strategy_key": safe(row.get("strategy_key"), 80),
+                "outcome": safe(row.get("outcome"), 40),
+                "failure_reason": safe(row.get("failure_reason")),
+                "preconditions": [safe(x, 120) for x in json.loads(row.get("preconditions") or "[]")],
+                "ruled_out": [safe(x, 120) for x in json.loads(row.get("ruled_out") or "[]")],
+                "next_best_action": safe(row.get("next_best_action")),
+            })
+        return {
+            "recent_attempts": attempts,
+            "lessons": self.lesson_context(challenge_id, limit=max_lessons),
+            "open_intents": [
+                {"strategy_key": safe(row.get("strategy_key"), 80), "status": safe(row.get("status"), 40)}
+                for row in self.list_open(challenge_id)[:max_attempts]
+            ],
+        }
+
     def snapshot(self, challenge_id: str, max_items: int = 50) -> Dict[str, Any]:
-        """交接包快照：开 Intent + 近期尝试 + 有效教训（§9、handoff.md）。"""
+        """脱敏后的交接包快照：开 Intent + 近期尝试 + 有效教训（§9、handoff.md）。"""
+        handoff = self.handoff(challenge_id, max_attempts=max_items, max_lessons=max_items)
         return {
             "challenge_id": challenge_id,
-            "open_intents": self.list_open(challenge_id)[:max_items],
-            "recent_attempts": self.recent_attempts(challenge_id, limit=max_items),
-            "lessons": self._db.execute(
-                "SELECT text, tags FROM lessons WHERE challenge_id=? AND superseded=0 ORDER BY created_at DESC LIMIT ?",
-                (challenge_id, max_items),
-            ).fetchall(),
+            "open_intents": handoff["open_intents"][:max_items],
+            "recent_attempts": handoff["recent_attempts"][:max_items],
+            "lessons": handoff["lessons"][:max_items],
         }
 
     def get_challenge(self, challenge_id: str) -> Optional[Dict[str, Any]]:

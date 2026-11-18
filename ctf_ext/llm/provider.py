@@ -28,13 +28,16 @@ class ProviderResponse:
     text: str
     usage: Dict[str, int] = field(default_factory=dict)
     raw: Dict[str, Any] = field(default_factory=dict)
+    tool_calls: List[Dict[str, Any]] = field(default_factory=list)
+    stop_reason: str = ""
 
 
 class ModelProvider(ABC):
     @abstractmethod
-    def complete(self, messages: List[Dict[str, str]], *, system: Optional[str] = None,
+    def complete(self, messages: List[Dict[str, Any]], *, system: Optional[str] = None,
                  json_mode: bool = False, timeout: float = 120.0,
-                 max_tokens: int = 4096) -> ProviderResponse:
+                 max_tokens: int = 4096,
+                 tools: Optional[List[Dict[str, Any]]] = None) -> ProviderResponse:
         ...
 
 

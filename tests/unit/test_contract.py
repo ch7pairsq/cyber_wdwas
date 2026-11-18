@@ -62,3 +62,13 @@ def test_fact_evidence_must_be_registered():
 def test_flag_extraction():
     assert extract_flag("答案：flag{mock_001}") == "flag{mock_001}"
     assert extract_flag("没有答案") is None
+
+
+def test_candidate_answer_must_match_platform_flag_format():
+    bad = _payload(candidate_answer="the password is hunter2")
+    try:
+        validate_worker_output(bad)
+        raise AssertionError("expected ContractViolation")
+    except ContractViolation as exc:
+        assert any("flag{" in e for e in exc.errors)
+    validate_worker_output(_payload(candidate_answer="flag{ok_12345}"))

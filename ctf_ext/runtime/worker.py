@@ -31,9 +31,13 @@ class RuleBasedWorker(Worker):
 
     name = "rule-based"
 
-    def __init__(self, harness, evidence_store=None):
+    def __init__(self, harness, evidence_store=None, state_store=None, control_factory=None, environment=None):
+        import uuid
         self._harness = harness
         self._evidence = evidence_store
+        self._state = state_store
+        self._control_factory = control_factory
+        self._environment = environment or uuid.uuid4().hex
 
     def _read(self, ref: str) -> bytes:
         return self._harness.read_attachment(ref, max_bytes=MAX_ATTACHMENT_BYTES)
@@ -43,6 +47,14 @@ class RuleBasedWorker(Worker):
         texts: List[str] = []
         failures: List[str] = []
         offsets: List[str] = []
+        control = self._control_factory(claim.challenge_id) if self._control_factory else None
+        executor = None
+        if self._state is not None:
+            from ..gateway.execution import CommandExecutor
+            from ..harness.mock import MockHarnessAdapter
+            if not isinstance(self._harness, MockHarnessAdapter):
+                raise PermissionError("本地保底解码只允许 Mock；正式题目必须使用独立容器")
+            executor = CommandExecutor(self._state, control, self._environment, allow_local_mock=True)
         for ref in challenge.get("attachments") or ():
             try:
                 data = self._read(ref)
@@ -52,17 +64,27 @@ class RuleBasedWorker(Worker):
             if self._evidence is not None:
                 evidence_ids.append(self._evidence.put_bytes(data, kind="attachment"))
             text = data.decode("utf-8", "replace")
+            if executor is not None:
+                raw, eid, _, _ = executor.execute_mock_decoder(data, decode=False)
+                text = raw.decode("utf-8", "replace")
+                evidence_ids.append(eid)
             texts.append(text)
             decoded = self._try_base64(text)
             if decoded is not None:
+                if executor is not None:
+                    raw, eid, _, _ = executor.execute_mock_decoder("".join(text.split()).encode(), decode=True)
+                    decoded = raw.decode("utf-8")
+                    evidence_ids.append(eid)
+                elif self._evidence is not None:
+                    evidence_ids.append(self._evidence.put_bytes(decoded.encode("utf-8"), kind="decoded:" + ref))
                 texts.append(decoded)
                 offsets.append("base64:" + ref)
-                if self._evidence is not None:
-                    evidence_ids.append(self._evidence.put_bytes(decoded.encode("utf-8"), kind="decoded:" + ref))
 
         for text in texts:
             flag = extract_flag(text)
             if flag:
+                if self._state is not None:
+                    self._state.declare(claim.challenge_id, flag)
                 return WorkerResult(
                     intent_id=claim.intent_id, owner="", attempt_no=claim.attempt_no,
                     challenge_id=claim.challenge_id, strategy_key=claim.strategy_key,

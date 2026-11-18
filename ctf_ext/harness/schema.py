@@ -57,6 +57,7 @@ class SubmitReceipt:
     status: str  # ACCEPTED | REJECTED | UNKNOWN
     receipt_id: str = ""
     detail: str = ""
+    corrected_answer: Optional[str] = None  # 仅平台显式给出的格式修正，不从错误文本推测
 
 
 @dataclass

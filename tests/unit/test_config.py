@@ -19,7 +19,7 @@ def _base():
         "budget": {"per_intent_seconds": 600, "per_challenge_seconds": 900},
         "download": {"max_single_bytes": 0, "max_total_bytes": 0},
         "policy": {"authorized_scope": [], "command_allowlist": []},
-        "model": {"provider": "deepseek"},
+        "model": {"provider": "baizhi_anthropic"},
         "storage": {"db_path": "data/practice.db"},
         "harness": {"protocol": "mock", "official_sdk_ready": False, "competition_locked": False},
     }
@@ -68,6 +68,8 @@ def test_validation_catches_hard_caps():
         (lambda c: c["concurrency"].update(max_workers=9), "hard cap"),
         (lambda c: c["concurrency"].update(max_workers=2, max_project_workers=3), "max_project_workers"),
         (lambda c: c["runtime"].update(heartbeat_seconds=200), "heartbeat_seconds"),
+        (lambda c: c["runtime"].update(retry_backoff_seconds=-1), "retry_backoff_seconds"),
+        (lambda c: c["concurrency"].update(executor="parallel"), "executor"),
         (lambda c: c["budget"].update(per_intent_seconds=1000), "per_intent_seconds"),
         (lambda c: c["storage"].pop("db_path"), "db_path"),
         (lambda c: c["harness"].update(protocol="official"), "official_sdk_ready"),

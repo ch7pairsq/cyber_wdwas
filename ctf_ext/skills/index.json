@@ -3,16 +3,90 @@
     "name": "crypto.rsa.small_e",
     "domain": "crypto",
     "prerequisites": ["python3"],
+    "keywords": ["rsa", "public", "modulus", "cipher", "exponent"],
     "tokens_hint": 1200,
     "risk": "compute",
     "file": "crypto.rsa.small_e.md"
   },
   {
+    "name": "crypto.encoding",
+    "domain": "crypto",
+    "prerequisites": ["python3", "openssl", "xxd"],
+    "keywords": ["base64", "hex", "xor", "rot", "caesar", "decode", "encode", "cipher", "text"],
+    "tokens_hint": 700,
+    "risk": "read",
+    "file": "crypto.encoding.md"
+  },
+  {
+    "name": "reverse.elf.static",
+    "domain": "reverse",
+    "prerequisites": ["file", "checksec", "objdump", "readelf"],
+    "keywords": ["elf", "binary", "reverse", "static", "stripped", "disassemble", "objdump"],
+    "tokens_hint": 900,
+    "risk": "read",
+    "file": "reverse.elf.static.md"
+  },
+  {
+    "name": "reverse.shellcode",
+    "domain": "reverse",
+    "prerequisites": ["cstool"],
+    "keywords": ["shellcode", "machine", "code", "syscall", "asm", "bytes", "disassemble"],
+    "tokens_hint": 700,
+    "risk": "read",
+    "file": "reverse.shellcode.md"
+  },
+  {
+    "name": "pwn.stack.recon",
+    "domain": "pwn",
+    "prerequisites": ["checksec", "ROPgadget", "objdump"],
+    "keywords": ["pwn", "stack", "rop", "gadget", "overflow", "binary", "canary", "libc"],
+    "tokens_hint": 800,
+    "risk": "read",
+    "file": "pwn.stack.recon.md"
+  },
+  {
     "name": "forensics.zip",
     "domain": "forensics",
     "prerequisites": ["unzip"],
+    "keywords": ["zip", "archive", "pseudo", "comment", "crc"],
     "tokens_hint": 800,
     "risk": "read",
     "file": "forensics.zip.md"
+  },
+  {
+    "name": "forensics.archive_layers",
+    "domain": "forensics",
+    "prerequisites": ["7z", "binwalk"],
+    "keywords": ["archive", "nested", "7z", "zip", "layers", "password", "binwalk", "extract"],
+    "tokens_hint": 800,
+    "risk": "execute",
+    "file": "forensics.archive_layers.md"
+  },
+  {
+    "name": "forensics.stego.image",
+    "domain": "forensics",
+    "prerequisites": ["pngcheck", "exiftool", "steghide", "binwalk"],
+    "keywords": ["png", "jpg", "jpeg", "bmp", "steghide", "stego", "lsb", "exif", "metadata", "image", "hidden"],
+    "tokens_hint": 800,
+    "risk": "execute",
+    "file": "forensics.stego.image.md"
+  },
+  {
+    "name": "forensics.pdf",
+    "domain": "forensics",
+    "prerequisites": ["pdftotext", "exiftool", "binwalk"],
+    "keywords": ["pdf", "document", "embedded", "text", "attachment"],
+    "tokens_hint": 600,
+    "risk": "read",
+    "file": "forensics.pdf.md"
+  },
+  {
+    "name": "misc.qr",
+    "domain": "misc",
+    "prerequisites": ["zbarimg", "pngcheck"],
+    "keywords": ["qr", "qrcode", "barcode", "zbar", "scan", "image"],
+    "tokens_hint": 600,
+    "risk": "read",
+    "file": "misc.qr.md"
   }
 ]

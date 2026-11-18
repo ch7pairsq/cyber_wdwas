@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import time
@@ -97,12 +98,27 @@ def _num(cfg: Dict[str, Any], section: str, key: str, default=0) -> float:
     if value is None or value == "":
         return 0  # 未配置 → 0（下载限额因此 Fail Closed）
     try:
-        return float(value)
+        number = float(value)
+        if isinstance(value, bool) or not math.isfinite(number):
+            raise ValueError("finite number required")
+        return number
     except (TypeError, ValueError):
         raise ConfigError("{}.{} must be numeric, got {!r}".format(section, key, value))
 
 
 def validate_config(cfg: Dict[str, Any]) -> List[str]:
+    if not isinstance(cfg, dict):
+        return ["config must be an object"]
+    sections = ("concurrency", "runtime", "budget", "download", "harness", "storage", "model", "policy", "app", "controller")
+    if any(k in cfg and not isinstance(cfg[k], dict) for k in sections):
+        return ["config sections must be objects"]
+    try:
+        return _validate_config(cfg)
+    except (ConfigError, ValueError, TypeError, OverflowError) as exc:
+        return [str(exc)]
+
+
+def _validate_config(cfg):
     errors: List[str] = []
     workers = int(_num(cfg, "concurrency", "max_workers", 0))
     project = int(_num(cfg, "concurrency", "max_project_workers", 0))
@@ -117,17 +133,26 @@ def validate_config(cfg: Dict[str, Any]) -> List[str]:
 
     lease = _num(cfg, "runtime", "worker_lease_seconds", 180)
     heartbeat = _num(cfg, "runtime", "heartbeat_seconds", 15)
+    retry_backoff = _num(cfg, "runtime", "retry_backoff_seconds", 0)
     if lease <= 0:
         errors.append("runtime.worker_lease_seconds must be > 0")
     if heartbeat <= 0 or heartbeat >= lease:
         errors.append("runtime.heartbeat_seconds must be in (0, worker_lease_seconds)")
+    if retry_backoff < 0:
+        errors.append("runtime.retry_backoff_seconds must be >= 0")
 
     per_intent = _num(cfg, "budget", "per_intent_seconds", 0)
     per_challenge = _num(cfg, "budget", "per_challenge_seconds", 0)
-    if per_intent < 0 or per_challenge < 0:
+    claim_timeout = _num(cfg, "budget", "claim_timeout_seconds", 0)
+    if per_intent < 0 or per_challenge < 0 or claim_timeout < 0:
         errors.append("budget.* must be >= 0")
     if per_intent and per_challenge and per_intent > per_challenge:
         errors.append("budget.per_intent_seconds must be <= per_challenge_seconds")
+    if claim_timeout and per_challenge and claim_timeout > per_challenge:
+        errors.append("budget.claim_timeout_seconds must be <= per_challenge_seconds")
+    executor = (cfg.get("concurrency") or {}).get("executor", "serial")
+    if executor != "serial":
+        errors.append("concurrency.executor=parallel is not implemented; use serial until acceptance")
 
     for key in ("max_single_bytes", "max_total_bytes"):
         if _num(cfg, "download", key, 0) < 0:
@@ -142,6 +167,33 @@ def validate_config(cfg: Dict[str, Any]) -> List[str]:
         errors.append("harness.competition_locked must be set explicitly (true for competition)")
     if not (cfg.get("storage") or {}).get("db_path"):
         errors.append("storage.db_path is required")
+    from .llm.deepseek import DEFAULT_BASE_URL, DEFAULT_MODEL, PROVIDER_NAME
+    model = cfg.get("model") or {}
+    if model.get("provider", PROVIDER_NAME) != PROVIDER_NAME:
+        errors.append("only the company model gateway is allowed")
+    if model.get("base_url", DEFAULT_BASE_URL) != DEFAULT_BASE_URL:
+        errors.append("model.base_url must be the approved company gateway")
+    if model.get("model", DEFAULT_MODEL) != DEFAULT_MODEL:
+        errors.append("only deepseek-flash is allowed")
+    if any(key in model for key in ("api_key", "token", "secret")):
+        errors.append("model credentials must be injected at runtime, not stored in config")
+    if "tools_enabled" in model and not isinstance(model["tools_enabled"], bool):
+        errors.append("model.tools_enabled must be boolean")
+    policy = cfg.get("policy") or {}
+    for key in ("web_search", "runtime_install"):
+        if key in policy and policy[key] is not False:
+            errors.append("policy.{} must be false".format(key))
+    if "sandbox_required" in policy and not isinstance(policy["sandbox_required"], bool):
+        errors.append("policy.sandbox_required must be boolean")
+    if (cfg.get("app") or {}).get("mode") == "competition" and harness.get("protocol") != "official":
+        errors.append("competition requires official harness; mock fallback is forbidden")
+    controller = cfg.get("controller") or {}
+    from .runtime.control import StepPolicy
+    StepPolicy(tuple(controller.get("thresholds", (30, 50, 70, 100))))
+    if controller.get("parallel_agents", 1) != 1:
+        errors.append("parallel agents remain disabled until single-engine acceptance")
+    if controller.get("max_steps", 100) < 1:
+        errors.append("controller.max_steps must be positive")
     return errors
 
 
@@ -150,8 +202,11 @@ def load_yaml(path) -> Dict[str, Any]:
         import yaml  # type: ignore
     except ImportError as exc:
         raise ConfigError("PyYAML is required to read {}: pip install pyyaml".format(path)) from exc
-    with open(path, "r", encoding="utf-8") as fh:
-        return yaml.safe_load(fh) or {}
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return yaml.safe_load(fh) or {}
+    except yaml.YAMLError as exc:
+        raise ConfigError("invalid YAML syntax") from exc
 
 
 def load_json(path) -> Dict[str, Any]:
@@ -167,7 +222,10 @@ def load_file(path) -> Dict[str, Any]:
 def load_config(*paths) -> Dict[str, Any]:
     merged: Dict[str, Any] = {}
     for path in paths:
-        merged = deep_merge(merged, load_file(path))
+        value = load_file(path)
+        if not isinstance(value, dict):
+            raise ConfigError("config root must be an object")
+        merged = deep_merge(merged, value)
     return normalize_config(merged)
 
 
@@ -202,12 +260,16 @@ class HotConfig:
         if candidate_hash == self.hash:
             return False
         errors = validate_config(candidate)
+        for key in ("model", "controller", "harness", "policy"):
+            if candidate.get(key) != self.config.get(key):
+                errors.append(key + " is fixed for this run; restart with an approved configuration")
         if errors:
             self.last_error = "; ".join(errors)  # 保留旧配置，运行不受影响
             return False
         self.config = candidate
         self.hash = candidate_hash
         self.version += 1
+        self.last_error = ""
         return True
 
     def snapshot(self, conn, source: str = "startup") -> int:

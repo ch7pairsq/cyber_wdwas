@@ -118,7 +118,8 @@ def test_download_content_length_precheck():
 
 
 def test_command_allowlist():
-    policy = PolicyEngine(PolicyConfig(command_allowlist=("echo",)))
+    # 显式本地测试模式；默认要求容器的路径必须拒绝本地执行。
+    policy = PolicyEngine(PolicyConfig(command_allowlist=("echo",), sandbox_required=False))
     out = run_command(["echo", "hi"], policy, timeout=10)
     assert out["status"] == "ok" and "hi" in out["output"]
     strict = PolicyEngine(PolicyConfig(command_allowlist=("ls",)))

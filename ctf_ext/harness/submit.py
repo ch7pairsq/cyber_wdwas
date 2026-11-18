@@ -63,7 +63,11 @@ class Submitter:
                 existing = SubmitReceipt(status=row["status"], receipt_id=row["receipt_id"], detail=row["detail"])
         if existing is None:
             self._record(sub, SENDING, None)
-            existing = self._adapter.submit_answer(sub)
+            self._sent[sub.idempotency_key] = SubmitReceipt(status=SENDING)
+            try:
+                existing = self._adapter.submit_answer(sub)
+            except Exception as exc:
+                existing = SubmitReceipt(status=UNKNOWN, detail=type(exc).__name__)
             self._record(sub, existing.status, existing)
         elif existing.status in (UNKNOWN, SENDING):
             # SENDING 说明上次发送后进程中断：已发出的事实必须保留，
