@@ -30,6 +30,8 @@ budget:
   # 耗尽（stopped）的题授权一次追加额度——token/工具上限 ×(1+bonus)、
   # 会话有效期延到运行截止。0 = 关闭。累计账本不清零，硬停止语义保留。
   endgame_token_bonus: 0.5
+  # Pro（换挡模型）每题调用硬上限：防烧穿全局预算；Pro/Flash 走同一账本。
+  pro_max_calls_per_challenge: 8
 download:
   max_single_bytes: 20971520
   max_total_bytes: 104857600
@@ -86,6 +88,12 @@ model:
   api_key_env: BAIZHI_API_KEY
   max_tokens: 4096
   tools_enabled: true
+  # 双模型换挡（借鉴 Tsecbench 冠军方案"Flash 高频探索 + Pro 关键决策"）：
+  # pro_model 非空时，stage>=pro_from_stage 的换路径回合与提交前评审路由到
+  # Pro（同一网关同一凭据）；调用失败/每题次数超限自动回退主模型（fail-open）。
+  # 模型 ID 待确认网关支持后填入；空 = 不启用，行为与单模型完全一致。
+  pro_model: ""
+  pro_from_stage: 2
 storage:
   db_path: data/practice.db
 controller:

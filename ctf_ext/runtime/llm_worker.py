@@ -60,7 +60,9 @@ class LlmWorker:
                  skill_loader: Optional[SkillLoader] = None, max_skills: int = 2,
                  max_skill_bytes: int = 8000, skill_total_bytes: int = 12000,
                  tool_registry=None, tool_cwd=None, max_tool_rounds: int = 8,
-                 max_tool_result_bytes: int = 4000, global_budget=None):
+                 max_tool_result_bytes: int = 4000, global_budget=None,
+                 pro_provider: Optional[ModelProvider] = None, pro_max_calls: int = 0,
+                 pro_from_stage: int = 2):
         self._provider = provider
         self._state, self._control_factory = state_store, control_factory
         self._check = evidence_check
@@ -78,12 +80,39 @@ class LlmWorker:
         self._max_tool_result_bytes = max(256, int(max_tool_result_bytes))
         # 编排层据此感知全局预算耗尽（SessionControl 经由 control_factory 闭包共享同一对象）。
         self._global_budget = global_budget
+        # 双模型换挡（借鉴 Tsecbench 冠军方案）：stage>=pro_from_stage 的"换路径"
+        # 回合路由到 Pro；未配置/次数超限/Pro 故障一律回退主模型（fail-open）。
+        self._pro_provider = pro_provider
+        self._pro_max_calls = max(0, int(pro_max_calls))
+        self._pro_from_stage = max(0, int(pro_from_stage))
+        self._pro_calls: Dict[str, int] = {}
+        self._pro_down = False
         self._system = DEFAULT_SYSTEM
         if prompt_path:
             with open(prompt_path, "r", encoding="utf-8") as fh:
                 self._system = fh.read().strip() or DEFAULT_SYSTEM
 
     # ------------------------------------------------------------------ public
+    def _select_provider(self, claim: Claim) -> ModelProvider:
+        """换挡路由：stage>=pro_from_stage 的回合用 Pro，其余用主模型。
+
+        未配置 Pro / 次数超限 / Pro 已故障 / 状态读取失败一律回退主模型
+        （fail-open，不阻断解题）；Pro 计数按题累计，超限后本题只用主模型。
+        """
+        if (self._pro_provider is None or self._pro_max_calls <= 0
+                or self._pro_down or self._state is None):
+            return self._provider
+        if self._pro_calls.get(claim.challenge_id, 0) >= self._pro_max_calls:
+            return self._provider
+        try:
+            _, saved = self._state.load(claim.challenge_id)
+            stage = int((saved.get("route") or {}).get("stage") or 0)
+        except Exception:
+            return self._provider
+        if stage < self._pro_from_stage:
+            return self._provider
+        return self._pro_provider
+
     def work(self, claim: Claim, challenge: Dict[str, Any]) -> WorkerResult:
         started = self._clock()
         messages: List[Dict[str, Any]] = [{"role": "user", "content": json.dumps({
@@ -123,6 +152,7 @@ class LlmWorker:
         contract_attempts = 0
         hint_sent = False
         while True:
+            provider = None  # 仅在本轮 complete 前赋值；异常时区分是否 Pro 回退
             try:
                 timeout, max_tokens = self._timeout, self._max_tokens
                 if control is not None:
@@ -141,17 +171,33 @@ class LlmWorker:
                            "timeout": timeout, "max_tokens": max_tokens}
                 if tools:
                     request["tools"] = tools
-                response = self._provider.complete(messages, **request)
+                provider = self._select_provider(claim)
+                response = provider.complete(messages, **request)
             except ProviderTimeout:
+                if provider is self._pro_provider:
+                    self._pro_down = True  # Pro 故障：fail-open 回退主模型重试本轮
+                    continue
                 return self._failure(claim, "failed", OUTCOME_TIMEOUT, "timeout", started, tokens, skills_loaded, tool_calls)
             except RateLimited:
+                if provider is self._pro_provider:
+                    self._pro_down = True
+                    continue
                 return self._failure(claim, "failed", OUTCOME_ERROR, "rate_limited", started, tokens, skills_loaded, tool_calls)
             except (ProviderError, ProviderConfigError) as exc:
+                if provider is self._pro_provider:
+                    self._pro_down = True
+                    continue
                 return self._failure(claim, "failed", OUTCOME_ERROR, type(exc).__name__, started, tokens, skills_loaded, tool_calls)
             except (BudgetExceeded, LoopDetected) as exc:
                 return self._failure(claim, "failed", OUTCOME_ERROR, type(exc).__name__, started, tokens, skills_loaded, tool_calls)
             except Exception as exc:  # Provider 未按契约抛出的传输异常也要有界失败
+                if provider is self._pro_provider:
+                    self._pro_down = True
+                    continue
                 return self._failure(claim, "failed", OUTCOME_ERROR, "provider:" + type(exc).__name__, started, tokens, skills_loaded, tool_calls)
+            if provider is self._pro_provider:
+                # Pro 次数按题记账（内存态，重启清零可接受；全局预算仍兜底）。
+                self._pro_calls[claim.challenge_id] = self._pro_calls.get(claim.challenge_id, 0) + 1
             measured = int((response.usage or {}).get("total_tokens", 0))
             tokens += measured
             if control is not None:

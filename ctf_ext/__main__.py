@@ -44,7 +44,7 @@ DEFAULT_CONFIG_PATHS = (
 )
 
 
-def _make_provider(cfg):
+def _make_provider(cfg, model_override: str = None):
     model = cfg.get("model") or {}
     provider_name = model.get("provider", PROVIDER_NAME)
     if provider_name == OFFICIAL_PROVIDER_NAME:
@@ -60,8 +60,9 @@ def _make_provider(cfg):
         print("model key restored from key cache (environment injection missing)", file=sys.stderr)
     else:
         keycache.sync_key_cache(model, key)
+    # model_override：双模型换挡的 Pro 实例走同一网关同一凭据，仅模型 ID 不同。
     return builder(api_key=key, base_url=model.get("base_url", base_default),
-                   model=model.get("model", model_default),
+                   model=model_override or model.get("model", model_default),
                    timeout=float(model.get("request_timeout_seconds") or 120))
 
 
@@ -210,6 +211,17 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
         scheduler.set_limits(1, 1)
     if mode == "llm":
         provider = _make_provider(cfg)
+        # 双模型换挡（借鉴 Tsecbench 冠军方案）：pro_model 非空时构造 Pro 实例
+        # （同一网关同一凭据），stage>=pro_from_stage 的换路径回合与提交前评审
+        # 用 Pro；构造失败或未配置一律回退单模型，不影响可用性。
+        model_cfg = cfg.get("model") or {}
+        pro_model_id = str(model_cfg.get("pro_model") or "").strip()
+        pro_provider = None
+        if pro_model_id and pro_model_id != model_cfg.get("model"):
+            try:
+                pro_provider = _make_provider(cfg, model_override=pro_model_id)
+            except SystemExit:
+                pro_provider = None  # 凭据缺失等：回退单模型，不阻断
         try:
             skill_loader = SkillLoader()
         except (OSError, ValueError):
@@ -223,7 +235,10 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
                            tool_registry=tool_registry,
                            tool_cwd=lambda cid: str(state.workspace(cid)),
                            max_tool_rounds=int((cfg.get("controller") or {}).get("max_tool_rounds") or 40),
-                           global_budget=global_budget)
+                           global_budget=global_budget,
+                           pro_provider=pro_provider,
+                           pro_max_calls=int(budget.get("pro_max_calls_per_challenge") or 0),
+                           pro_from_stage=int(model_cfg.get("pro_from_stage") or 2))
     else:
         worker = RuleBasedWorker(harness, evidence_store=evidence,
                                  state_store=state, control_factory=control_factory)
@@ -243,7 +258,7 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
                         max_intents_per_challenge=planner_limit,
                         parallel_agents=int((cfg.get("controller") or {}).get("parallel_agents") or 1),
                         endgame_token_bonus=float(budget.get("endgame_token_bonus") or 0),
-                        reviewer_factory=(lambda cid: ProviderReviewer(provider, control_factory(cid))) if mode == "llm" else None)
+                        reviewer_factory=(lambda cid: ProviderReviewer(pro_provider or provider, control_factory(cid))) if mode == "llm" else None)
     if hot is not None:
         orch.apply_config(hot.config)
     if mode == "fallback":
