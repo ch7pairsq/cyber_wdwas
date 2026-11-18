@@ -21,7 +21,12 @@ from .harness.flag_gate import FlagGate, ProviderReviewer
 from .harness.gateway import SubmitGateway
 from .store.session import StateStore
 from .runtime.control import GlobalBudget, SessionControl, StepPolicy, reset_intent_window
-from .llm.deepseek import DEFAULT_BASE_URL, DEFAULT_MODEL, DEFAULT_KEY_ENV, PROVIDER_NAME, DeepSeekProvider
+from .llm.deepseek import DEFAULT_BASE_URL, DEFAULT_MODEL, PROVIDER_NAME, DeepSeekProvider
+from .llm.openai_compat import (DEFAULT_BASE_URL as OFFICIAL_BASE_URL,
+                                DEFAULT_MODEL as OFFICIAL_MODEL,
+                                PROVIDER_NAME as OFFICIAL_PROVIDER_NAME,
+                                DeepSeekOfficialProvider)
+from .llm import keycache
 from .runtime.dashboard import write_dashboard
 from .runtime.llm_worker import LlmWorker
 from .runtime.orchestrator import Orchestrator
@@ -41,17 +46,23 @@ DEFAULT_CONFIG_PATHS = (
 
 def _make_provider(cfg):
     model = cfg.get("model") or {}
-    if model.get("provider", PROVIDER_NAME) != PROVIDER_NAME:
-        raise SystemExit("only the company Anthropic-compatible gateway is allowed")
-    key_env = model.get("api_key_env", DEFAULT_KEY_ENV)
-    if not os.environ.get(key_env):
-        raise SystemExit("model key missing: export {} before --mode llm".format(key_env))
-    return DeepSeekProvider(
-        api_key=os.environ[key_env],
-        base_url=model.get("base_url", DEFAULT_BASE_URL),
-        model=model.get("model", DEFAULT_MODEL),
-        timeout=float(model.get("request_timeout_seconds") or 120),
-    )
+    provider_name = model.get("provider", PROVIDER_NAME)
+    if provider_name == OFFICIAL_PROVIDER_NAME:
+        builder, base_default, model_default = (DeepSeekOfficialProvider,
+                                                OFFICIAL_BASE_URL, OFFICIAL_MODEL)
+    elif provider_name == PROVIDER_NAME:
+        builder, base_default, model_default = DeepSeekProvider, DEFAULT_BASE_URL, DEFAULT_MODEL
+    else:
+        raise SystemExit("unknown model.provider; use baizhi_anthropic or deepseek_official_openai")
+    key, source = keycache.resolve_model_key(model)
+    if source == "cache":
+        # 环境变量缺失时从缓存恢复属于异常路径，只提示 stderr，不写进报告或日志文件。
+        print("model key restored from key cache (environment injection missing)", file=sys.stderr)
+    else:
+        keycache.sync_key_cache(model, key)
+    return builder(api_key=key, base_url=model.get("base_url", base_default),
+                   model=model.get("model", model_default),
+                   timeout=float(model.get("request_timeout_seconds") or 120))
 
 
 def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
@@ -61,6 +72,10 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
     # 显式事务模式：黑板用 BEGIN IMMEDIATE 控制边界，证据登记不能留下隐式事务。
     conn = sqlite3.connect(db_path, isolation_level=None, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    # 并发执行前提：WAL 让读不阻塞写；busy_timeout 让跨连接写（如看板进程）
+    # 等待持锁者而不是立即报 busy。黑板内所有读写已用同一把 RLock 串行化。
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     migrate(conn)
 
     hot = None
@@ -128,19 +143,42 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
     budget = cfg.get("budget") or {}
     controller = cfg.get("controller") or {}
     step_policy = StepPolicy(tuple(controller.get("thresholds", (30, 50, 70, 100))))
-    state.pin_policy({"thresholds": list(step_policy.thresholds), "model": DEFAULT_MODEL, "parallel_agents": 1})
+    model_cfg = cfg.get("model") or {}
+    pinned_model = (model_cfg.get("model")
+                    or (OFFICIAL_MODEL if model_cfg.get("provider") == OFFICIAL_PROVIDER_NAME
+                        else DEFAULT_MODEL))
+    state.pin_policy({"thresholds": list(step_policy.thresholds), "model": pinned_model,
+                      "parallel_agents": 1})
     # 运行级全局 token 账本（0/未配置 = 不设上限）；编排层据此停止领取新意图。
     global_budget = GlobalBudget(state, int(budget.get("max_model_tokens_total") or 0))
     def control_factory(challenge_id):
         # 意图边界 = 新步数窗口：route 阶段/停滞/重复判定按意图独立，
         # 跨意图保留累计预算与证据教训（详见 reset_intent_window）。
         # 预算真正耗尽（tokens/tools/时间 任意为 0）时不复活，保持硬限制。
+        max_tokens = int(budget.get("max_model_tokens_per_intent") or 50000)
+        max_tools = int(budget.get("max_tool_calls_per_intent")
+                        or budget.get("max_tools_per_intent") or 100)
+        seconds = float(budget.get("per_challenge_seconds") or 900)
+        # 终局加时（endgame）：编排层在剩余时间充裕时给预算耗尽的题授权一次
+        # 追加额度——提高上限而非清零计数，累计账本保持诚实，全局预算仍兜底。
+        boost = float(getattr(control_factory, "endgame", {}).get(challenge_id) or 0)
+        if boost > 0:
+            max_tokens = int(max_tokens * (1 + boost))
+            max_tools = int(max_tools * (1 + boost))
+            deadline = getattr(control_factory, "deadline", None)
+            if deadline:
+                try:
+                    _, _st = state.load(challenge_id)
+                    started_at = float(_st["budget"]["started_at"])
+                    # 会话有效期延到运行截止：remaining() 取 min(started_at+seconds, absolute_deadline)
+                    seconds = max(seconds, deadline - started_at)
+                except Exception:
+                    pass
         control = SessionControl(state, challenge_id, policy=step_policy,
             max_steps=int(controller.get("max_steps", 100)),
-            max_tokens=int(budget.get("max_model_tokens_per_intent") or 50000),
-            max_tools=int(budget.get("max_tool_calls_per_intent")
-                          or budget.get("max_tools_per_intent") or 100),
-            seconds=float(budget.get("per_challenge_seconds") or 900),
+            max_tokens=max_tokens,
+            max_tools=max_tools,
+            seconds=seconds,
             repeat_limit=int(budget.get("repeat_limit") or 3),
             stall_steps=int(budget.get("stall_steps") or 20),
             absolute_deadline=getattr(control_factory, "deadline", None),
@@ -203,6 +241,8 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
                         retry_backoff_seconds=float(runtime_cfg.get("retry_backoff_seconds") or 0),
                         poll_seconds=float(runtime_cfg.get("intent_poll_seconds") or 0.1),
                         max_intents_per_challenge=planner_limit,
+                        parallel_agents=int((cfg.get("controller") or {}).get("parallel_agents") or 1),
+                        endgame_token_bonus=float(budget.get("endgame_token_bonus") or 0),
                         reviewer_factory=(lambda cid: ProviderReviewer(provider, control_factory(cid))) if mode == "llm" else None)
     if hot is not None:
         orch.apply_config(hot.config)
@@ -241,6 +281,9 @@ def main(argv=None) -> int:
                          claim_timeout_seconds=args.claim_timeout)
     out = orch.run(max_seconds=args.seconds)
     _emit(out, args.report)
+    # 本轮正常结束即清理 Key 缓存（用户 2026-11-18 决定"解题后清理"）；
+    # 异常中断时缓存保留，作为下次启动的兜底，并在有环境变量时被覆盖。
+    keycache.clear_key_cache()
     if args.dashboard:
         import sqlite3 as _sqlite3
         conn = _sqlite3.connect(args.db)

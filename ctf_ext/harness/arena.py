@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -289,6 +290,12 @@ class ArenaHarnessAdapter(HarnessAdapter):
         self._receipts: Dict[str, SubmitReceipt] = {}
         self._started: set = set()
         self._start_info: Dict[str, Any] = {}
+        # 并发 worker 各自触发 ensure_environment：started/start_info 的
+        # 记账用短锁保护；同题并发发起用 in-flight 事件去重（不持锁做 HTTP，
+        # 不同题的 start 仍然并行）。
+        self._env_lock = threading.RLock()
+        self._inflight: Dict[str, threading.Event] = {}
+        self._timeout = float(client_timeout)
         self.help_text: Any = {}
 
     # ------------------------------------------------------------------ startup
@@ -395,29 +402,35 @@ class ArenaHarnessAdapter(HarnessAdapter):
     def ensure_environment(self, unique_code: str):
         """按需拉起题目环境（env_policy=on_demand 时由编排层在每个意图前调用）。
 
-        返回 start_info（新建成功时）或 None（已启动）；409 duplicate/already
-        视为环境仍在运行；environment_limit 向上抛，由编排层记事件，
-        意图快速失败后等槽位回收再重试。
+        返回 start_info（新建成功时）或 None（已启动/并发发起中）；409
+        duplicate/already 视为环境仍在运行；environment_limit 向上抛，由
+        编排层记事件，意图快速失败后等槽位回收再重试。
         """
-        if unique_code in self._started:
-            return None
+        with self._env_lock:
+            if unique_code in self._started:
+                return None
         try:
             self._ensure_started(unique_code)
         except ArenaProtocolError as exc:
             text = str(exc)
             if "duplicate" in text.lower() or "already" in text.lower():
-                self._started.add(unique_code)  # 已有环境在跑，幂等收编
+                with self._env_lock:
+                    self._started.add(unique_code)  # 已有环境在跑，幂等收编
                 return None
             raise
-        info = self._start_info.get(unique_code) or {}
-        for task in self._tasks:
-            if task.challenge_id == unique_code:
-                task.metadata["start_info"] = info
-                note = self._env_note(info, bool(task.metadata.get("arena_files")))
-                if note and "[Arena 运行环境]" not in (task.description or ""):
-                    task.description = (task.description or "") + "\n\n" + note
-                break
-        return info
+        with self._env_lock:
+            if unique_code not in self._started:
+                # 并发发起者失败落地：本次按"未启动"返回，意图会快速失败重试。
+                return None
+            info = self._start_info.get(unique_code) or {}
+            for task in self._tasks:
+                if task.challenge_id == unique_code:
+                    task.metadata["start_info"] = info
+                    note = self._env_note(info, bool(task.metadata.get("arena_files")))
+                    if note and "[Arena 运行环境]" not in (task.description or ""):
+                        task.description = (task.description or "") + "\n\n" + note
+                    break
+            return info
 
     def task_description(self, challenge_id: str):
         for task in self._tasks:
@@ -426,14 +439,28 @@ class ArenaHarnessAdapter(HarnessAdapter):
         return None
 
     def _ensure_started(self, unique_code: str) -> None:
-        if unique_code in self._started:
-            return
-        # start 接口无返回体约定；失败即抛，绝不当作已启动。
-        resp = self._client.request("POST", self._paths["start"],
-                                    query={"unique_code": unique_code})
-        self._started.add(unique_code)
-        # start 响应可能携带环境/服务地址等材料信息，原样保留供 worker 查阅。
-        self._start_info[unique_code] = resp
+        with self._env_lock:
+            if unique_code in self._started:
+                return
+            inflight = self._inflight.get(unique_code)
+            if inflight is not None:
+                # 同题并发发起：等发起方落地即可，不重发 start（幂等去重）。
+                inflight.wait(timeout=self._timeout + 5.0)
+                return
+            self._inflight[unique_code] = threading.Event()
+        try:
+            # start 接口无返回体约定；失败即抛，绝不当作已启动。
+            resp = self._client.request("POST", self._paths["start"],
+                                        query={"unique_code": unique_code})
+        finally:
+            with self._env_lock:
+                ev = self._inflight.pop(unique_code, None)
+                if ev is not None:
+                    ev.set()
+        with self._env_lock:
+            self._started.add(unique_code)
+            # start 响应可能携带环境/服务地址等材料信息，原样保留供 worker 查阅。
+            self._start_info[unique_code] = resp
 
     # ------------------------------------------------------------- attachments
     def read_attachment(self, ref: str, *, max_bytes: int):

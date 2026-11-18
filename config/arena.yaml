@@ -7,7 +7,10 @@ app:
   mode: practice
 concurrency:
   max_workers: 4
-  max_project_workers: 2
+  # 题内串行：同题同时只跑 1 个意图（会话状态共享，并发写会打架）。
+  # 跨题并行度由 controller.parallel_agents 控制。
+  max_project_workers: 1
+  # 平台环境上限 3 个（409 environment_limit）：在跑题数不超过 3。
   max_running_projects: 3
   executor: serial
 budget:
@@ -23,6 +26,10 @@ budget:
   max_model_tokens_total: 20000000
   repeat_limit: 8
   stall_steps: 60
+  # 终局加时：全部可解题做完且剩余时间 > endgame_min_seconds 时，对预算
+  # 耗尽（stopped）的题授权一次追加额度——token/工具上限 ×(1+bonus)、
+  # 会话有效期延到运行截止。0 = 关闭。累计账本不清零，硬停止语义保留。
+  endgame_token_bonus: 0.5
 download:
   max_single_bytes: 20971520
   max_total_bytes: 104857600
@@ -90,7 +97,8 @@ controller:
   # 步数窗口按意图重置（reset_intent_window），200 是单意图止损上限，
   # 覆盖 40 轮工具调用的目标用量还有余量
   max_steps: 200
-  parallel_agents: 1
+  # 跨题并行 worker 数：对齐平台 3 环境上限（题内串行见 concurrency）。
+  parallel_agents: 3
   max_tool_rounds: 40
 harness:
   protocol: arena

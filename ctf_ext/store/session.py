@@ -110,7 +110,8 @@ class StateStore:
         }
 
     def load(self, challenge_id):
-        row = self.db.execute("SELECT revision,payload FROM sessions WHERE challenge_id=?", (challenge_id,)).fetchone()
+        with self.board.read_view() as db:
+            row = db.execute("SELECT revision,payload FROM sessions WHERE challenge_id=?", (challenge_id,)).fetchone()
         if row:
             state = json.loads(row['payload'])
             self.validate(state)
@@ -123,10 +124,11 @@ class StateStore:
         if not ids:
             return {}
         placeholders = ",".join("?" * len(ids))
-        rows = self.db.execute(
-            "SELECT challenge_id,revision,payload FROM sessions WHERE challenge_id IN ({})".format(placeholders),
-            ids,
-        ).fetchall()
+        with self.board.read_view() as db:
+            rows = db.execute(
+                "SELECT challenge_id,revision,payload FROM sessions WHERE challenge_id IN ({})".format(placeholders),
+                ids,
+            ).fetchall()
         found = {}
         for row in rows:
             state = json.loads(row['payload'])
@@ -135,8 +137,9 @@ class StateStore:
         return {cid: found.get(cid) or (0, self._default_state(cid)) for cid in ids}
 
     def challenge_ids(self):
-        return [row['challenge_id'] for row in self.db.execute(
-            "SELECT challenge_id FROM sessions ORDER BY challenge_id")]
+        with self.board.read_view() as db:
+            return [row['challenge_id'] for row in db.execute(
+                "SELECT challenge_id FROM sessions ORDER BY challenge_id")]
 
     @staticmethod
     def validate(state):
@@ -210,7 +213,8 @@ class StateStore:
         return self.patch(challenge_id, trim)
 
     def restore_evidence(self, evidence_id):
-        row = self.db.execute('SELECT path FROM evidence WHERE sha256=?', (evidence_id,)).fetchone()
+        with self.board.read_view() as db:
+            row = db.execute('SELECT path FROM evidence WHERE sha256=?', (evidence_id,)).fetchone()
         if not row or not row['path'] or not self.evidence.verify(evidence_id):
             raise ValueError('evidence cannot be restored exactly')
         path = Path(row['path']).resolve()
@@ -226,10 +230,12 @@ class StateStore:
         return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
 
     def cached(self, key):
-        row = self.db.execute('SELECT command_id FROM tool_cache WHERE key=? AND expires>?', (key, self.clock())).fetchone()
+        with self.board.read_view() as db:
+            row = db.execute('SELECT command_id FROM tool_cache WHERE key=? AND expires>?', (key, self.clock())).fetchone()
+            command = (db.execute('SELECT * FROM command_log WHERE id=?', (row['command_id'],)).fetchone()
+                       if row else None)
         if not row:
             return None
-        command = self.db.execute('SELECT * FROM command_log WHERE id=?', (row['command_id'],)).fetchone()
         if not command or not command['complete']:
             return None
         try:

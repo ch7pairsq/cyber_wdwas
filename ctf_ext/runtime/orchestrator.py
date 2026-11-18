@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import threading
 import time
 from typing import Dict, List, Optional
 
@@ -34,7 +35,9 @@ class Orchestrator:
                  claim_timeout_seconds: float = 90.0, configured_max_workers: int = 1,
                  heartbeat_path: Optional[str] = None, max_consecutive_errors: int = 3,
                  retry_backoff_seconds: float = 0.0, poll_seconds: float = 0.1,
-                 planner=None, max_intents_per_challenge: int = 4):
+                 planner=None, max_intents_per_challenge: int = 4,
+                 parallel_agents: int = 1, endgame_token_bonus: float = 0.0,
+                 endgame_min_seconds: float = 300.0):
         self._harness = harness
         self._board = board
         self._scheduler = scheduler
@@ -59,6 +62,22 @@ class Orchestrator:
         self._poll_seconds = max(0.01, float(poll_seconds))
         self._planner = planner or IntentPlanner(
             board, max_intents_per_challenge=max_intents_per_challenge)
+        # 并发执行（跨题并行、题内串行）：题内互斥由调度器 max_project_workers
+        # 保证，这里只决定 step() 循环线程数。存储层所有读写已由 Blackboard
+        # 的 RLock + BEGIN IMMEDIATE 串行化。
+        self._parallel_agents = max(1, int(parallel_agents))
+        self._stop = threading.Event()
+        self._pump_lock = threading.Lock()
+        # 终局加时：全部可解题做完仍有剩余时间时，给预算耗尽的题一次追加授权。
+        # 授权记录（factory.endgame）是内存态：重启丢失可重授——累计记账仍诚实，
+        # 全局预算仍兜底；每题每轮运行只授权一次（_endgame_granted）。
+        self._endgame_bonus = max(0.0, float(endgame_token_bonus))
+        self._endgame_min_seconds = max(0.0, float(endgame_min_seconds))
+        self._endgame: Dict[str, float] = {}
+        self._endgame_granted: set = set()
+        factory = getattr(worker, "_control_factory", None)
+        if callable(factory):
+            factory.endgame = self._endgame
 
     # ------------------------------------------------------------ hot config
     def apply_config(self, cfg: Dict) -> None:
@@ -75,6 +94,11 @@ class Orchestrator:
         budget = cfg.get("budget") or {}
         if budget.get("claim_timeout_seconds"):
             self._claim_timeout = max(0.0, float(budget["claim_timeout_seconds"]))
+        if budget.get("endgame_token_bonus") is not None:
+            self._endgame_bonus = max(0.0, float(budget["endgame_token_bonus"]))
+        controller = cfg.get("controller") or {}
+        if controller.get("parallel_agents"):
+            self._parallel_agents = max(1, int(controller["parallel_agents"]))
         runtime = cfg.get("runtime") or {}
         if runtime.get("max_intents_per_challenge") is not None:
             self._planner.set_limit(runtime["max_intents_per_challenge"])
@@ -195,7 +219,10 @@ class Orchestrator:
         """领取并执行一个 Intent；无可用任务返回 None。"""
         if self._gateway is not None:
             try:
-                self._collect_submissions(self._gateway.pump())
+                # 多 worker 并发时防重复提交：pump 的检查-发送-落账必须串行。
+                with self._pump_lock:
+                    pumped = self._gateway.pump()
+                self._collect_submissions(pumped)
             except Exception as exc:  # 单个提交状态异常不能拖垮主循环
                 self._board.append_event("gateway_pump_failed", "", {"error": type(exc).__name__})
                 self._metrics.incr("submissions.pump_errors")
@@ -473,6 +500,44 @@ class Orchestrator:
             self._board.append_event("watchdog_failed", "", {"error": type(exc).__name__})
         results: List[Dict] = []
         solved = self._solved()
+        mode, effective = "serial", 1
+        if self._parallel_agents > 1 and len(tasks) > 1:
+            # 跨题并行、题内串行：N 个线程各自领取执行，同题互斥由调度器
+            # max_project_workers 保证；存储层由黑板 RLock 串行化。
+            mode = "parallel"
+            effective = min(self._parallel_agents, len(tasks))
+            self._spawn_workers(deadline, tasks, results, solved, effective)
+        else:
+            self._run_serial(deadline, tasks, results, solved, global_budget)
+        if self._gateway is not None:
+            try:
+                self._collect_submissions(self._gateway.flush(timeout=min(1, max(0, deadline - self._clock()))))
+            except Exception as exc:
+                self._board.append_event("gateway_flush_failed", "", {"error": type(exc).__name__})
+            self._gateway.close()
+        solved = self._solved()
+        for result in results:
+            if result["submission"]:
+                row = self._board.latest_submission(result["challenge_id"])
+                if row:
+                    result["submission"] = row
+        self._metrics.incr("submissions.pending", self._board.pending_submission_count())
+        summary = RunSummary(results=results, notes="orch:{}".format(self._worker_name))
+        finalized = self._harness.finalize(summary)
+        self._board.append_event("run_finished", "", {"results": len(results), "solved": sorted(solved)})
+        return {"tasks": len(tasks), "solved": sorted(solved), "results": results,
+                "metrics": self._metrics.snapshot(), "finalized": finalized,
+                "quality": framework_metrics(self._board.connection, len(tasks)) if self._state else {},
+                "execution": {"mode": mode, "configured_max_workers": self._configured_max_workers,
+                              "effective_parallel": effective,
+                              "claim_timeout_seconds": self._claim_timeout,
+                              "retry_backoff_seconds": self._retry_backoff,
+                              "isolation": {"agent": "per_challenge_workspace",
+                                            "container": "not_verified"}}}
+
+    # ---------------------------------------------------------------- run loops
+    def _run_serial(self, deadline, tasks, results, solved, global_budget) -> None:
+        """串行主循环（parallel_agents=1 或单题时）：行为与历史版本一致。"""
         consecutive_errors = 0
         while self._clock() < deadline and len(solved) < len(tasks):
             if global_budget is not None and getattr(global_budget, "exhausted", False):
@@ -503,35 +568,129 @@ class Orchestrator:
                 if self._scheduler.has_waiting_work() and self._clock() < deadline:
                     time.sleep(min(self._poll_seconds, max(0.0, deadline - self._clock())))
                     continue
+                # 终局加时：没有待领工作但时间还有富余时，给预算耗尽的题一次追加授权。
+                if self._grant_endgame(tasks, solved, deadline):
+                    continue
                 break
             results.append(out)
             if out["submission"] and out["submission"]["status"] == "ACCEPTED":
                 solved.add(out["challenge_id"])
-        if self._gateway is not None:
+
+    def _spawn_workers(self, deadline, tasks, results, solved, count: int) -> None:
+        """并行主循环：N 个工作线程跑 step()，主线程负责心跳/热配置/看门狗/加时。"""
+        threads = []
+        for idx in range(count):
+            t = threading.Thread(target=self._worker_loop,
+                                 args=(deadline, tasks, results, solved, idx),
+                                 name="{}-{}".format(self._worker_name, idx + 1), daemon=True)
+            threads.append(t)
+        for t in threads:
+            t.start()
+        try:
+            budget_stop_notified = False
+            while any(t.is_alive() for t in threads):
+                if (self._clock() >= deadline
+                        or (getattr(self._worker, "_global_budget", None) is not None
+                            and getattr(self._worker._global_budget, "exhausted", False))):
+                    if not budget_stop_notified:
+                        spent = getattr(getattr(self._worker, "_global_budget", None), "spent", 0)
+                        self._board.append_event("run_stopped", "", {
+                            "reason": "deadline_or_global_budget",
+                            "spent": int(spent or 0)})
+                        budget_stop_notified = True
+                    self._stop.set()
+                elif len(solved) < len(tasks):
+                    self._touch_heartbeat()
+                    try:
+                        # 热配置与租约看门狗只在监控线程执行，避免多线程竞争。
+                        self.reload_config_if_changed()
+                        recover_expired_leases(self._board)
+                        self._grant_endgame(tasks, solved, deadline)
+                    except Exception as exc:
+                        self._board.append_event("monitor_error", "", {"error": type(exc).__name__})
+                if not any(t.is_alive() for t in threads):
+                    break
+                time.sleep(min(self._poll_seconds, max(0.0, deadline - self._clock())))
+        finally:
+            self._stop.set()
+            for t in threads:
+                t.join(timeout=5)
+
+    def _worker_loop(self, deadline, tasks, results, solved, idx) -> None:
+        """单个工作线程：只领意图与执行；错误止损按线程独立计数。"""
+        consecutive_errors = 0
+        while (not self._stop.is_set() and self._clock() < deadline
+               and len(solved) < len(tasks)):
+            self._touch_heartbeat()
             try:
-                self._collect_submissions(self._gateway.flush(timeout=min(1, max(0, deadline - self._clock()))))
+                out = self.step()
+            except KeyboardInterrupt:
+                self._stop.set()
+                break
             except Exception as exc:
-                self._board.append_event("gateway_flush_failed", "", {"error": type(exc).__name__})
-            self._gateway.close()
-        solved = self._solved()
-        for result in results:
-            if result["submission"]:
-                row = self._board.latest_submission(result["challenge_id"])
-                if row:
-                    result["submission"] = row
-        self._metrics.incr("submissions.pending", self._board.pending_submission_count())
-        summary = RunSummary(results=results, notes="orch:{}".format(self._worker_name))
-        finalized = self._harness.finalize(summary)
-        self._board.append_event("run_finished", "", {"results": len(results), "solved": sorted(solved)})
-        return {"tasks": len(tasks), "solved": sorted(solved), "results": results,
-                "metrics": self._metrics.snapshot(), "finalized": finalized,
-                "quality": framework_metrics(self._board.connection, len(tasks)) if self._state else {},
-                "execution": {"mode": "serial", "configured_max_workers": self._configured_max_workers,
-                              "effective_parallel": 1,
-                              "claim_timeout_seconds": self._claim_timeout,
-                              "retry_backoff_seconds": self._retry_backoff,
-                              "isolation": {"agent": "per_challenge_workspace",
-                                            "container": "not_verified"}}}
+                consecutive_errors += 1
+                self._board.append_event("step_failed", "", {
+                    "worker": "{}-{}".format(self._worker_name, idx + 1),
+                    "error": type(exc).__name__, "consecutive": consecutive_errors})
+                self._metrics.incr("runtime.step_errors")
+                if consecutive_errors >= self._max_consecutive_errors:
+                    self._board.append_event("run_aborted", "", {
+                        "reason": "consecutive_errors", "count": consecutive_errors})
+                    self._stop.set()
+                continue
+            consecutive_errors = 0
+            if out is None:
+                time.sleep(min(self._poll_seconds, max(0.0, deadline - self._clock())))
+                continue
+            results.append(out)
+            if out["submission"] and out["submission"]["status"] == "ACCEPTED":
+                solved.add(out["challenge_id"])
+
+    def _grant_endgame(self, tasks, solved, deadline) -> bool:
+        """终局加时：可解题做完且时间富余时，给预算耗尽的题授权一次追加额度。
+
+        只对会话已 stopped（预算/步数/停滞耗尽）且未授权过的题生效；授权 =
+        factory.endgame 提高上限 + 新增 misc.endgame.pass2 意图。返回是否发生
+        了新授权（调用方据此继续循环）。
+        """
+        if self._endgame_bonus <= 0 or self._state is None or self._clock() >= deadline:
+            return False
+        if deadline - self._clock() < self._endgame_min_seconds:
+            return False  # 剩余时间不够一轮有意义的尝试
+        if self._scheduler.has_waiting_work():
+            return False  # 还有正常工作没做完，加时留给收尾阶段
+        factory = getattr(self._worker, "_control_factory", None)
+        if not callable(factory):
+            return False
+        grants = getattr(factory, "endgame", None)
+        if grants is None:
+            grants = self._endgame
+            factory.endgame = grants
+        granted = False
+        for cid in sorted(tasks):
+            if cid in solved or cid in self._endgame_granted:
+                continue
+            try:
+                _, st = self._state.load(cid)
+            except Exception:
+                continue
+            if st.get("status") != "stopped":
+                continue  # 未耗尽预算的题不需要加时
+            try:
+                self._board.add_intent(IntentDraft(
+                    challenge_id=cid, strategy_key="misc.endgame.pass2",
+                    params={"phase": "endgame"}, est_tokens=2000))
+            except DuplicateStrategy:
+                self._endgame_granted.add(cid)  # 已有终局意图在排队，不再重复授权
+                continue
+            grants[cid] = self._endgame_bonus
+            self._endgame_granted.add(cid)
+            self._board.append_event("endgame_grant", cid, {
+                "token_bonus": self._endgame_bonus,
+                "remaining_seconds": int(deadline - self._clock())})
+            self._metrics.incr("endgame.grants")
+            granted = True
+        return granted
 
     def _touch_heartbeat(self) -> None:
         if self._heartbeat is not None:

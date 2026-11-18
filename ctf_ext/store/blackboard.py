@@ -139,6 +139,17 @@ class Blackboard:
     # 兼容既有调用方与测试；新代码统一使用 transaction()。
     _write = transaction
 
+    @contextmanager
+    def read_view(self):
+        """共享读视图：与写事务共用同一把 RLock，保证共享连接上读写不交叠。
+
+        SQLite 连接是跨线程共享的（check_same_thread=False），读不与
+        BEGIN IMMEDIATE 并发是正确性前提；LLM 调用占墙钟，毫秒级读锁
+        竞争可忽略。命名避开既有 snapshot(challenge_id)（handoff 视图）。
+        """
+        with self._lock:
+            yield self._db
+
     # ---------------------------------------------------------------- intents
     def add_challenge(self, challenge) -> None:
         with self.transaction() as db:
@@ -258,59 +269,67 @@ class Blackboard:
             sql += " AND challenge_id=?"
             args = (challenge_id,)
         sql += " ORDER BY priority DESC"
-        return [dict(r) for r in self._db.execute(sql, args)]
+        with self.read_view() as db:
+            return [dict(r) for r in db.execute(sql, args)]
 
     def open_intent_summary(self) -> List[Dict[str, Any]]:
         """每题开放 Intent 的聚合视图，供调度器一次查询完成背压判断。"""
-        rows = self._db.execute(
-            "SELECT challenge_id,"
-            " MAX(CASE WHEN status IN ('READY','FAILED_RETRYABLE') THEN priority END) AS max_priority,"
-            " SUM(CASE WHEN status='RUNNING' THEN 1 ELSE 0 END) AS running,"
-            " SUM(CASE WHEN status IN ('READY','FAILED_RETRYABLE') THEN 1 ELSE 0 END) AS ready"
-            " FROM intents_ext WHERE status IN ('READY','RUNNING','FAILED_RETRYABLE')"
-            " GROUP BY challenge_id"
-        ).fetchall()
+        with self.read_view() as db:
+            rows = db.execute(
+                "SELECT challenge_id,"
+                " MAX(CASE WHEN status IN ('READY','FAILED_RETRYABLE') THEN priority END) AS max_priority,"
+                " SUM(CASE WHEN status='RUNNING' THEN 1 ELSE 0 END) AS running,"
+                " SUM(CASE WHEN status IN ('READY','FAILED_RETRYABLE') THEN 1 ELSE 0 END) AS ready"
+                " FROM intents_ext WHERE status IN ('READY','RUNNING','FAILED_RETRYABLE')"
+                " GROUP BY challenge_id"
+            ).fetchall()
         return [dict(row) for row in rows]
 
     def challenge_ids_with_work(self) -> List[str]:
         """仍有 READY/RUNNING/退避重试 Intent 的题目（不含已确认终态）。"""
-        rows = self._db.execute(
-            "SELECT DISTINCT challenge_id FROM intents_ext"
-            " WHERE status IN ('READY','RUNNING','FAILED_RETRYABLE')"
-            " ORDER BY challenge_id"
-        ).fetchall()
+        with self.read_view() as db:
+            rows = db.execute(
+                "SELECT DISTINCT challenge_id FROM intents_ext"
+                " WHERE status IN ('READY','RUNNING','FAILED_RETRYABLE')"
+                " ORDER BY challenge_id"
+            ).fetchall()
         return [row["challenge_id"] for row in rows]
 
     def count_intents(self, challenge_id: str) -> int:
         """该题累计 Intent 数（含已完成），用于 Planner 上限。"""
-        row = self._db.execute(
-            "SELECT COUNT(*) AS n FROM intents_ext WHERE challenge_id=?", (challenge_id,)
-        ).fetchone()
+        with self.read_view() as db:
+            row = db.execute(
+                "SELECT COUNT(*) AS n FROM intents_ext WHERE challenge_id=?", (challenge_id,)
+            ).fetchone()
         return int(row["n"] or 0)
 
     def accepted_challenge_ids(self) -> set:
-        rows = self._db.execute(
-            "SELECT DISTINCT challenge_id FROM submissions WHERE status='ACCEPTED'"
-        ).fetchall()
+        with self.read_view() as db:
+            rows = db.execute(
+                "SELECT DISTINCT challenge_id FROM submissions WHERE status='ACCEPTED'"
+            ).fetchall()
         return {row["challenge_id"] for row in rows}
 
     def confirmed_challenge_ids(self) -> set:
-        rows = self._db.execute(
-            "SELECT DISTINCT challenge_id FROM gate_decisions WHERE status='confirmed'"
-        ).fetchall()
+        with self.read_view() as db:
+            rows = db.execute(
+                "SELECT DISTINCT challenge_id FROM gate_decisions WHERE status='confirmed'"
+            ).fetchall()
         return {row["challenge_id"] for row in rows}
 
     def latest_submission(self, challenge_id: str) -> Optional[Dict[str, Any]]:
-        row = self._db.execute(
-            "SELECT status,receipt_id,idempotency_key FROM submissions"
-            " WHERE challenge_id=? ORDER BY updated_at DESC LIMIT 1", (challenge_id,)
-        ).fetchone()
+        with self.read_view() as db:
+            row = db.execute(
+                "SELECT status,receipt_id,idempotency_key FROM submissions"
+                " WHERE challenge_id=? ORDER BY updated_at DESC LIMIT 1", (challenge_id,)
+            ).fetchone()
         return dict(row) if row else None
 
     def pending_submission_count(self) -> int:
-        row = self._db.execute(
-            "SELECT COUNT(*) AS n FROM submissions WHERE status IN ('DRAFT','SENDING','UNKNOWN')"
-        ).fetchone()
+        with self.read_view() as db:
+            row = db.execute(
+                "SELECT COUNT(*) AS n FROM submissions WHERE status IN ('DRAFT','SENDING','UNKNOWN')"
+            ).fetchone()
         return int(row["n"] or 0)
 
     def get_challenges(self, challenge_ids: Sequence[str]) -> Dict[str, Dict[str, Any]]:
@@ -319,9 +338,10 @@ class Blackboard:
         if not ids:
             return {}
         placeholders = ",".join("?" * len(ids))
-        rows = self._db.execute(
-            "SELECT * FROM challenges WHERE id IN ({})".format(placeholders), ids
-        ).fetchall()
+        with self.read_view() as db:
+            rows = db.execute(
+                "SELECT * FROM challenges WHERE id IN ({})".format(placeholders), ids
+            ).fetchall()
         return {row["id"]: dict(row) for row in rows}
 
     # ----------------------------------------------------------------- result
@@ -399,7 +419,8 @@ class Blackboard:
             return WriteReceipt(first=True, idempotency_key=idempotency_key, attempt_id=attempt_id)
 
     def get_attempt(self, attempt_id: str) -> Optional[Dict[str, Any]]:
-        row = self._db.execute("SELECT * FROM attempts WHERE id=?", (attempt_id,)).fetchone()
+        with self.read_view() as db:
+            row = db.execute("SELECT * FROM attempts WHERE id=?", (attempt_id,)).fetchone()
         return dict(row) if row else None
 
     def recent_attempts(self, challenge_id: str, strategy_key: Optional[str] = None,
@@ -411,13 +432,15 @@ class Blackboard:
             args.append(strategy_key)
         sql += " ORDER BY created_at DESC LIMIT ?"
         args.append(limit)
-        return [dict(r) for r in self._db.execute(sql, args)]
+        with self.read_view() as db:
+            return [dict(r) for r in db.execute(sql, args)]
 
     def lesson_context(self, challenge_id: str, limit: int = 6) -> List[Dict[str, Any]]:
         """本题 + 同领域历史教训；只返回脱敏文本，不返回其他题号。"""
         from . import lessons as lesson_store
         challenge = self.get_challenge(challenge_id) or {}
-        return lesson_store.lesson_context(self._db, challenge_id,
+        with self.read_view() as db:
+            return lesson_store.lesson_context(db, challenge_id,
                                            domain=challenge.get("category"), limit=limit)
 
     def handoff(self, challenge_id: str, max_attempts: int = 5,
@@ -456,7 +479,8 @@ class Blackboard:
         }
 
     def get_challenge(self, challenge_id: str) -> Optional[Dict[str, Any]]:
-        row = self._db.execute("SELECT * FROM challenges WHERE id=?", (challenge_id,)).fetchone()
+        with self.read_view() as db:
+            row = db.execute("SELECT * FROM challenges WHERE id=?", (challenge_id,)).fetchone()
         return dict(row) if row else None
 
     def claim_intent_for(self, challenge_id: str, worker: str,
