@@ -358,6 +358,26 @@ class ArenaHarnessAdapter(HarnessAdapter):
             if refs:
                 task.metadata["arena_files"] = entries
                 task.attachments = tuple(refs)
+        # 描述是模型唯一可读面：目标地址、网段、附件位置必须显式给出，
+        # 否则模型只能停在"环境前置缺失"。
+        cidr = os.environ.get("ARENA_NETWORK_CIDR", "")
+        for task in self._tasks:
+            info = task.metadata.get("start_info") or {}
+            # container_addr 可能是字符串或列表（多端口）；统一成逗号分隔字符串。
+            raw_addr = info.get("container_addr")
+            if isinstance(raw_addr, (list, tuple)):
+                raw_addr = ",".join(str(a) for a in raw_addr if a)
+            addr = str(raw_addr or "").strip()
+            parts = []
+            if addr:
+                parts.append("题目服务地址: http://" + addr
+                             + "（用 arena_http 工具访问，host 填 IP 部分）")
+            if cidr:
+                parts.append("允许访问的目标网段: " + cidr + "（网段之外一律拒绝）")
+            if task.metadata.get("arena_files"):
+                parts.append("题目附件已物化到工作区 handouts/ 目录，可直接用 file_info/strings/archive_extract 处理")
+            if parts:
+                task.description = (task.description or "") + "\n\n[Arena 运行环境] " + "；".join(parts)
         return list(self._tasks)
 
     def _ensure_started(self, unique_code: str) -> None:

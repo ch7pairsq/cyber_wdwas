@@ -96,6 +96,41 @@ class Orchestrator:
         return True
 
     # ------------------------------------------------------------------ setup
+    def _materialize_attachments(self, task) -> None:
+        """把 harness 附件下载到工作区 handouts/，供 file_info/strings 等工具直接使用。
+
+        幂等：同名且非空即跳过；单个附件失败只记事件，不阻塞读题。
+        """
+        refs = list(getattr(task, "attachments", ()) or ())
+        if not refs or self._state is None:
+            return
+        reader = getattr(self._harness, "read_attachment", None)
+        if reader is None:
+            return
+        try:
+            hand = self._state.workspace(task.challenge_id) / "handouts"
+        except Exception:
+            return
+        hand.mkdir(exist_ok=True, mode=0o700)
+        import os as _os
+        for ref in refs[:8]:
+            name = _os.path.basename(str(ref).rsplit("/", 1)[-1]) or "attachment.bin"
+            dest = hand / name
+            if dest.exists() and dest.stat().st_size > 0:
+                continue
+            try:
+                data = reader(ref, max_bytes=48 * 1024 * 1024)
+            except Exception as exc:
+                self._board.append_event("attachment_failed", task.challenge_id,
+                                         {"ref": str(ref)[:200], "error": type(exc).__name__})
+                continue
+            if isinstance(data, str):
+                data = data.encode("utf-8")
+            tmp = dest.with_suffix(dest.suffix + ".part")
+            with open(tmp, "wb") as fh:
+                fh.write(bytes(data))
+            _os.replace(tmp, dest)
+
     def bootstrap(self) -> List[Dict]:
         self._harness.startup()
         tasks = self._harness.read_tasks()
@@ -111,6 +146,7 @@ class Orchestrator:
                 "category": task.category, "description": task.description,
                 "attachments": list(task.attachments), "difficulty_level": task.difficulty_level,
             }
+            self._materialize_attachments(task)
             try:
                 self._board.add_intent(IntentDraft(
                     challenge_id=task.challenge_id, strategy_key="misc.triage.auto",

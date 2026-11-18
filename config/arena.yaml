@@ -14,7 +14,9 @@ budget:
   per_challenge_seconds: 1800
   claim_timeout_seconds: 300
   max_model_tokens_per_intent: 400000
-  max_tools_per_intent: 300
+  max_tool_calls_per_intent: 300
+  repeat_limit: 8
+  stall_steps: 60
 download:
   max_single_bytes: 20971520
   max_total_bytes: 104857600
@@ -81,11 +83,12 @@ controller:
   - 100
   max_steps: 200
   parallel_agents: 1
+  max_tool_rounds: 40
 harness:
   protocol: arena
   competition_locked: false
   arena:
-    base_url: http://10.201.0.105:8090
+    base_url: http://10.201.0.97:8090
     auto_start: true
     max_envs: 3
     client_timeout_seconds: 40

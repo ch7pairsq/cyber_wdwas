@@ -129,12 +129,32 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
     step_policy = StepPolicy(tuple(controller.get("thresholds", (30, 50, 70, 100))))
     state.pin_policy({"thresholds": list(step_policy.thresholds), "model": DEFAULT_MODEL, "parallel_agents": 1})
     def control_factory(challenge_id):
-        return SessionControl(state, challenge_id, policy=step_policy,
+        # 意图重试语义：上一意图因 stall/重复调用把会话标为 stopped 时，
+        # 重试意图应复活会话（清停滞计数与重复签名），累计预算保留。
+        # 预算真正耗尽（tokens/tools/时间/steps 任意为 0）时不复活，保持硬限制。
+        control = SessionControl(state, challenge_id, policy=step_policy,
             max_steps=int(controller.get("max_steps", 100)),
             max_tokens=int(budget.get("max_model_tokens_per_intent") or 50000),
-            max_tools=int(budget.get("max_tool_calls_per_intent") or 100),
+            max_tools=int(budget.get("max_tool_calls_per_intent")
+                          or budget.get("max_tools_per_intent") or 100),
             seconds=float(budget.get("per_challenge_seconds") or 900),
+            repeat_limit=int(budget.get("repeat_limit") or 3),
+            stall_steps=int(budget.get("stall_steps") or 20),
             absolute_deadline=getattr(control_factory, "deadline", None))
+        try:
+            _, st = state.load(challenge_id)
+            left = control.remaining()
+            if (st.get("status") == "stopped"
+                    and left["tokens"] > 0 and left["tools"] > 0
+                    and left["seconds"] > 0 and st.get("steps", 0) < control.max_steps):
+                def _revive(s):
+                    s["status"] = "ready"
+                    s["call_signatures"] = {}
+                    s["last_progress_step"] = s["steps"]
+                state.patch(challenge_id, _revive)
+        except Exception:
+            pass
+        return control
     gate = FlagGate(state)
     gateway = SubmitGateway(state, harness, policy)
 
@@ -160,7 +180,8 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
                            max_tokens=int((cfg.get("model") or {}).get("max_tokens") or 4096),
                            skill_loader=skill_loader,
                            tool_registry=tool_registry,
-                           tool_cwd=lambda cid: str(state.workspace(cid)))
+                           tool_cwd=lambda cid: str(state.workspace(cid)),
+                           max_tool_rounds=int((cfg.get("controller") or {}).get("max_tool_rounds") or 40))
     else:
         worker = RuleBasedWorker(harness, evidence_store=evidence,
                                  state_store=state, control_factory=control_factory)
