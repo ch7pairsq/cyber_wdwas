@@ -35,18 +35,13 @@ ALIAS_SECTIONS: Dict[str, Dict[str, Tuple[str, str]]] = {
         "per_challenge_seconds": ("budget", "per_challenge_seconds"),
         "max_tool_calls_per_intent": ("budget", "max_tool_calls_per_intent"),
         "max_model_tokens_per_intent": ("budget", "max_model_tokens_per_intent"),
-        "max_evidence_preview_bytes": ("budget", "max_evidence_preview_bytes"),
     },
     "downloads": {
         "max_single_download_bytes": ("download", "max_single_bytes"),
         "max_total_download_bytes": ("download", "max_total_bytes"),
-        "allow_http": ("download", "allow_http"),
-        "allow_https": ("download", "allow_https"),
     },
     "app": {
         "mode": ("app", "mode"),
-        "run_deadline_seconds": ("app", "run_deadline_seconds"),
-        "shutdown_reserve_seconds": ("app", "shutdown_reserve_seconds"),
     },
 }
 
@@ -140,6 +135,11 @@ def _validate_config(cfg):
         errors.append("runtime.heartbeat_seconds must be in (0, worker_lease_seconds)")
     if retry_backoff < 0:
         errors.append("runtime.retry_backoff_seconds must be >= 0")
+    max_intents = _num(cfg, "runtime", "max_intents_per_challenge", 4)
+    if max_intents < 1 or max_intents != int(max_intents):
+        errors.append("runtime.max_intents_per_challenge must be a positive integer")
+    elif max_intents > 20:
+        errors.append("runtime.max_intents_per_challenge must be <= 20")
 
     per_intent = _num(cfg, "budget", "per_intent_seconds", 0)
     per_challenge = _num(cfg, "budget", "per_challenge_seconds", 0)
@@ -187,6 +187,8 @@ def _validate_config(cfg):
         errors.append("policy.sandbox_required must be boolean")
     if (cfg.get("app") or {}).get("mode") == "competition" and harness.get("protocol") != "official":
         errors.append("competition requires official harness; mock fallback is forbidden")
+    if (cfg.get("app") or {}).get("mode") == "competition" and policy.get("sandbox_required", True) is not True:
+        errors.append("competition requires policy.sandbox_required=true")
     controller = cfg.get("controller") or {}
     from .runtime.control import StepPolicy
     StepPolicy(tuple(controller.get("thresholds", (30, 50, 70, 100))))

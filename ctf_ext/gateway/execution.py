@@ -118,7 +118,7 @@ class CommandExecutor:
         eid = self.store.evidence.put_bytes(result['output'], kind='command_output')
         command_id = 'cmd-' + uuid.uuid4().hex
         complete = result['complete'] and result['returncode'] == 0
-        with self.store.board._write() as db:
+        with self.store.board.transaction() as db:
             db.execute('INSERT INTO command_log VALUES(?,?,?,?,?,?,?,?,?,?)',
                        (command_id, cid, eid, json.dumps(argv), version, target_revision,
                         self.environment, result['returncode'], int(complete), time.time()))

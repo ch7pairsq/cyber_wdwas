@@ -119,8 +119,14 @@ class Blackboard:
         # 配置后所有结果引用的证据都必须通过校验（D.1-3）
         self._evidence_check = evidence_check
 
+    @property
+    def connection(self) -> sqlite3.Connection:
+        """只读连接入口：跨模块统计/审计使用；写操作必须走 transaction()。"""
+        return self._db
+
     @contextmanager
-    def _write(self):
+    def transaction(self):
+        """公开写事务：BEGIN IMMEDIATE + 锁 + 失败回滚（附录 D.1）。"""
         with self._lock:
             self._db.execute("BEGIN IMMEDIATE")
             try:
@@ -130,9 +136,12 @@ class Blackboard:
                 self._db.execute("ROLLBACK")
                 raise
 
+    # 兼容既有调用方与测试；新代码统一使用 transaction()。
+    _write = transaction
+
     # ---------------------------------------------------------------- intents
     def add_challenge(self, challenge) -> None:
-        with self._write() as db:
+        with self.transaction() as db:
             db.execute(
                 "INSERT OR IGNORE INTO challenges(id, name, category, description, attachments, points_hint,"
                 " difficulty_level, metadata, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
@@ -146,7 +155,7 @@ class Blackboard:
     def add_intent(self, draft: IntentDraft) -> str:
         """发布探索方向；attempt_key 重复时拒绝（§7 去重、D.3）。"""
         akey = build_attempt_key(draft.challenge_id, draft.strategy_key, draft.params, draft.tool_version)
-        with self._write() as db:
+        with self.transaction() as db:
             row = db.execute(
                 "SELECT id, outcome FROM attempts WHERE attempt_key=? AND outcome IN (?,?) LIMIT 1",
                 (akey, OUTCOME_SUCCESS, OUTCOME_NO_SIGNAL),
@@ -184,7 +193,7 @@ class Blackboard:
         """
         now = time.time()
         lease = lease_seconds or self._lease_default
-        with self._write() as db:
+        with self.transaction() as db:
             sql = ("SELECT id FROM intents_ext WHERE status IN ('READY','FAILED_RETRYABLE')"
                    " AND (lease_until IS NULL OR lease_until < ?)")
             args: List[Any] = [now]
@@ -220,7 +229,7 @@ class Blackboard:
             )
 
     def heartbeat(self, intent_id: str, worker: str, extend: float = 120.0) -> bool:
-        with self._write() as db:
+        with self.transaction() as db:
             cur = db.execute(
                 "UPDATE intents_ext SET lease_until=MAX(lease_until, ?), updated_at=?"
                 " WHERE id=? AND owner=? AND status='RUNNING' AND lease_until>?",
@@ -239,7 +248,7 @@ class Blackboard:
             # 避免释放另一个进程刚领取的同一 Intent。
             sql += " AND attempt_no=?"
             args += (int(attempt_no),)
-        with self._write() as db:
+        with self.transaction() as db:
             db.execute(sql, args)
 
     def list_open(self, challenge_id: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -251,6 +260,70 @@ class Blackboard:
         sql += " ORDER BY priority DESC"
         return [dict(r) for r in self._db.execute(sql, args)]
 
+    def open_intent_summary(self) -> List[Dict[str, Any]]:
+        """每题开放 Intent 的聚合视图，供调度器一次查询完成背压判断。"""
+        rows = self._db.execute(
+            "SELECT challenge_id,"
+            " MAX(CASE WHEN status IN ('READY','FAILED_RETRYABLE') THEN priority END) AS max_priority,"
+            " SUM(CASE WHEN status='RUNNING' THEN 1 ELSE 0 END) AS running,"
+            " SUM(CASE WHEN status IN ('READY','FAILED_RETRYABLE') THEN 1 ELSE 0 END) AS ready"
+            " FROM intents_ext WHERE status IN ('READY','RUNNING','FAILED_RETRYABLE')"
+            " GROUP BY challenge_id"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def challenge_ids_with_work(self) -> List[str]:
+        """仍有 READY/RUNNING/退避重试 Intent 的题目（不含已确认终态）。"""
+        rows = self._db.execute(
+            "SELECT DISTINCT challenge_id FROM intents_ext"
+            " WHERE status IN ('READY','RUNNING','FAILED_RETRYABLE')"
+            " ORDER BY challenge_id"
+        ).fetchall()
+        return [row["challenge_id"] for row in rows]
+
+    def count_intents(self, challenge_id: str) -> int:
+        """该题累计 Intent 数（含已完成），用于 Planner 上限。"""
+        row = self._db.execute(
+            "SELECT COUNT(*) AS n FROM intents_ext WHERE challenge_id=?", (challenge_id,)
+        ).fetchone()
+        return int(row["n"] or 0)
+
+    def accepted_challenge_ids(self) -> set:
+        rows = self._db.execute(
+            "SELECT DISTINCT challenge_id FROM submissions WHERE status='ACCEPTED'"
+        ).fetchall()
+        return {row["challenge_id"] for row in rows}
+
+    def confirmed_challenge_ids(self) -> set:
+        rows = self._db.execute(
+            "SELECT DISTINCT challenge_id FROM gate_decisions WHERE status='confirmed'"
+        ).fetchall()
+        return {row["challenge_id"] for row in rows}
+
+    def latest_submission(self, challenge_id: str) -> Optional[Dict[str, Any]]:
+        row = self._db.execute(
+            "SELECT status,receipt_id,idempotency_key FROM submissions"
+            " WHERE challenge_id=? ORDER BY updated_at DESC LIMIT 1", (challenge_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def pending_submission_count(self) -> int:
+        row = self._db.execute(
+            "SELECT COUNT(*) AS n FROM submissions WHERE status IN ('DRAFT','SENDING','UNKNOWN')"
+        ).fetchone()
+        return int(row["n"] or 0)
+
+    def get_challenges(self, challenge_ids: Sequence[str]) -> Dict[str, Dict[str, Any]]:
+        """批量取题目元数据，避免调度器逐题查询。"""
+        ids = list(dict.fromkeys(challenge_ids))
+        if not ids:
+            return {}
+        placeholders = ",".join("?" * len(ids))
+        rows = self._db.execute(
+            "SELECT * FROM challenges WHERE id IN ({})".format(placeholders), ids
+        ).fetchall()
+        return {row["id"]: dict(row) for row in rows}
+
     # ----------------------------------------------------------------- result
     def write_result(self, result: WorkerResult, idempotency_key: str, transaction_hook=None) -> WriteReceipt:
         """幂等写入：同 key 只落库一次；错主/过期写入拒绝（D.1-2、D.4）。"""
@@ -260,7 +333,7 @@ class Blackboard:
             "next_best_action": result.next_best_action, "candidate_answer": result.candidate_answer,
             "resource_usage": result.resource_usage,
         }, ensure_ascii=False)
-        with self._write() as db:
+        with self.transaction() as db:
             # 幂等命中提前返回：重复回执不属于过期写入，必须在 owner/状态校验之前
             prev = db.execute(
                 "SELECT attempt_id FROM results_ext WHERE idempotency_key=?", (idempotency_key,)
@@ -407,7 +480,7 @@ class Blackboard:
                 raise EvidenceNotRegistered(bad)
             fid = new_id("fact")
             ids.append(fid)
-        with self._write() as db:
+        with self.transaction() as db:
             now = time.time()
             for fid, fact in zip(ids, facts):
                 db.execute(
@@ -422,7 +495,7 @@ class Blackboard:
     # ------------------------------------------------------------------ events
     def append_event(self, event_type: str, entity_id: str = "", payload: Optional[Dict[str, Any]] = None) -> int:
         """追加审计事件（§17.2 events 表：只追加，不改写历史）。"""
-        with self._write() as db:
+        with self.transaction() as db:
             cur = db.execute(
                 "INSERT INTO events(event_type, entity_id, payload, created_at) VALUES (?,?,?,?)",
                 (event_type, entity_id, json.dumps(payload or {}, ensure_ascii=False), time.time()),

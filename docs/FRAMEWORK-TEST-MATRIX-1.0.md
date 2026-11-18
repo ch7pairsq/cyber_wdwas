@@ -1,18 +1,28 @@
 # 工程框架测试用例 1.0 · 覆盖与实测记录
 
-日期：2026-11-17。工程目录：ctf-agent。实施解释见 [架构实施记录](FRAMEWORK-OPTIMIZATION-1.0.md)。
+日期：2026-11-18（增量）。工程目录：ctf-agent。实施解释见 [架构实施记录](FRAMEWORK-OPTIMIZATION-1.0.md)。
 
 ## 本轮结论
 
-- 改动前：79/79 通过。
-- 累计新增：106 个测试函数（单元/集成/故障注入），合计 **186/186**。Python 3.9.6 和 3.12.16 分别验证；本轮在既有 137 项基础上新增 48 项，其中 5 项覆盖离线工具链清单与配置白名单一致性，2 项覆盖本地工具循环与证据闭环，2 项覆盖 Provider 的 `tools`/`tool_use` 传输，2 项覆盖扩展工具目录的固定 argv 与拒绝路径，1 项覆盖技能域别名，1 项覆盖候选答案 flag 格式契约。
-- 完整本地 CI：语法、直接依赖锁、186 项检查、2 Worker / 8 Intent SQLite 模拟压测和预检通过；预检 11 PASS / 4 WARN / 0 FAIL。
+- 改动前基线：79/79 通过。
+- 当前全量 **205/205**（unit 184 / integration 17 / chaos 4）。本增量新增 9 项：Planner 3 项、调度批量查询 3 项、配置校验 3 项；并用 Python 3.9.6 的零依赖 runner 实跑。
+- 完整本地 runner：语法、直接依赖锁、205 项检查、2 Worker / 8 Intent SQLite 模拟压测和预检通过；预检 11 PASS / 4 WARN / 0 FAIL。Python 3.9.6 与 3.12.16 均为 204/204；pytest、ruff/mypy 与 YAML 配置分支本轮未实跑。
 - 20 题离线夹具：15 个有效答案全部 ACCEPTED，5 个对抗输入均未提交，0 错误提交。命令日志 30 条。它不是按赛制全时长的真实题集模拟。
 - 真实子进程 os._exit(23) 后，DRAFT 恢复提交且不重复解题；SENDING 恢复只查询、零 POST。
 - 真实 CLI --mode fallback 通过，输出见 build/framework-fallback.json。
 - 不调用付费模型、不联网、不向正式平台提交。当前无 Docker CLI；PyYAML、requests、pytest 在第二套 Python 环境中也未安装，使用现有零依赖运行器与 Fake Provider。
 
 **准出判定：未达成正式参赛准出。** 自动化用例通过不代表文档全部 P0 已通过：H 真容器隔离、K 全真赛制、L-03 冻结纪律等未验证。真实首杀转化率及 P1 ≥90% 不可从 Mock 推断。
+
+## 2026-11-18 增量
+
+| 改动 | 验证 |
+|---|---|
+| 黑板公开 `transaction()` / `connection` / 命名查询，生产代码去掉 `_db`、`_write()` 直连 | `test_named_queries_cover_scheduler_and_runtime_needs`；全量回归 |
+| 调度器每轮聚合查询 + `StateStore.load_many()`，消除按题 SQL | 12 道题上断言 SELECT ≤ 5：`test_scheduler_uses_constant_number_of_queries` |
+| `_execute_claim` 拆分并接入最小 Planner | Planner 触发/上限/blocked/confirmed 3 项单测；端到端 no_signal 后新增 Intent |
+| 去重：删除重复 `Submission`、占位 official adapter、生产未用 `Submitter` | 全量回归；离线适配器测试改用 `tests/framework_submitter.py` |
+| 清理未接线配置键并新增校验 | `test_planner_limit_and_competition_sandbox_are_validated`、`test_removed_aliases_are_not_injected` |
 
 ## 复跑与证据
 
@@ -58,7 +68,7 @@ build/ 保持 Git 忽略，不提交数据库、flag、凭据或生成结果。�
 | 2 | Skill 加载与解题速率 | 已接索引先行、领域/关键词选择、最多 2 节、8KB/12KB 预算、缓存和损坏降级；`skills_loaded` 写入 `resource_usage`。测试：test_framework_skills.py、test_framework_memory.py。只内置 2 节，真实模型提速未测。 |
 | 3 | 卡死与外部阻塞 | 主线程 `ClaimTimeout` 到点释放，Gate 超时、Provider 超时、LeaseHeartbeat、提交线程与 supervisor 心跳均有独立路径。测试：test_framework_timeout.py、test_framework_recovery.py、integration/test_framework_hardening.py。非主线程/C 扩展与真实平台网络取消未验收。 |
 | 4 | 重启恢复 | SQLite 会话/尝试/结果/Outbox/证据/教训持久化；过期租约回收；真实进程 `os._exit(23)` 后 DRAFT 继续、SENDING 只查询。测试：test_framework_process_recovery.py、integration/test_framework_hardening.py。工具调用中途断点未做。 |
-| 5 | 解题过慢 | 已有状态压缩、技能预算、阈值路由和命令缓存，但无真实题集时延/步数基准；不能把 186 项离线通过当成速度问题已解决。 |
+| 5 | 解题过慢 | 已有状态压缩、技能预算、阈值路由和命令缓存，但无真实题集时延/步数基准；不能把 205 项离线通过当成速度问题已解决。Planner 仅做确定性离线验证。 |
 | 6 | 并行与瓶颈 | 固定串行，报告 `effective_parallel=1`；`max_workers=4` 只是容量上限。SQLite 写入、模型全局限额和单题消费者仍是瓶颈；8 路 SQLite 压测只验证不超卖。 |
 | 7 | 沙箱隔离与 Agent 通信 | 每题工作区 0700、拒绝 symlink、`SandboxSpec` 参数失败关闭；本机无 Docker，H-02/03/04 未实测。Agent 无直连通信，仅共享黑板/教训交接包。 |
 | 8 | 记忆落盘 | 会话 JSON、尝试、教训、证据、提交 Outbox 均可从 SQLite/内容寻址文件恢复；证据 fsync + 原子替换，目录 fsync。测试：test_framework_recovery.py、test_framework_lessons.py。 |
@@ -131,7 +141,10 @@ build/ 保持 Git 忽略，不提交数据库、flag、凭据或生成结果。�
 | 主流程绕过 Gate 直接提交，附件或模型自报可成为候选来源 | P0 | 主入口只经 Gate + Outbox；注入无证据候选零提交 |
 | Gate 决策插入 8 个占位符对应 7 列，真实写入失败 | P0 | 更正为 7；每条端到端候选真实落库 |
 | 结果完成与发出之间断电导致答案永久不发送 | P0 | 结果/Gate/Outbox 同事务；事务中断全部回滚，真实进程中断恢复 |
-| 旧 Submitter 无数据库时发送异常未保留已发送事实 | P0 | 发送前记 SENDING，异常 UNKNOWN，后续只查询 |
+| 旧 Submitter 无数据库时发送异常未保留已发送事实 | P0 | 生产路径已删除 `harness/submit.py`，正式提交只走 `SubmitGateway`；离线适配器测试 helper 保留相同状态机，并由 gateway/chaos 测试覆盖 SENDING/UNKNOWN 只查询。 |
+| Scheduler 每题重复查询（N+1） | P1 | 聚合查询 + `load_many` + 批量元数据；12 题断言 SELECT 次数不随题数增长。 |
+| 跨模块直接访问黑板 `_db` / `_write` | P1 | 公开 `transaction()`、只读 `connection` 与命名查询；生产代码迁移完成。 |
+| 配置含未接线键，易被误认为生效 | P2 | 移除 `run.*`、`per_strategy_seconds`、`tool_timeout`、`grace_seconds`、`allow_http/https` 等；新增 Planner 上限与 competition sandbox 校验。 |
 | 工具输出先全量缓冲、EOF 后未等待进程退出 | P0/P1 | 统一有界采集、超时杀进程组；正常成功码等待；超限不作证据 |
 | 本地命令执行默认被误当作安全沙箱 | P0 | 默认 sandbox_required 时拒绝本地执行；只有显式本地测试可绕开容器要求 |
 | 租约过期仍可写回或心跳复活；调度检查与领取并非原子 | P1 | 增加到期约束、独立连接心跳、事务内容量复核及 8 路并发测试 |

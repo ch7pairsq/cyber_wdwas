@@ -13,7 +13,10 @@ import time
 
 from .flag_gate import FlagGate, normalized_flag
 from .schema import Submission, SubmitReceipt
-from .submit import SubmissionLocked
+
+
+class SubmissionLocked(Exception):
+    """参赛锁定或策略拒绝：不得把候选送入 Outbox。"""
 
 
 class SubmitGateway:
@@ -112,7 +115,7 @@ class SubmitGateway:
             except queue.Empty:
                 break
             row = self.db.execute('SELECT s.*,j.gate_id,j.created_at FROM submissions s JOIN submission_jobs j USING(idempotency_key) WHERE idempotency_key=?', (key,)).fetchone()
-            with self.store.board._write() as db:
+            with self.store.board.transaction() as db:
                 db.execute('UPDATE submissions SET status=?,receipt_id=?,detail=?,updated_at=? WHERE idempotency_key=?',
                            (receipt.status, receipt.receipt_id, receipt.detail, self.clock(), key))
                 db.execute('UPDATE submission_jobs SET next_query=? WHERE idempotency_key=?', (self.clock() + self.query_interval, key))
@@ -137,11 +140,11 @@ class SubmitGateway:
             raise SubmissionLocked('submission policy denied')
         mode = 'send' if row['status'] == 'DRAFT' else 'query'
         if mode == 'send' and not self._proof_valid(row):
-            with self.store.board._write() as db:
+            with self.store.board.transaction() as db:
                 db.execute("UPDATE submissions SET status='BLOCKED',detail='proof changed before dispatch' WHERE idempotency_key=?", (row['idempotency_key'],))
             self.store.board.append_event('submission_blocked', row['challenge_id'], {'reason': 'proof changed'})
             return completed
-        with self.store.board._write() as db:
+        with self.store.board.transaction() as db:
             if mode == 'send':
                 claimed = db.execute("UPDATE submissions SET status='SENDING',sent_at=? WHERE idempotency_key=? AND status='DRAFT'", (self.clock(), row['idempotency_key']))
                 if claimed.rowcount != 1:
@@ -159,7 +162,7 @@ class SubmitGateway:
 
     def recover_legacy(self):
         """旧库的 SENDING/UNKNOWN 只挂接查询，不把旧候选当成已校验答案。"""
-        with self.store.board._write() as db:
+        with self.store.board.transaction() as db:
             db.execute("INSERT OR IGNORE INTO submission_jobs SELECT idempotency_key,'legacy-query-only',0,? FROM submissions WHERE status IN ('SENDING','UNKNOWN')", (self.clock(),))
 
     def flush(self, timeout=1):

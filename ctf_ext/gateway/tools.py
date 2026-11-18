@@ -200,7 +200,7 @@ class ToolRegistry:
             return None
         import uuid
         command_id = "cmd-" + uuid.uuid4().hex
-        with self._state.board._write() as db:
+        with self._state.board.transaction() as db:
             db.execute("INSERT INTO command_log VALUES(?,?,?,?,?,?,?,?,?,?)",
                        (command_id, control.challenge_id, evidence_id, json.dumps(list(argv)),
                         spec.version, self._target_revision, self._environment,

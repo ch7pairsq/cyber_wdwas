@@ -68,7 +68,7 @@ class DeadlineGuard:
 def recover_expired_leases(board, now: float = None, hard_limit_seconds: float = 600.0) -> Dict[str, int]:
     now = now if now is not None else time.time()
     requeued = orphaned = 0
-    with board._write() as db:
+    with board.transaction() as db:
         rows = db.execute("SELECT id, owner, lease_until, updated_at FROM intents_ext WHERE status='RUNNING'").fetchall()
         for r in rows:
             if r["lease_until"] is not None and r["lease_until"] < now:

@@ -4,7 +4,7 @@ import os
 import sqlite3
 import tempfile
 
-from ctf_ext.config import HotConfig, config_hash, normalize_config, validate_config
+from ctf_ext.config import ALIAS_SECTIONS, HotConfig, config_hash, normalize_config, validate_config
 from ctf_ext.domain.migrate import migrate
 
 
@@ -80,6 +80,57 @@ def test_validation_catches_hard_caps():
         mutate(cfg)
         errors = validate_config(cfg)
         assert any(needle in e for e in errors), (needle, errors)
+
+
+def test_planner_limit_and_competition_sandbox_are_validated():
+    cfg = _base()
+    cfg["harness"] = {"protocol": "official", "official_sdk_ready": True,
+                      "competition_locked": True}
+    cfg["app"] = {"mode": "competition"}
+    cfg["policy"]["sandbox_required"] = False
+    assert any("sandbox_required" in e for e in validate_config(cfg))
+    cfg["policy"]["sandbox_required"] = True
+    assert validate_config(cfg) == []
+    for value in (0, -1, 1.5, 21):
+        bad = _base()
+        bad["runtime"]["max_intents_per_challenge"] = value
+        assert any("max_intents_per_challenge" in e for e in validate_config(bad)), value
+    cfg["runtime"]["max_intents_per_challenge"] = 20
+    assert validate_config(cfg) == []
+
+
+def test_removed_aliases_are_not_injected():
+    assert "allow_http" not in ALIAS_SECTIONS["downloads"]
+    assert "allow_https" not in ALIAS_SECTIONS["downloads"]
+    assert "run_deadline_seconds" not in ALIAS_SECTIONS["app"]
+    assert "shutdown_reserve_seconds" not in ALIAS_SECTIONS["app"]
+    assert "max_evidence_preview_bytes" not in ALIAS_SECTIONS["budgets"]
+    cfg = normalize_config({"downloads": {"allow_http": True, "allow_https": True},
+                            "budgets": {"max_evidence_preview_bytes": 10}})
+    assert "allow_http" not in (cfg.get("download") or {})
+    assert "allow_https" not in (cfg.get("download") or {})
+    assert "max_evidence_preview_bytes" not in (cfg.get("budget") or {})
+
+
+def test_build_runtime_loads_default_config_when_parser_is_available():
+    import ctf_ext.config as config_mod
+    from ctf_ext.__main__ import build_runtime
+
+    original = config_mod.load_yaml
+    cfg = _base()
+    cfg["runtime"]["max_intents_per_challenge"] = 2
+    config_mod.load_yaml = lambda path: cfg
+    try:
+        with tempfile.TemporaryDirectory() as root:
+            orch = build_runtime(root + "/run.db", root + "/evidence")
+            assert orch._hot is not None
+            assert orch._configured_max_workers == 4
+            assert orch._claim_timeout == 600
+            assert orch._planner.max_intents_per_challenge == 2
+            orch._gateway.close()
+            orch._board.close()
+    finally:
+        config_mod.load_yaml = original
 
 
 def _write(path, cfg):

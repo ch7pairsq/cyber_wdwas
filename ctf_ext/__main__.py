@@ -11,13 +11,12 @@ import os
 import sqlite3
 import sys
 
-from .config import HotConfig
+from .config import ConfigError, HotConfig
 from .domain.migrate import migrate
 from .gateway.policy import PolicyConfig, PolicyEngine
 from .gateway.catalog import register_default_tools
 from .gateway.tools import ToolRegistry
 from .harness.mock import MockHarnessAdapter, default_practice_challenges
-from .harness.submit import Submitter
 from .harness.flag_gate import FlagGate, ProviderReviewer
 from .harness.gateway import SubmitGateway
 from .store.session import StateStore
@@ -33,6 +32,11 @@ from .store.blackboard import Blackboard
 from .store.evidence import EvidenceStore
 
 PROMPT_PATH = os.path.join(os.path.dirname(__file__), "prompts", "worker.md")
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEFAULT_CONFIG_PATHS = (
+    os.path.join(REPO_ROOT, "config", "base.yaml"),
+    os.path.join(REPO_ROOT, "config", "practice.yaml"),
+)
 
 
 def _make_provider(cfg):
@@ -61,10 +65,18 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
 
     hot = None
     cfg = {}
-    if config_path:
-        hot = HotConfig(config_path)
-        cfg = hot.config
-        hot.snapshot(conn, source="startup")
+    config_paths = [config_path] if config_path else [p for p in DEFAULT_CONFIG_PATHS
+                                                       if os.path.exists(p)]
+    if config_paths:
+        try:
+            hot = HotConfig(*config_paths)
+        except ConfigError as exc:
+            # 默认配置只在显式依赖缺失时退回代码默认值；--config 仍严格失败。
+            if config_path or "PyYAML is required" not in str(exc):
+                raise
+        if hot is not None:
+            cfg = hot.config
+            hot.snapshot(conn, source="startup")
 
     evidence = EvidenceStore(evidence_root, db=conn)
     policy_cfg = cfg.get("policy") or {}
@@ -84,7 +96,6 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
         raise SystemExit("official harness is fail-closed: SDK/samples missing (design §12.5); "
                          "use harness.protocol=mock until the official adapter is provided")
     harness = MockHarnessAdapter(default_practice_challenges())
-    submitter = Submitter(harness, policy_engine=policy, db=conn)
     state = StateStore(board, evidence, os.path.join(os.path.dirname(db_path), "workspaces"))
     tool_registry = None
     if bool((cfg.get("model") or {}).get("tools_enabled", True)):
@@ -134,7 +145,9 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
     if claim_timeout_seconds is None:
         claim_timeout_seconds = float(budget.get("claim_timeout_seconds")
                                       or budget.get("per_intent_seconds") or 90)
-    orch = Orchestrator(harness, board, submitter, scheduler, worker, evidence=evidence,
+    # 确定性兜底 Worker 没有新的探索信息，默认不做后续规划；只有 LLM 模式展开 Planner。
+    planner_limit = int(runtime_cfg.get("max_intents_per_challenge") or (4 if mode == "llm" else 1))
+    orch = Orchestrator(harness, board, scheduler, worker, evidence=evidence,
                         hot_config=hot, policy_engine=policy, db=conn,
                         state_store=state, flag_gate=gate, gateway=gateway,
                         claim_timeout_seconds=claim_timeout_seconds,
@@ -142,6 +155,7 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
                         heartbeat_path=heartbeat_path,
                         retry_backoff_seconds=float(runtime_cfg.get("retry_backoff_seconds") or 0),
                         poll_seconds=float(runtime_cfg.get("intent_poll_seconds") or 0.1),
+                        max_intents_per_challenge=planner_limit,
                         reviewer_factory=(lambda cid: ProviderReviewer(provider, control_factory(cid))) if mode == "llm" else None)
     if hot is not None:
         orch.apply_config(hot.config)

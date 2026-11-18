@@ -3,7 +3,7 @@ from _support import new_board  # noqa: F401
 
 from ctf_ext.harness.mock import MockHarnessAdapter
 from ctf_ext.harness.schema import Submission
-from ctf_ext.harness.submit import Submitter
+from tests.framework_submitter import Submitter
 
 
 class _FlakyAdapter(MockHarnessAdapter):

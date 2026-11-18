@@ -1,10 +1,10 @@
 # 工程框架优化 1.0 · 实施记录
 
-日期：2026-11-17。依据用户提供的《工程框架优化 1.0》和《工程框架测试用例 1.0》。
+日期：2026-11-18（增量）。依据用户提供的《工程框架优化 1.0》和《工程框架测试用例 1.0》。
 
 ## 结论与范围
 
-本轮完善的是现有 ctf_ext 轻量控制器，不重写 vendored Cairn 的 ReAct/上下文运行时。不调用真实模型、不向官方平台提交、不安装依赖、不推送代码。仓库已有未提交改动原样保留并增量接线；本轮新增 48 项回归，测试总数 **186/186**，最终日志与逐项结论见 [验收矩阵](FRAMEWORK-TEST-MATRIX-1.0.md)。
+本轮完善的是现有 ctf_ext 轻量控制器，不重写 vendored Cairn 的 ReAct/上下文运行时。不调用真实模型、不向官方平台提交、不安装依赖。仓库已有未提交改动原样保留并增量接线；在上一轮基础上新增 9 项结构性回归，当前全量 **205/205**（unit 184 / integration 17 / chaos 4），逐项结论见 [验收矩阵](FRAMEWORK-TEST-MATRIX-1.0.md)。
 
 **本地离线验证通过，不等于正式参赛准出。** 官方 SDK/协议、真实模型与工具循环、生产每题容器、按赛制全时长模拟仍未验收。
 
@@ -13,7 +13,7 @@
 ~~~text
 CLI build_runtime
   ├─ StateStore：固定 JSON schema / CAS / 命令与证据归档 / 缓存
-  ├─ Scheduler：实际步数 + 开局权重 + 数据库内原子并发门禁
+  ├─ Scheduler：一次聚合查询 + 批量状态加载 + 数据库内原子并发门禁
   └─ Orchestrator
        ├─ LeaseHeartbeat：独立 SQLite 连接续租，覆盖执行和校验阶段
        ├─ SessionRunner（现有 Worker 协议）
@@ -22,6 +22,7 @@ CLI build_runtime
        │    └─ LlmWorker：现有 Provider 契约、状态交接、技能注入与预算限制
        ├─ FlagGate：FLAG 声明 → Grounding → Negation → Interrogation
        ├─ 单事务：结果 + GateDecision + submission_jobs / DRAFT
+       ├─ IntentPlanner：no_signal / gate rejected / pending → 下一轮 Intent
        ├─ ClaimTimeout：主线程 SIGALRM 单题硬超时，超时写可重试失败
        └─ SubmitGateway
             主线程 SQLite Outbox → 守护线程传输 → 回执队列
@@ -91,12 +92,24 @@ python3 scripts/supervise.py --heartbeat build/agent.heartbeat --stale-seconds 9
 - Worker 交接包限制近期尝试 5 条、教训 6 条、开放 Intent 5 条；压缩续跑状态只带最近 10 条假设/证据指针，不带完整 evidence 列表。
 - 当前只内置 2 个技能章节、单一串行 Worker；机制有离线测试，真实模型解题提速和跨 Agent 共享收益未测。
 
+#### 6.1 保底入口
+
 ~~~bash
 # 无模型、无官方提交的保底入口；复用原运行库时将路径换成原路径。
 python3 -m ctf_ext run --mode fallback --seconds 30 \
   --db build/fallback.db --evidence build/fallback-evidence \
   --report build/fallback-report.json
 ~~~
+
+### 7. 结构性收口（增量）
+
+- **黑板公开 API**：新增 `Blackboard.transaction()`、只读 `connection` 属性和命名查询（开放 Intent 聚合、有工作题目、Intent 计数、已接受/已确认题目、最近提交、待提交计数、批量题目元数据）。生产代码不再直接访问 `_db` 或调用 `_write()`；`_write` 仅作为兼容别名保留。
+- **调度 N+1 收敛**：`Scheduler.eligible_challenges()` 每轮固定执行“聚合查询 + `StateStore.load_many()` + 批量题目元数据”三轮 SQL，不再按题循环查询；`has_waiting_work()` 同样复用命名查询。新增测试在 12 道题上断言 SELECT 次数不超过 5。
+- **`_execute_claim` 拆分**：执行、契约校验、用量记录、候选判定、结果落库、后处理、Planner 分别成函数；返回契约、事件名与提交时机保持不变，便于单测和后续替换 Worker。
+- **最小 Planner**：仅在 `no_signal`、Gate rejected、Gate pending 时规划；confirmed 不扩展，`blocked` 视为终态。后续 `strategy_key` 为“原 key.followup.N”，参数携带 `next_best_action`、`ruled_out` 与脱敏教训。上限由 `runtime.max_intents_per_challenge`（1–20）控制；mock/fallback 默认 1，llm 默认 4，避免确定性兜底 Worker 空转。
+- **去重与死代码**：删除 `domain/models.py:Submission`、`harness/adapter.py` 的占位 `OfficialHarnessAdapter`、生产路径未使用的 `harness/submit.py`。`SubmissionLocked` 归入 `harness/gateway.py`；离线适配器测试改用 `tests/framework_submitter.py`。正式提交仍只走 `SubmitGateway`。
+- **配置收口**：从 `config/base.yaml` 和别名表移除 `run.*`、`app.run_deadline_seconds`、`concurrency.model_max_inflight`、`budget.per_strategy_seconds/tool_timeout/grace_seconds`、`download.allow_http/allow_https`、`app.shutdown_reserve_seconds`、`budget.max_evidence_preview_bytes`。新增 `runtime.max_intents_per_challenge` 正整数/≤20 校验，以及 competition 必须 `policy.sandbox_required=true` 的校验。
+- **CLI 默认配置**：无 `--config` 时加载 `config/base.yaml` + `config/practice.yaml`；显式 `--config` 仍严格失败。本机缺少 PyYAML 时，仅默认配置路径退回代码默认值并记录为环境限制，不让缺依赖静默改变显式配置。
 
 ## 仍需外部或后续工程完成的事项
 
@@ -106,7 +119,7 @@ python3 -m ctf_ext run --mode fallback --seconds 30 \
 4. 与比赛一致的容器安全实测；20 题夹具为直读/base64 结构变化而非真实混合解题难度，不可用于参赛成绩推断。
 5. 正式开赛时间、计分规则与首杀目标未提供，不能宣称 K-01、P1 ≥90% 或全 P0 准出达成。
 6. 冻结前运行 scripts/freeze.sh 留档并审查未提交差异，只允许标明理由的 P0 修复。现有冻结脚本并非强制变更审批系统，L-03 的 24 小时组织纪律仍需实际执行。
-7. 当前宿主缺 PyYAML，YAML 解析/热更新分支本轮未实跑；JSON 热更新已覆盖。未自动安装依赖，也未复建容器镜像。
+7. 当前宿主缺 PyYAML、pytest、ruff/mypy，YAML 默认配置加载/热更新、pytest 与静态检查分支本轮未实跑；JSON 热更新与零依赖 runner 已覆盖。未自动安装依赖，也未复建容器镜像。
 8. 单题硬超时依赖主线程 `SIGALRM`；非主线程、阻塞型 C 扩展或整个进程卡死仍需外部 supervisor/平台超时兜底，不能把 `DeadlineGuard` 当作万能取消。
-9. 真正并行执行器未实现；当前串行报告 `effective_parallel=1`，8 路 SQLite 压测只证明容量门禁不超卖。
+9. 真正并行执行器未实现；当前串行报告 `effective_parallel=1`，8 路 SQLite 压测只证明容量门禁不超卖。Planner 只做了确定性离线验证，尚未用真实模型验证后续策略质量。
 10. 跨会话记忆只覆盖数据库中的状态、证据、教训和 Outbox；没有跨运行的自然语言长期记忆、向量检索或工具调用中途断点。

@@ -68,13 +68,5 @@ class Lesson:
     superseded: bool = False
 
 
-@dataclass
-class Submission:
-    challenge_id: str
-    answer: str
-    idempotency_key: str
-    evidence_ids: List[str] = field(default_factory=list)
-
-
 def to_dict(obj: Any) -> Dict[str, Any]:
     return asdict(obj)

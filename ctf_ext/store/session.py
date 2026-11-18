@@ -56,7 +56,7 @@ class StateStore:
     def pin_policy(self, policy):
         """数据库生命周期内固定路线，重启也不能静默更换。"""
         payload = json.dumps(policy, sort_keys=True, allow_nan=False)
-        with self.board._write() as db:
+        with self.board.transaction() as db:
             row = db.execute("SELECT payload FROM controller_settings WHERE key='routing'").fetchone()
             if row is not None and row["payload"] != payload:
                 raise ValueError("routing policy frozen for this run database")
@@ -100,19 +100,43 @@ class StateStore:
             if os.path.exists(temporary):
                 os.unlink(temporary)
 
-    def load(self, challenge_id):
-        row = self.db.execute("SELECT revision,payload FROM sessions WHERE challenge_id=?", (challenge_id,)).fetchone()
-        if row:
-            state = json.loads(row['payload'])
-            self.validate(state)
-            return row['revision'], state
-        return 0, {
+    def _default_state(self, challenge_id):
+        return {
             'schema_version': 1, 'challenge_id': challenge_id, 'steps': 0,
             'tried_paths': [], 'evidence_ids': [], 'hypotheses': [],
             'budget': {'model_tokens': 0, 'tool_calls': 0, 'started_at': self.clock()},
             'route': {'model': 'deepseek-flash', 'strategy': 'initial', 'stage': 0},
             'call_signatures': {}, 'last_progress_step': 0, 'status': 'ready',
         }
+
+    def load(self, challenge_id):
+        row = self.db.execute("SELECT revision,payload FROM sessions WHERE challenge_id=?", (challenge_id,)).fetchone()
+        if row:
+            state = json.loads(row['payload'])
+            self.validate(state)
+            return row['revision'], state
+        return 0, self._default_state(challenge_id)
+
+    def load_many(self, challenge_ids):
+        """批量加载题目状态；缺失题目返回默认状态，避免调度器逐题查询。"""
+        ids = list(dict.fromkeys(challenge_ids))
+        if not ids:
+            return {}
+        placeholders = ",".join("?" * len(ids))
+        rows = self.db.execute(
+            "SELECT challenge_id,revision,payload FROM sessions WHERE challenge_id IN ({})".format(placeholders),
+            ids,
+        ).fetchall()
+        found = {}
+        for row in rows:
+            state = json.loads(row['payload'])
+            self.validate(state)
+            found[row['challenge_id']] = (row['revision'], state)
+        return {cid: found.get(cid) or (0, self._default_state(cid)) for cid in ids}
+
+    def challenge_ids(self):
+        return [row['challenge_id'] for row in self.db.execute(
+            "SELECT challenge_id FROM sessions ORDER BY challenge_id")]
 
     @staticmethod
     def validate(state):
@@ -156,7 +180,7 @@ class StateStore:
         if state['challenge_id'] != challenge_id:
             raise ValueError('cross-challenge state')
         payload = json.dumps(state, ensure_ascii=False, sort_keys=True, allow_nan=False)
-        with self.board._write() as db:
+        with self.board.transaction() as db:
             if revision == 0:
                 try:
                     db.execute('INSERT INTO sessions VALUES(?,?,?)', (challenge_id, 1, payload))

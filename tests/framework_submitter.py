@@ -1,6 +1,7 @@
 """提交状态机：DRAFT→SENDING→ACCEPTED/REJECTED/UNKNOWN（§12.4、附录 E）。
 
 UNKNOWN 只查询不重发；同一幂等键永不二次发送。
+本类只服务测试/离线适配器契约，正式运行路径使用 harness.gateway.SubmitGateway。
 """
 from __future__ import annotations
 
@@ -8,8 +9,8 @@ import sqlite3
 import time
 from typing import Optional
 
-from .adapter import HarnessAdapter
-from .schema import Submission, SubmitReceipt
+from ctf_ext.harness.adapter import HarnessAdapter
+from ctf_ext.harness.schema import Submission, SubmitReceipt
 
 ACCEPTED = "ACCEPTED"
 REJECTED = "REJECTED"
@@ -28,7 +29,7 @@ class Submitter:
         self._adapter = adapter
         self._policy = policy_engine
         self._db = db
-        self._sent = {}  # 进程内“已发送”事实：无 db 时也绝不重复发送
+        self._sent = {}
 
     def _record(self, sub: Submission, status: str, receipt: Optional[SubmitReceipt]) -> None:
         if not self._db:
@@ -70,8 +71,6 @@ class Submitter:
                 existing = SubmitReceipt(status=UNKNOWN, detail=type(exc).__name__)
             self._record(sub, existing.status, existing)
         elif existing.status in (UNKNOWN, SENDING):
-            # SENDING 说明上次发送后进程中断：已发出的事实必须保留，
-            # 只能查询回执，绝不能重发（附录 E：UNKNOWN/SENDING 等同处理）
             receipt = self._adapter.get_receipt(sub.idempotency_key)
             if receipt is not None:
                 self._record(sub, receipt.status, receipt)

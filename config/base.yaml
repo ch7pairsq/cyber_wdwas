@@ -1,7 +1,3 @@
-# 基础配置（练习与比赛共用）；覆盖见 practice.yaml / competition.yaml
-run:
-  deadline_epoch: 0          # 正式运行时由启动器按 4h 基线写入
-
 # 运行期参数：也接受 §13 示例写法 runtime.worker_lease_seconds / heartbeat_seconds
 runtime:
   worker_lease_seconds: 180
@@ -11,22 +7,17 @@ runtime:
 
 app:
   mode: "practice"
-  run_deadline_seconds: 14400   # 4h 基线，含优雅停机余量
 
 concurrency:
   # max_workers 是容量上限；当前执行器固定串行，实际并行度见运行报告 execution。
   max_workers: 4
   max_project_workers: 2
   max_running_projects: 3
-  model_max_inflight: 3
   executor: "serial"          # 单引擎验收前不启用并行执行器
 
 budget:
   per_challenge_seconds: 900
-  per_strategy_seconds: 600
   claim_timeout_seconds: 120  # 单题硬超时：到点释放该题，避免拖死整场
-  tool_timeout: 120
-  grace_seconds: 2
 
 # 下载限额：X 未提供 → 0 = 禁止一切下载（Fail Closed，§15）
 download:

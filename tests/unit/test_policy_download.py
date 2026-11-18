@@ -6,7 +6,7 @@ from ctf_ext.gateway.policy import PolicyConfig, PolicyDenied, PolicyEngine
 from ctf_ext.gateway.sandbox import run_command
 from ctf_ext.harness.mock import MockHarnessAdapter
 from ctf_ext.harness.schema import Submission
-from ctf_ext.harness.submit import Submitter, SubmissionLocked
+from tests.framework_submitter import Submitter, SubmissionLocked
 
 
 def _public(_host):

@@ -7,7 +7,7 @@ from _support import add_challenge, new_board
 from ctf_ext.domain.models import OUTCOME_SUCCESS
 from ctf_ext.harness.mock import MockHarnessAdapter
 from ctf_ext.harness.schema import Submission, SubmitReceipt
-from ctf_ext.harness.submit import Submitter
+from tests.framework_submitter import Submitter
 from ctf_ext.runtime.watchdog import recover_expired_leases
 from ctf_ext.store.blackboard import IntentDraft, StaleWrite, WorkerResult
 

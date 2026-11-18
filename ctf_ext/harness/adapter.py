@@ -36,22 +36,3 @@ class HarnessAdapter(ABC):
 
     def shutdown(self) -> None:
         pass
-
-
-class OfficialHarnessAdapter(HarnessAdapter):
-    """占位：官方 SDK 未拿到前禁止任何实现细节（§12.5 待官方材料）。"""
-
-    def startup(self) -> HarnessContext:
-        raise HarnessUnavailable(
-            "official harness SDK not available; see design doc section 12 "
-            "(startup entry, IO schema, submission API all pending)"
-        )
-
-    def read_tasks(self):
-        raise HarnessUnavailable("official harness SDK not available")
-
-    def submit_answer(self, submission: Submission) -> SubmitReceipt:
-        raise HarnessUnavailable("official harness SDK not available")
-
-    def finalize(self, summary: RunSummary) -> dict:
-        raise HarnessUnavailable("official harness SDK not available")
