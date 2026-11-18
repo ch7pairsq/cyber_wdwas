@@ -11,12 +11,19 @@
 - [架构实施记录与能力边界](docs/FRAMEWORK-OPTIMIZATION-1.0.md)
 - [A–L 全量用例映射、实际结果与未验收项](docs/FRAMEWORK-TEST-MATRIX-1.0.md)
 - 保底入口：`python3 -m ctf_ext run --mode fallback`，复用原数据库/证据；仅验证 Mock 简单题，不在官方模式自动回退 Mock。
-- 当前只允许公司固定模型，50 步换策略而非换厂商/模型；默认阈值需真实题集校准，多 Agent 未启用。
+- 模型通道固定两条（公司网关 `deepseek-flash`；DeepSeek 官方 `deepseek-chat`／`deepseek-reasoner`，配置级切换），50 步换策略而非换通道；默认阈值需真实题集校准，多 Agent 未启用。
 - 运行报告新增 `execution`：`mode=serial`、`effective_parallel=1`、`claim_timeout_seconds`、`retry_backoff_seconds`、`isolation.container=not_verified`。`concurrency.max_workers=4` 只是容量上限，不代表已并行。
 - 单题硬超时只在主线程用 `SIGALRM` 生效；非主线程调用 `step()` 时不会强制中断，必须由外部 supervisor/进程超时兜底。
 - 本地执行不等于容器沙箱：要求隔离时本地命令直接拒绝。每题真容器、真实解题工具循环、官方 Harness、全赛程/首杀与 24h 冻结仍未验收，**不满足全 P0 参赛准出**。
 
 Docker 与参赛状态中的容器记录为此前结果，不包含本次尚未打包的增量。
+
+## 2026-11-18 增量：Provider 双通道与 Key 缓存（未接真实模型）
+
+- Provider 层预留 DeepSeek 官方 API 备选通道（OpenAI Chat Completions 兼容）：`ctf_ext/llm/openai_compat.py`。由 `model.provider`（`baizhi_anthropic` ↔ `deepseek_official_openai`）配置级切换，业务代码与工具循环零改动；内部 Anthropic 风格消息在 Provider 内翻译为 OpenAI 线上格式，两通道执行同一套工具白名单、传输纪律与响应校验。未做真实调用，切换前须同步平台出口白名单。
+- 新增可选 Key 落盘缓存（默认关闭）：`ctf_ext/llm/keycache.py`。启用条件是 `model.key_cache_file` 或 `CTF_MODEL_KEY_CACHE`，0600 原子写入、不进 SQLite／证据／报告／日志，本轮运行正常结束即清理；仅当平台确认"重建容器不重注入且挂载持久卷"时才值得启用。
+- 交付方式改为镜像仓库与文件上传（`docker save`）双轨支持，详见 [参赛约束](docs/COMPETITION.md)。
+- 验证口径：本机零依赖运行器单元 **189/189**、集成与 chaos **21/21**（含本轮新增 22 项），CLI Mock 一轮 exit 0。本机未安装 pytest，`test_arena_harness`／`test_concurrency`／`test_framework_control` 三个模块本轮未执行；测试矩阵尚未登记本轮新增用例。
 
 ## 离线工具链（构建期打包）
 
@@ -87,7 +94,7 @@ cairn serve --host 127.0.0.1 --port 8000 --db-path build/cairn.db
 ## 真实模型与官方平台的边界
 
 - `--mode llm` 是实验入口。已接通 Provider 请求、响应契约校验、修复重试与本地只读工具循环；但完整附件读取、真实网关的 `tools`/`tool_use` 兼容、可信容器沙箱和官方平台仍未验收，**不是补上 Key 就能正式解题**。
-- 模型固定为公司百智云代理上的 `deepseek-flash`，采用 Anthropic Messages 兼容格式；禁止厂商直连或其他模型。`BAIZHI_API_KEY` 只在运行时注入，不写入镜像、配置或报告。公司网关真实协议／鉴权仍待联调，本轮没有真实调用。
+- 模型主通道为公司百智云代理上的 `deepseek-flash`（Anthropic Messages 兼容）；2026-11-18 起预留 DeepSeek 官方 API 备选通道（OpenAI Chat Completions 兼容，`deepseek-chat`/`deepseek-reasoner`），配置级切换，真实联调未授权。`BAIZHI_API_KEY` 只在运行时注入（可选落盘缓存默认关闭），不写入镜像、配置或报告。公司网关真实协议／鉴权仍待联调，本轮没有真实调用。
 - 比赛禁止 `web_search`、其他搜索 API 和运行时安装。已增加工具层拒绝与参赛候选镜像安装器移除；任意 Python 代码的出站访问仍须平台网络策略约束，不能把应用检查当作完整沙箱。
 - 官方 Harness 的 SDK、fixture 和字段映射尚未验收；CLI 的官方模式仍明确拒绝启动。适配器存在不代表 CLI 已完成接线。
 - 下载限额 0 的设计语义是禁止下载，但热更新与共享计数仍有下述缺口；不能将模块保护等同于完整出口隔离。

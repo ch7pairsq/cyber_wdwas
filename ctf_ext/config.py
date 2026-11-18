@@ -168,15 +168,28 @@ def _validate_config(cfg):
     if not (cfg.get("storage") or {}).get("db_path"):
         errors.append("storage.db_path is required")
     from .llm.deepseek import DEFAULT_BASE_URL, DEFAULT_MODEL, PROVIDER_NAME
+    from .llm.openai_compat import (ALLOWED_MODELS, DEFAULT_BASE_URL as OFFICIAL_BASE_URL,
+                                    DEFAULT_MODEL as OFFICIAL_MODEL,
+                                    PROVIDER_NAME as OFFICIAL_PROVIDER_NAME)
     model = cfg.get("model") or {}
-    if model.get("provider", PROVIDER_NAME) != PROVIDER_NAME:
-        errors.append("only the company model gateway is allowed")
-    if model.get("base_url", DEFAULT_BASE_URL) != DEFAULT_BASE_URL:
-        errors.append("model.base_url must be the approved company gateway")
-    if model.get("model", DEFAULT_MODEL) != DEFAULT_MODEL:
-        errors.append("only deepseek-flash is allowed")
+    provider_name = model.get("provider", PROVIDER_NAME)
+    if provider_name == PROVIDER_NAME:
+        if model.get("base_url", DEFAULT_BASE_URL) != DEFAULT_BASE_URL:
+            errors.append("model.base_url must be the approved company gateway")
+        if model.get("model", DEFAULT_MODEL) != DEFAULT_MODEL:
+            errors.append("only deepseek-flash is allowed on the company gateway")
+    elif provider_name == OFFICIAL_PROVIDER_NAME:
+        # 比赛日备选通道：DeepSeek 官方 API（OpenAI 兼容），切换前须同步出口白名单。
+        if model.get("base_url", OFFICIAL_BASE_URL) != OFFICIAL_BASE_URL:
+            errors.append("model.base_url must be the official DeepSeek API endpoint")
+        if model.get("model", OFFICIAL_MODEL) not in ALLOWED_MODELS:
+            errors.append("only official DeepSeek model ids are allowed")
+    else:
+        errors.append("unknown model.provider; use baizhi_anthropic or deepseek_official_openai")
     if any(key in model for key in ("api_key", "token", "secret")):
         errors.append("model credentials must be injected at runtime, not stored in config")
+    if "key_cache_file" in model and not isinstance(model["key_cache_file"], str):
+        errors.append("model.key_cache_file must be a string path when enabled")
     if "tools_enabled" in model and not isinstance(model["tools_enabled"], bool):
         errors.append("model.tools_enabled must be boolean")
     policy = cfg.get("policy") or {}

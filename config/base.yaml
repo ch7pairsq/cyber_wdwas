@@ -76,9 +76,15 @@ model:
   provider: "baizhi_anthropic"
   base_url: "https://ai-api-gateway.app.baizhi.cloud/api/anthropic"
   model: "deepseek-flash"
-  api_key_env: "BAIZHI_API_KEY"  # 仅运行时注入，不写进镜像或配置快照
+  api_key_env: "BAIZHI_API_KEY"  # 仅运行时注入，不写进镜像或配置快照；两条通道共用此变量名
   max_tokens: 4096
   tools_enabled: true        # 网关不支持 Anthropic tools 时可显式关闭；关闭后不发送工具定义
+  # 比赛日备选通道（2026-11-18）：DeepSeek 官方 API，OpenAI Chat Completions 兼容。切换示例：
+  #   provider: "deepseek_official_openai"
+  #   base_url: "https://api.deepseek.com"
+  #   model: "deepseek-chat"   # 仅允许 deepseek-chat / deepseek-reasoner
+  # 切换须同步平台出口白名单覆盖 api.deepseek.com；真实调用另行授权。
+  # key_cache_file: ""        # 可选 Key 落盘缓存（默认关闭）；仅当平台挂载持久卷且重建容器不重注入时启用
 
 storage:
   db_path: "data/ctf.db"

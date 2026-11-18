@@ -2,20 +2,22 @@
 
 ## 已确认的交付方式
 
-采用 Harness 托管，平台从镜像仓库拉取成品 Agent 镜像。上传镜像文件是另一种交付入口，本项目不采用该入口。这里的仓库地址指容器镜像引用（仓库、镜像名、标签或摘要），不是 Git 代码地址，也不是网页浏览链接。
+采用 Harness 托管。交付入口按用户 2026-11-18 决定改为**双轨支持**，最终采用哪种待比对便利性后确定：
 
-Docker Engine 与 Compose 已经存在；此前失败发生在基础镜像拉取，不是缺少 Docker。赛前构建、安装、推送由开发环境完成，比赛时平台只拉取成品镜像并启动，不能执行 pip install、apt install、uv sync 或其他补装步骤。
+- 镜像仓库：需要平台可访问的仓库地址／命名空间，以及推送／拉取凭据。仓库地址指容器镜像引用（仓库、镜像名、标签或摘要），不是 Git 代码地址，也不是网页浏览链接。
+- 文件上传：`docker save` 把成品镜像打包为 tar（可压缩），经平台通道上传。需确认接受格式与加载方式（docker load）、大小限制、上传截止时间、是否可重传；交付时同时提供 tar 文件的 sha256 供平台核对。注意 tar 文件摘要与镜像摘要不是同一个值，两者都要记录；上传完成后应在干净环境 load 回来复跑 `check_competition.py`，确认交付物本身可回放。
+
+无论哪种入口，比赛时平台只拉取／加载成品镜像并启动，不能执行 pip install、apt install、uv sync 或其他补装步骤。Docker Engine 与 Compose 已经存在；此前失败发生在基础镜像拉取，不是缺少 Docker。
 
 ## 已确认的模型配置
 
-- 模型提供方与路由：仅公司百智云网关。
-- Base URL：由用户确认的 https://ai-api-gateway.app.baizhi.cloud/api/anthropic 。
-- 唯一允许的 model ID：deepseek-flash，不回退其他国内或国外模型，也不直连厂商。
-- 协议：按 Anthropic Messages 兼容方式实现 POST /v1/messages、x-api-key 和 anthropic-version。路径与鉴权语义仍需公司网关文档或真实联调确认；本轮没有读取、使用或提交真实 Key，也没有付费调用。
-- 凭据环境变量采用 BAIZHI_API_KEY，属于本项目约定；平台实际注入名称待 Harness 规范确认。Key 只能运行时注入，不打入镜像，不写配置文件与数据库快照。
-- 网关是模型 API 路由，不等同于宿主机 HTTP_PROXY。Provider 不继承任意 HTTP_PROXY、不跟随重定向、校验 TLS，仅请求指定网关。
+- 主通道：公司百智云网关，Base URL https://ai-api-gateway.app.baizhi.cloud/api/anthropic ，Anthropic Messages 兼容协议（POST /v1/messages、x-api-key、anthropic-version），唯一 model ID deepseek-flash。
+- 备选通道（2026-11-18 用户新增）：DeepSeek 官方 API，OpenAI Chat Completions 兼容协议（POST /chat/completions、Bearer 鉴权），Base URL 固定 https://api.deepseek.com ，model ID 仅允许 deepseek-chat／deepseek-reasoner。切换只改配置 `model.provider`（`baizhi_anthropic` ↔ `deepseek_official_openai`），业务代码零改动；切换前须确认平台出口白名单覆盖 api.deepseek.com，真实调用另行明确授权。本条修订此前"不直连厂商"的限制。
+- 两条通道互斥，参赛候选当前默认仍走公司网关。两通道执行同样的传输纪律：不继承任意 HTTP_PROXY、不跟随重定向、校验 TLS、不发送 tools/web_search 定义、响应大小上限，对非文本工具响应和模型 ID 不一致的响应拒绝处理。网关服务端实际模型路由仍须公司侧确认；两条通道的真实联调均未执行，本轮没有读取、使用或提交真实 Key，也没有付费调用。
+- 凭据环境变量固定为 BAIZHI_API_KEY（2026-11-18 用户确认，两条通道共用；切换通道时变量名不变，值对应所选通道的 Key）。Key 只能运行时注入，不打入镜像，不写配置文件与数据库快照。
+- 可选 Key 落盘缓存（2026-11-18 新增，默认关闭）：环境变量在进程重启与容器重启时都会保留，只有"平台重建容器且不重注入、并挂载持久卷"的场景才需要落盘兜底。启用后缓存文件 0600 原子写入，不进 SQLite／证据／报告／日志，本轮运行正常结束时清理；是否启用待平台确认挂载与重启语义后再定。
 
-接口路径名称中的 anthropic 代表兼容协议，不代表调用 Claude；请求中的模型固定为用户指定的 DeepSeek。Provider 不发送 tools/web_search 定义，对非文本工具响应和模型 ID 不一致的响应拒绝处理。网关服务端实际模型路由仍须公司侧确认。
+接口路径名称中的 anthropic 代表兼容协议，不代表调用 Claude；两条通道请求中的模型都是用户指定的 DeepSeek 系列。Provider 不发送 tools/web_search 定义，对非文本工具响应和模型 ID 不一致的响应拒绝处理。
 
 ## 镜像内容和阶段
 
@@ -49,12 +51,12 @@ competition 目标的默认入口为 python -m ctf_ext.competition，当前明�
 
 ## 等待用户／官方提供
 
-1. 平台能访问的镜像仓库／命名空间，权限与发布方式；目前不推送任何镜像。
+1. 交付入口二选一（双轨均已支持，用户比对便利性后定）：仓库方案需平台可访问的镜像仓库／命名空间、推送／拉取凭据；文件方案需上传通道、接受格式（docker load）、大小限制、上传截止与重传规则。目前不推送镜像、不上传文件。
 2. 第 2.2 节 Harness 托管全文：平台启动命令、协议／SDK、注入变量、任务／附件／提交方法、结束／重启行为。
-3. 公司网关确认的 Messages 路径、鉴权头和使用额度；真实联调另行明确授权。
+3. 公司网关确认的 Messages 路径、鉴权头和使用额度；如启用 DeepSeek 官方备选通道，其真实联调、出口白名单与额度另行明确授权。
 4. 平台 CPU 架构、资源／镜像大小限制、网络出口规则，以及最终必须预装的工具集合。
 
-上述信息齐全后再完成官方接线、赛前全链路验证、镜像发布和摘要固定；不要在比赛过程中安装依赖或修改协议。
+上述信息齐全后再完成官方接线、赛前全链路验证、镜像发布（或文件上传）与摘要固定；不要在比赛过程中安装依赖或修改协议。
 
 ## 本地构建候选镜像与离线验收
 

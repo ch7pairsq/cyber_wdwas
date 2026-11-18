@@ -4,7 +4,7 @@ app:
   mode: "competition"
 
 model:
-  provider: "baizhi_anthropic"
+  provider: "baizhi_anthropic"   # 比赛日可切换 deepseek_official_openai（DeepSeek 官方 API，OpenAI 兼容）；切换须同步平台出口白名单
   base_url: "https://ai-api-gateway.app.baizhi.cloud/api/anthropic"
   model: "deepseek-flash"
   api_key_env: "BAIZHI_API_KEY"
