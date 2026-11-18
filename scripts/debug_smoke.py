@@ -76,8 +76,14 @@ def main():
         assert frame["source"]["path"] == "/app/ctf_ext/__main__.py" and frame["line"] == breakpoint_line, frame
         print("断点命中：/app/ctf_ext/__main__.py:{}".format(breakpoint_line), flush=True)
         send("continue", {"threadId": thread_id})
-        # attach 会话可能只发送 terminated；它不提供被调试进程的退出码。
-        ended = wait(lambda m: m.get("event") in ("exited", "terminated"))
+        # attach 会话在部分 debugpy 版本中既不发送 exited 也不发送 terminated，
+        # 且连接会保持到客户端断开；这里只验证继续执行被接受，退出码由外部
+        # `docker wait` 核验（脚本注释和输出都明确这一点）。
+        connection.settimeout(5)
+        try:
+            ended = wait(lambda m: m.get("event") in ("exited", "terminated"))
+        except TimeoutError:
+            ended = {"event": "none", "body": {}}
         exit_code = ended.get("body", {}).get("exitCode")
         if ended["event"] == "exited":
             assert exit_code == 0, ended

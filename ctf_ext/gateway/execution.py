@@ -12,7 +12,7 @@ import uuid
 from dataclasses import dataclass
 
 
-def capture(argv, *, cwd, timeout, limit=200_000, input_data=b''):
+def capture(argv, *, cwd, timeout, limit=200_000, input_data=b'', discard_stderr=False):
     """有界采集并在截止时杀进程组；stdin 是已限额的本地附件。"""
     import tempfile
     if timeout <= 0 or limit < 1 or len(input_data) > 1_000_000:
@@ -22,7 +22,10 @@ def capture(argv, *, cwd, timeout, limit=200_000, input_data=b''):
         source.write(input_data)
         source.seek(0)
         proc = subprocess.Popen(list(argv), cwd=cwd, stdin=source, stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, start_new_session=True,
+                                # 固定解码只取 stdout；调试器可能把启动告警写到 stderr，
+                                # 合并后会被当作命令输出污染证据。
+                                stderr=subprocess.DEVNULL if discard_stderr else subprocess.STDOUT,
+                                start_new_session=True,
                                 env={'PATH': os.environ.get('PATH', os.defpath), 'LC_ALL': 'C.UTF-8'})
         output, total, timed_out, truncated = bytearray(), 0, False, False
         selector = selectors.DefaultSelector()
@@ -105,7 +108,9 @@ class CommandExecutor:
             raise PermissionError('local decoder is restricted to mock protocol')
         script = ('import base64,sys;sys.stdout.buffer.write(base64.b64decode(sys.stdin.buffer.read(),validate=True))'
                   if decode else 'import sys;sys.stdout.buffer.write(sys.stdin.buffer.read())')
-        argv = [sys.executable, '-I', '-c', script]
+        # -S 跳过 site 初始化：调试器注入的 sitecustomize 会把告警混进 stdout，
+        # 污染解码结果与证据；固定解码脚本只依赖标准库。
+        argv = [sys.executable, '-I', '-S', '-c', script]
         version = 'python-' + sys.version.split()[0]
         input_hash = hashlib.sha256(data).hexdigest()
         cid = self.control.challenge_id
@@ -114,7 +119,9 @@ class CommandExecutor:
         cached = self.store.cached(key)
         if cached:
             return self.store.restore_evidence(cached['evidence_id']), cached['evidence_id'], cached['id'], True
-        result = capture(argv, cwd=str(self.store.workspace(cid)), timeout=min(15, self.control.remaining()['seconds']), input_data=data)
+        result = capture(argv, cwd=str(self.store.workspace(cid)),
+                         timeout=min(15, self.control.remaining()['seconds']),
+                         input_data=data, discard_stderr=True)
         eid = self.store.evidence.put_bytes(result['output'], kind='command_output')
         command_id = 'cmd-' + uuid.uuid4().hex
         complete = result['complete'] and result['returncode'] == 0
