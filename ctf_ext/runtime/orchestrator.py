@@ -226,8 +226,36 @@ class Orchestrator:
                             "model_tokens": 0, "tool_calls": 0},
         )
 
+    def _ensure_environment(self, challenge_id) -> None:
+        """按需拉起题目环境（env_policy=on_demand 时真正生效；其他适配器为 no-op）。
+
+        失败只记事件不阻塞调度：意图会带着"环境不可用"快速失败，槽位回收后
+        下一个重试意图会再次尝试拉起。
+        """
+        hook = getattr(self._harness, "ensure_environment", None)
+        if hook is None:
+            return
+        try:
+            info = hook(challenge_id)
+        except Exception as exc:
+            self._board.append_event("environment_failed", challenge_id,
+                                     {"error": type(exc).__name__, "detail": str(exc)[:160]})
+            return
+        # 新启动的环境带出 container_addr：同步进编排层缓存的题目描述（模型唯一可读面）。
+        describe = getattr(self._harness, "task_description", None)
+        if isinstance(info, dict) and describe is not None:
+            try:
+                fresh = describe(challenge_id)
+                cached = self._challenges.get(challenge_id)
+                if fresh and cached is not None and fresh != cached.get("description"):
+                    cached["description"] = fresh
+            except Exception as exc:
+                self._board.append_event("description_refresh_failed", challenge_id,
+                                         {"error": type(exc).__name__})
+
     def _execute_claim(self, claim):
         """执行一个已领取 Intent；拆成执行/契约/校验/落库/后处理五段。"""
+        self._ensure_environment(claim.challenge_id)
         challenge = self._challenge_context(claim)
         started = self._clock()
         result = self._run_worker(claim, challenge, started)
@@ -436,6 +464,7 @@ class Orchestrator:
         factory = getattr(self._worker, "_control_factory", None)
         if factory is not None:
             factory.deadline = deadline
+        global_budget = getattr(self._worker, "_global_budget", None)
         self._touch_heartbeat()
         tasks = self.bootstrap()
         try:
@@ -446,6 +475,12 @@ class Orchestrator:
         solved = self._solved()
         consecutive_errors = 0
         while self._clock() < deadline and len(solved) < len(tasks):
+            if global_budget is not None and getattr(global_budget, "exhausted", False):
+                # 运行级预算耗尽：停止领取新意图；已领取意图由租约超时自然收尾。
+                self._board.append_event("run_stopped", "",
+                                         {"reason": "global_budget_exhausted",
+                                          "spent": int(getattr(global_budget, "spent", 0) or 0)})
+                break
             self._touch_heartbeat()
             try:
                 self.reload_config_if_changed()

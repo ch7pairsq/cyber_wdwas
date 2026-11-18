@@ -270,7 +270,8 @@ class ArenaHarnessAdapter(HarnessAdapter):
                  auto_start: bool = True,
                  auto_finish: bool = False,
                  max_envs: int = 3,
-                 client_timeout: float = 30.0):
+                 client_timeout: float = 30.0,
+                 env_policy: str = "prewarm"):
         self._client = ArenaClient(base_url, token, timeout=client_timeout,
                                    proxy=proxy)
         self._paths = {"help": help_path, "list": list_path, "start": start_path,
@@ -279,6 +280,9 @@ class ArenaHarnessAdapter(HarnessAdapter):
         self._auto_start = auto_start
         self._auto_finish = auto_finish
         self._max_envs = max_envs
+        # prewarm: read_tasks 时预启动前 max_envs 个环境（旧行为）；
+        # on_demand: 编排层在每个意图执行前调 ensure_environment 按需拉起。
+        self._env_policy = env_policy if env_policy in ("prewarm", "on_demand") else "prewarm"
         self._ctx: Optional[HarnessContext] = None
         self._tasks: List[ChallengeInput] = []
         self._raw: List[Dict[str, Any]] = []
@@ -329,9 +333,10 @@ class ArenaHarnessAdapter(HarnessAdapter):
             raw_tasks.append(raw)
         self._raw = raw_tasks
         self._tasks = [parse_challenge(raw, protocol="v1-arena") for raw in raw_tasks]
-        if self._auto_start:
+        if self._auto_start and self._env_policy == "prewarm":
             # 平台限制最多 3 个并发环境（409 environment_limit）；超限即停止，
             # 未启动的挑战在提交触发 challenge_not_started 时按需重试。
+            # env_policy=on_demand 时跳过预热：改由编排层在每个意图前按需拉起。
             max_envs = int(self._max_envs)
             for task in self._tasks:
                 if len(self._started) >= max_envs:
@@ -360,25 +365,65 @@ class ArenaHarnessAdapter(HarnessAdapter):
                 task.attachments = tuple(refs)
         # 描述是模型唯一可读面：目标地址、网段、附件位置必须显式给出，
         # 否则模型只能停在"环境前置缺失"。
-        cidr = os.environ.get("ARENA_NETWORK_CIDR", "")
         for task in self._tasks:
             info = task.metadata.get("start_info") or {}
-            # container_addr 可能是字符串或列表（多端口）；统一成逗号分隔字符串。
-            raw_addr = info.get("container_addr")
-            if isinstance(raw_addr, (list, tuple)):
-                raw_addr = ",".join(str(a) for a in raw_addr if a)
-            addr = str(raw_addr or "").strip()
-            parts = []
-            if addr:
-                parts.append("题目服务地址: http://" + addr
-                             + "（用 arena_http 工具访问，host 填 IP 部分）")
-            if cidr:
-                parts.append("允许访问的目标网段: " + cidr + "（网段之外一律拒绝）")
-            if task.metadata.get("arena_files"):
-                parts.append("题目附件已物化到工作区 handouts/ 目录，可直接用 file_info/strings/archive_extract 处理")
-            if parts:
-                task.description = (task.description or "") + "\n\n[Arena 运行环境] " + "；".join(parts)
+            note = self._env_note(info, bool(task.metadata.get("arena_files")))
+            if note:
+                task.description = (task.description or "") + "\n\n" + note
         return list(self._tasks)
+
+    def _env_note(self, info: Dict[str, Any], has_files: bool) -> str:
+        """运行环境说明（附加到题目描述）；info 为空且无附件时返回空串。"""
+        # container_addr 可能是字符串或列表（多端口）；统一成逗号分隔字符串。
+        raw_addr = info.get("container_addr")
+        if isinstance(raw_addr, (list, tuple)):
+            raw_addr = ",".join(str(a) for a in raw_addr if a)
+        addr = str(raw_addr or "").strip()
+        parts = []
+        if addr:
+            parts.append("题目服务地址: http://" + addr
+                         + "（用 arena_http 工具访问，host 填 IP 部分）")
+        cidr = os.environ.get("ARENA_NETWORK_CIDR", "")
+        if cidr:
+            parts.append("允许访问的目标网段: " + cidr + "（网段之外一律拒绝）")
+        if has_files:
+            parts.append("题目附件已物化到工作区 handouts/ 目录，可直接用 file_info/strings/archive_extract 处理")
+        if not parts:
+            return ""
+        return "[Arena 运行环境] " + "；".join(parts)
+
+    def ensure_environment(self, unique_code: str):
+        """按需拉起题目环境（env_policy=on_demand 时由编排层在每个意图前调用）。
+
+        返回 start_info（新建成功时）或 None（已启动）；409 duplicate/already
+        视为环境仍在运行；environment_limit 向上抛，由编排层记事件，
+        意图快速失败后等槽位回收再重试。
+        """
+        if unique_code in self._started:
+            return None
+        try:
+            self._ensure_started(unique_code)
+        except ArenaProtocolError as exc:
+            text = str(exc)
+            if "duplicate" in text.lower() or "already" in text.lower():
+                self._started.add(unique_code)  # 已有环境在跑，幂等收编
+                return None
+            raise
+        info = self._start_info.get(unique_code) or {}
+        for task in self._tasks:
+            if task.challenge_id == unique_code:
+                task.metadata["start_info"] = info
+                note = self._env_note(info, bool(task.metadata.get("arena_files")))
+                if note and "[Arena 运行环境]" not in (task.description or ""):
+                    task.description = (task.description or "") + "\n\n" + note
+                break
+        return info
+
+    def task_description(self, challenge_id: str):
+        for task in self._tasks:
+            if task.challenge_id == challenge_id:
+                return task.description
+        return None
 
     def _ensure_started(self, unique_code: str) -> None:
         if unique_code in self._started:

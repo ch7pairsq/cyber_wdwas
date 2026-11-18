@@ -1,6 +1,7 @@
 """B/E/F/G/I：步数策略、持久状态、缓存与预算边界。"""
 import copy
 import json
+import pytest
 import sqlite3
 import sys
 import threading
@@ -201,3 +202,32 @@ def test_expired_lease_cannot_write_or_be_resurrected():
         assert store.board.heartbeat(claim.intent_id, 'w') is False
         result = WorkerResult(claim.intent_id, 'w', claim.attempt_no, 'c1', claim.strategy_key, 'completed')
         expect(StaleWrite, lambda: store.board.write_result(result, 'expired'))
+
+
+def test_global_budget_charges_persists_and_stops_run():
+    from ctf_ext.runtime.control import GlobalBudget
+    with fixture() as store:
+        gb = GlobalBudget(store, max_total_tokens=100)
+        gb.charge(60)
+        assert gb.spent == 60 and gb.remaining() == 40
+        with pytest.raises(BudgetExceeded):
+            gb.charge(50)  # 110 > 100：先落账再抛，保证重启后不重置
+        assert gb.exhausted is True
+        # 重启恢复：从 controller_settings 读回累计值
+        gb2 = GlobalBudget(store, max_total_tokens=100)
+        assert gb2.spent == 110 and gb2.remaining() == 0
+        # 未配置上限 = 不限制
+        gb3 = GlobalBudget(store, max_total_tokens=0)
+        assert gb3.remaining() == float("inf")
+        gb3.charge(999999)
+
+
+def test_session_control_charges_global_budget_first():
+    from ctf_ext.runtime.control import GlobalBudget
+    with fixture() as store:
+        gb = GlobalBudget(store, max_total_tokens=10)
+        control = SessionControl(store, 'gb1', max_tokens=1_000_000, global_budget=gb)
+        with pytest.raises(BudgetExceeded):
+            control.charge_tokens(20)  # 全局先扣：超限直接抛
+        _, state = store.load('gb1')
+        assert state['budget']['model_tokens'] == 0  # 单题额度未被消耗

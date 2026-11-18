@@ -60,7 +60,7 @@ class LlmWorker:
                  skill_loader: Optional[SkillLoader] = None, max_skills: int = 2,
                  max_skill_bytes: int = 8000, skill_total_bytes: int = 12000,
                  tool_registry=None, tool_cwd=None, max_tool_rounds: int = 8,
-                 max_tool_result_bytes: int = 4000):
+                 max_tool_result_bytes: int = 4000, global_budget=None):
         self._provider = provider
         self._state, self._control_factory = state_store, control_factory
         self._check = evidence_check
@@ -76,6 +76,8 @@ class LlmWorker:
         self._tool_cwd = tool_cwd
         self._max_tool_rounds = max(0, int(max_tool_rounds))
         self._max_tool_result_bytes = max(256, int(max_tool_result_bytes))
+        # 编排层据此感知全局预算耗尽（SessionControl 经由 control_factory 闭包共享同一对象）。
+        self._global_budget = global_budget
         self._system = DEFAULT_SYSTEM
         if prompt_path:
             with open(prompt_path, "r", encoding="utf-8") as fh:

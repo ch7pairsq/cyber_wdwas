@@ -58,6 +58,10 @@ class _StubArena(BaseHTTPRequestHandler):
         payload = json.loads(self.rfile.read(length) or b"{}") if length else {}
         if self.path.startswith("/openapi/v1/challenges/start"):
             code = self.path.split("unique_code=")[-1].split("&")[0]
+            if code == "CH-LIMIT":
+                return self._json({"error": "environment_limit"}, 409)
+            if code in _StubArena.started:
+                return self._json({"error": "duplicate"}, 409)
             _StubArena.started.add(code)
             return self._json({"started": True})
         if self.path.startswith("/openapi/v1/challenges/submit"):
@@ -185,3 +189,35 @@ def test_token_never_leaks_into_errors(arena_url):
     with pytest.raises(ArenaProtocolError) as exc:
         ad.startup()
     assert TOKEN not in str(exc.value)
+
+
+def test_on_demand_policy_skips_prewarm_and_starts_lazily(arena_url):
+    ad = _adapter(arena_url, env_policy="on_demand")
+    ad.startup()
+    tasks = ad.read_tasks()
+    assert tasks[0].challenge_id == "CH-1"
+    assert "CH-1" not in _StubArena.started  # on_demand 不预热
+    info = ad.ensure_environment("CH-1")
+    assert "CH-1" in _StubArena.started  # 意图执行前按需拉起
+    assert info.get("started") is True
+    assert ad.ensure_environment("CH-1") is None  # 幂等：已启动不再发请求
+
+
+def test_ensure_environment_tolerates_duplicate_409(arena_url):
+    # 平台上已有该环境（另一实例/重启后 start 返回 409 duplicate）→ 视为在跑。
+    _adapter(arena_url).startup()
+    first = _adapter(arena_url, auto_start=True)
+    first.startup()
+    first.read_tasks()  # 预热启动 CH-1
+    second = _adapter(arena_url, env_policy="on_demand")
+    second.startup()
+    second.read_tasks()
+    assert second.ensure_environment("CH-1") is None  # duplicate 被收编，不抛
+
+
+def test_ensure_environment_raises_on_environment_limit(arena_url):
+    ad = _adapter(arena_url, env_policy="on_demand")
+    ad.startup()
+    ad.read_tasks()
+    with pytest.raises(ArenaProtocolError):
+        ad.ensure_environment("CH-LIMIT")

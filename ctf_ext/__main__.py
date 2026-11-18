@@ -20,7 +20,7 @@ from .harness.mock import MockHarnessAdapter, default_practice_challenges
 from .harness.flag_gate import FlagGate, ProviderReviewer
 from .harness.gateway import SubmitGateway
 from .store.session import StateStore
-from .runtime.control import SessionControl, StepPolicy
+from .runtime.control import GlobalBudget, SessionControl, StepPolicy
 from .llm.deepseek import DEFAULT_BASE_URL, DEFAULT_MODEL, DEFAULT_KEY_ENV, PROVIDER_NAME, DeepSeekProvider
 from .runtime.dashboard import write_dashboard
 from .runtime.llm_worker import LlmWorker
@@ -113,6 +113,7 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
                                           auto_start=bool(arena_cfg.get("auto_start", True)),
                                           auto_finish=bool(arena_cfg.get("auto_finish", False)),
                                           client_timeout=float(arena_cfg.get("client_timeout_seconds") or 30),
+                                          env_policy=str(arena_cfg.get("env_policy") or "prewarm"),
                                           **arena_kwargs)
         except ArenaProtocolError as exc:
             raise SystemExit("arena harness init failed: {}".format(exc))
@@ -128,6 +129,8 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
     controller = cfg.get("controller") or {}
     step_policy = StepPolicy(tuple(controller.get("thresholds", (30, 50, 70, 100))))
     state.pin_policy({"thresholds": list(step_policy.thresholds), "model": DEFAULT_MODEL, "parallel_agents": 1})
+    # 运行级全局 token 账本（0/未配置 = 不设上限）；编排层据此停止领取新意图。
+    global_budget = GlobalBudget(state, int(budget.get("max_model_tokens_total") or 0))
     def control_factory(challenge_id):
         # 意图重试语义：上一意图因 stall/重复调用把会话标为 stopped 时，
         # 重试意图应复活会话（清停滞计数与重复签名），累计预算保留。
@@ -140,7 +143,8 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
             seconds=float(budget.get("per_challenge_seconds") or 900),
             repeat_limit=int(budget.get("repeat_limit") or 3),
             stall_steps=int(budget.get("stall_steps") or 20),
-            absolute_deadline=getattr(control_factory, "deadline", None))
+            absolute_deadline=getattr(control_factory, "deadline", None),
+            global_budget=global_budget)
         try:
             _, st = state.load(challenge_id)
             left = control.remaining()
@@ -181,7 +185,8 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
                            skill_loader=skill_loader,
                            tool_registry=tool_registry,
                            tool_cwd=lambda cid: str(state.workspace(cid)),
-                           max_tool_rounds=int((cfg.get("controller") or {}).get("max_tool_rounds") or 40))
+                           max_tool_rounds=int((cfg.get("controller") or {}).get("max_tool_rounds") or 40),
+                           global_budget=global_budget)
     else:
         worker = RuleBasedWorker(harness, evidence_store=evidence,
                                  state_store=state, control_factory=control_factory)

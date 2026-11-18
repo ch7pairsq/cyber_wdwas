@@ -24,6 +24,18 @@ class HarnessAdapter(ABC):
     def emit_progress(self, event: dict) -> None:
         pass
 
+    def ensure_environment(self, challenge_id: str):
+        """按需确保题目环境可用；返回 None 或环境信息 dict（含 container_addr）。
+
+        不支持的平台 no-op；编排层在每个意图执行前调用，失败可抛异常
+        （由编排层记事件，不阻塞调度）。
+        """
+        return None
+
+    def task_description(self, challenge_id: str) -> Optional[str]:
+        """返回该题目的最新描述文本（含运行环境信息）；不支持时返回 None。"""
+        return None
+
     @abstractmethod
     def submit_answer(self, submission: Submission) -> SubmitReceipt: ...
 

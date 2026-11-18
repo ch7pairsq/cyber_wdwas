@@ -15,6 +15,9 @@ budget:
   claim_timeout_seconds: 300
   max_model_tokens_per_intent: 400000
   max_tool_calls_per_intent: 300
+  # 运行级全局上限：全部题目累计 token，超限后编排层停止领取新意图。
+  # 8 题 × 单题 40 万的量级估算；0/未配置 = 不设全局上限。
+  max_model_tokens_total: 3200000
   repeat_limit: 8
   stall_steps: 60
 download:
@@ -90,5 +93,8 @@ harness:
   arena:
     base_url: http://10.201.0.97:8090
     auto_start: true
+    # prewarm: 读题时预启动前 max_envs 个环境；on_demand: 每个意图执行前按需拉起。
+    # 串行执行器下 on_demand 更省槽位，也避免空闲环境过期。
+    env_policy: on_demand
     max_envs: 3
     client_timeout_seconds: 40

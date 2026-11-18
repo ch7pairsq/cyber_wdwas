@@ -30,15 +30,69 @@ class StepPolicy:
                          '仅保留低资源会话', '停止新增调用')[stage]}
 
 
+class GlobalBudget:
+    """跨题目共享的运行级 token 账本（controller_settings 持久化，重启可恢复）。
+
+    max_total_tokens<=0 表示不设全局上限；超限时 charge 抛 BudgetExceeded
+    并置 exhausted，编排层据此停止领取新意图（在跑意图自然收尾）。
+    """
+
+    KEY = "global_budget"
+
+    def __init__(self, store, max_total_tokens=0, clock=time.time):
+        self.store = store
+        self.max_total_tokens = int(max_total_tokens)
+        self.clock = clock
+        self.exhausted = False
+        self._spent = self._load()
+
+    def _load(self):
+        try:
+            with self.store.board.transaction() as db:
+                row = db.execute(
+                    "SELECT payload FROM controller_settings WHERE key=?",
+                    (self.KEY,)).fetchone()
+            return int(json.loads(row["payload"])["model_tokens"]) if row else 0
+        except Exception:
+            return 0
+
+    @property
+    def spent(self):
+        return self._spent
+
+    def remaining(self):
+        if self.max_total_tokens <= 0:
+            return float("inf")
+        return max(0, self.max_total_tokens - self._spent)
+
+    def charge(self, tokens):
+        if type(tokens) is not int or tokens < 0:
+            raise ValueError("invalid measured token usage")
+        self._spent += tokens
+        if self.max_total_tokens <= 0:
+            return
+        payload = json.dumps({"model_tokens": self._spent,
+                              "max": self.max_total_tokens}, sort_keys=True)
+        with self.store.board.transaction() as db:
+            db.execute(
+                "INSERT INTO controller_settings(key,payload) VALUES(?,?) "
+                "ON CONFLICT(key) DO UPDATE SET payload=excluded.payload",
+                (self.KEY, payload))
+        if self._spent > self.max_total_tokens:
+            self.exhausted = True
+            raise BudgetExceeded("global run budget exhausted")
+
+
 class SessionControl:
     def __init__(self, store, challenge_id, *, max_steps=100, max_tokens=50_000,
                  max_tools=100, seconds=900, absolute_deadline=None, repeat_limit=3,
-                 stall_steps=20, policy=None, clock=time.time):
+                 stall_steps=20, policy=None, clock=time.time, global_budget=None):
         self.store, self.challenge_id = store, challenge_id
         self.max_steps, self.max_tokens, self.max_tools = max_steps, max_tokens, max_tools
         self.seconds, self.absolute_deadline = seconds, absolute_deadline
         self.repeat_limit, self.stall_steps = repeat_limit, stall_steps
         self.policy, self.clock = policy or StepPolicy(), clock
+        self.global_budget = global_budget
         if any(x <= 0 for x in (max_steps, max_tokens, max_tools, seconds, repeat_limit, stall_steps)):
             raise ValueError('positive controller limits required')
         revision, state = self.store.load(challenge_id)
@@ -86,6 +140,9 @@ class SessionControl:
     def charge_tokens(self, tokens):
         if type(tokens) is not int or tokens < 0:
             raise ValueError('invalid measured token usage')
+        if self.global_budget is not None:
+            # 全局账本先扣：超限直接抛，不再消耗单题额度。
+            self.global_budget.charge(tokens)
         self.store.patch(self.challenge_id, lambda s: s['budget'].update(model_tokens=s['budget']['model_tokens'] + tokens))
         _, state = self.store.load(self.challenge_id)
         if state['budget']['model_tokens'] >= self.max_tokens * .8:
