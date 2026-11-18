@@ -11,13 +11,16 @@ concurrency:
   max_running_projects: 3
   executor: serial
 budget:
-  per_challenge_seconds: 1800
-  claim_timeout_seconds: 300
-  max_model_tokens_per_intent: 400000
+  # 按 25 题正式赛规模校准（只考虑合理性，不考虑费用）：
+  # - 单意图 40 轮 ≈ 40-55 万 token、10-20 分钟
+  # - 单题会话按 2-3 个意图规划 → 100 万 token / 90 分钟上限
+  # - claim_timeout 是单意图硬超时，必须大于 40 轮的墙钟时间
+  per_challenge_seconds: 5400
+  claim_timeout_seconds: 1800
+  max_model_tokens_per_intent: 1000000
   max_tool_calls_per_intent: 300
-  # 运行级全局上限：全部题目累计 token，超限后编排层停止领取新意图。
-  # 8 题 × 单题 40 万的量级估算；0/未配置 = 不设全局上限。
-  max_model_tokens_total: 3200000
+  # 运行级全局上限：25 题 × 预期 ~80 万均值，防绕圈止损（非费用控制）
+  max_model_tokens_total: 20000000
   repeat_limit: 8
   stall_steps: 60
 download:
@@ -84,6 +87,8 @@ controller:
   - 50
   - 70
   - 100
+  # 步数窗口按意图重置（reset_intent_window），200 是单意图止损上限，
+  # 覆盖 40 轮工具调用的目标用量还有余量
   max_steps: 200
   parallel_agents: 1
   max_tool_rounds: 40

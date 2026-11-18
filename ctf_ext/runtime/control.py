@@ -158,3 +158,21 @@ class SessionControl:
                 s['last_progress_step'] = s['steps']
             s['tried_paths'].append(path)
         self.store.patch(self.challenge_id, update)
+
+
+def reset_intent_window(store, challenge_id, *, revive_stopped=True):
+    """意图边界开启独立步数窗口：路线阶段/停滞/重复判定按意图重新计。
+
+    跨意图保留的是"账户"：累计预算（model_tokens/tool_calls）、证据、
+    教训、handoff。步数窗口只服务当前意图——不重置的话，先到的意图会把
+    StepPolicy 推到 heartbeat 阶段（禁新调用），后续意图开局即残废。
+    revive_stopped=False 时保留 stopped 状态（预算耗尽等硬停止不被绕过）。
+    注意：同一题的意图并发执行需要调度器先行隔离（max_project_workers）。
+    """
+    def _window(s):
+        s['steps'] = 0
+        s['last_progress_step'] = 0
+        s['call_signatures'] = {}
+        if revive_stopped and s.get('status') == 'stopped':
+            s['status'] = 'ready'
+    return store.patch(challenge_id, _window)

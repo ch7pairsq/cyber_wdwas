@@ -20,7 +20,7 @@ from .harness.mock import MockHarnessAdapter, default_practice_challenges
 from .harness.flag_gate import FlagGate, ProviderReviewer
 from .harness.gateway import SubmitGateway
 from .store.session import StateStore
-from .runtime.control import GlobalBudget, SessionControl, StepPolicy
+from .runtime.control import GlobalBudget, SessionControl, StepPolicy, reset_intent_window
 from .llm.deepseek import DEFAULT_BASE_URL, DEFAULT_MODEL, DEFAULT_KEY_ENV, PROVIDER_NAME, DeepSeekProvider
 from .runtime.dashboard import write_dashboard
 from .runtime.llm_worker import LlmWorker
@@ -132,9 +132,9 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
     # 运行级全局 token 账本（0/未配置 = 不设上限）；编排层据此停止领取新意图。
     global_budget = GlobalBudget(state, int(budget.get("max_model_tokens_total") or 0))
     def control_factory(challenge_id):
-        # 意图重试语义：上一意图因 stall/重复调用把会话标为 stopped 时，
-        # 重试意图应复活会话（清停滞计数与重复签名），累计预算保留。
-        # 预算真正耗尽（tokens/tools/时间/steps 任意为 0）时不复活，保持硬限制。
+        # 意图边界 = 新步数窗口：route 阶段/停滞/重复判定按意图独立，
+        # 跨意图保留累计预算与证据教训（详见 reset_intent_window）。
+        # 预算真正耗尽（tokens/tools/时间 任意为 0）时不复活，保持硬限制。
         control = SessionControl(state, challenge_id, policy=step_policy,
             max_steps=int(controller.get("max_steps", 100)),
             max_tokens=int(budget.get("max_model_tokens_per_intent") or 50000),
@@ -148,14 +148,13 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
         try:
             _, st = state.load(challenge_id)
             left = control.remaining()
-            if (st.get("status") == "stopped"
-                    and left["tokens"] > 0 and left["tools"] > 0
-                    and left["seconds"] > 0 and st.get("steps", 0) < control.max_steps):
-                def _revive(s):
-                    s["status"] = "ready"
-                    s["call_signatures"] = {}
-                    s["last_progress_step"] = s["steps"]
-                state.patch(challenge_id, _revive)
+            # 预算仍在 → 每个意图开独立步数窗口（route/停滞/重复按意图重计，
+            # stopped 会话复活）；预算已耗尽 → 只重置计数、保留 stopped 硬停止。
+            budget_ok = (left["tokens"] > 0 and left["tools"] > 0
+                         and left["seconds"] > 0 and st.get("steps", 0) < control.max_steps)
+            reset_intent_window(state, challenge_id, revive_stopped=budget_ok)
+            board.append_event("intent_window_reset", challenge_id,
+                               {"prior_steps": st.get("steps", 0), "revived": budget_ok})
         except Exception:
             pass
         return control

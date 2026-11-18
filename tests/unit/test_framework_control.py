@@ -231,3 +231,39 @@ def test_session_control_charges_global_budget_first():
             control.charge_tokens(20)  # 全局先扣：超限直接抛
         _, state = store.load('gb1')
         assert state['budget']['model_tokens'] == 0  # 单题额度未被消耗
+
+
+def test_reset_intent_window_fresh_route_keeps_budget_and_memory():
+    from ctf_ext.runtime.control import reset_intent_window
+    with fixture() as store:
+        # 第一意图把步数推到 deep_water 阶段并产生证据（stall 调大避免触发止损）
+        control = SessionControl(store, 'w1', max_steps=200, max_tokens=1_000_000, stall_steps=200)
+        for i in range(1, 71):
+            control.reserve('tool', 'v1', [str(i)], str(i))
+        control.charge_tokens(300_000)
+        control.progress('ev-1', 'recon/first')
+        _, state = store.load('w1')
+        assert state['route']['stage'] == 3 and state['steps'] == 70
+        # 新意图：窗口归零 → route 回 initial，预算/证据保留
+        reset_intent_window(store, 'w1')
+        control2 = SessionControl(store, 'w1', max_steps=200, max_tokens=1_000_000, stall_steps=200)
+        control2.reserve('tool', 'v2', ['x'], 'x')
+        _, state = store.load('w1')
+        assert state['route']['stage'] == 0  # 新窗口从 initial 重新计
+        assert state['steps'] == 1
+        assert state['budget']['model_tokens'] == 300_000  # 累计预算不动
+        assert 'ev-1' in state['evidence_ids']  # 证据跨意图保留
+
+
+def test_reset_intent_window_revives_stopped_but_not_when_forbidden():
+    from ctf_ext.runtime.control import reset_intent_window
+    with fixture() as store:
+        SessionControl(store, 'w2', max_steps=200)
+        store.patch('w2', lambda s: s.update(status='stopped'))
+        reset_intent_window(store, 'w2')
+        _, state = store.load('w2')
+        assert state['status'] == 'ready'  # stall/重复类停止被复活
+        store.patch('w2', lambda s: s.update(status='stopped'))
+        reset_intent_window(store, 'w2', revive_stopped=False)
+        _, state = store.load('w2')
+        assert state['status'] == 'stopped'  # 预算耗尽类硬停止不被绕过
