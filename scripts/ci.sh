@@ -3,7 +3,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-python3 - <<'PY'
+PYTHON="${PYTHON:-python3}"
+
+"$PYTHON" - <<'PY'
 import pathlib, sys
 bad = []
 for path in pathlib.Path('.').rglob('*.py'):
@@ -16,7 +18,7 @@ if bad:
 print("syntax ok")
 PY
 
-python3 scripts/check_lock.py
-python3 scripts/run_checks.py
-python3 scripts/bench.py --workers 2 --intents 8 --work-ms 1 --out build/bench-ci.json
-python3 scripts/preflight.py
+"$PYTHON" scripts/check_lock.py
+"$PYTHON" scripts/run_checks.py
+"$PYTHON" scripts/bench.py --workers 2 --intents 8 --work-ms 1 --out build/bench-ci.json
+"$PYTHON" scripts/preflight.py

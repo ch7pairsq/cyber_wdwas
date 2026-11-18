@@ -28,11 +28,7 @@ def check(name, ok, detail="", warn=False):
 
 def main() -> int:
     v = sys.version_info
-    check("python>=3.9", v >= (3, 9), "{}.{}.{}".format(v.major, v.minor, v.micro))
-    if v < (3, 12):
-        check("python>=3.12 (production target)", False,
-              "local {} for skeleton only; production image must use 3.12".format(
-                  "{}.{}".format(v.major, v.minor)), warn=True)
+    check("python>=3.12", v >= (3, 12), "{}.{}.{}".format(v.major, v.minor, v.micro))
     try:
         import yaml  # noqa: F401
         check("pyyaml", True)
@@ -111,7 +107,7 @@ def main() -> int:
     mapped = normalize_config({"downloads": {"max_single_download_bytes": 123}})
     check("config aliases", mapped["download"]["max_single_bytes"] == 123, "downloads.* → download.*")
 
-    # F-1：上游 Cairn 已 vendored，但运行需要 >=3.12（本机 3.9）
+    # F-1：上游 Cairn 已 vendored，运行同样要求 >=3.12
     cairn_pyproject = ROOT / "cairn" / "cairn" / "pyproject.toml"
     check("cairn vendored", cairn_pyproject.exists(), "commit=8e7e0ea")
     if cairn_pyproject.exists():

@@ -5,8 +5,8 @@
 ## 本轮结论
 
 - 改动前基线：79/79 通过。
-- 当前全量 **205/205**（unit 184 / integration 17 / chaos 4）。本增量新增 9 项：Planner 3 项、调度批量查询 3 项、配置校验 3 项；并用 Python 3.9.6 的零依赖 runner 实跑。
-- 完整本地 runner：语法、直接依赖锁、205 项检查、2 Worker / 8 Intent SQLite 模拟压测和预检通过；预检 11 PASS / 4 WARN / 0 FAIL。Python 3.9.6 与 3.12.16 均为 204/204；pytest、ruff/mypy 与 YAML 配置分支本轮未实跑。
+- 当前全量 **205/205**（unit 184 / integration 17 / chaos 4）。本增量新增 9 项：Planner 3 项、调度批量查询 3 项、配置校验 3 项；并用 Python 3.12.16 的零依赖 runner 实跑。
+- 完整本地 runner：语法、直接依赖锁、205 项检查、2 Worker / 8 Intent SQLite 模拟压测和预检通过；预检 12 PASS / 2 WARN / 0 FAIL。Python 3.12.16 为 205/205；Python 3.9.6 是移除兼容目标前的历史结果，不再作为支持矩阵。pytest、ruff/mypy 与 YAML 配置分支本轮未实跑。
 - 20 题离线夹具：15 个有效答案全部 ACCEPTED，5 个对抗输入均未提交，0 错误提交。命令日志 30 条。它不是按赛制全时长的真实题集模拟。
 - 真实子进程 os._exit(23) 后，DRAFT 恢复提交且不重复解题；SENDING 恢复只查询、零 POST。
 - 真实 CLI --mode fallback 通过，输出见 build/framework-fallback.json。
