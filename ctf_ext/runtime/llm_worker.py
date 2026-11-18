@@ -62,7 +62,7 @@ class LlmWorker:
                  tool_registry=None, tool_cwd=None, max_tool_rounds: int = 8,
                  max_tool_result_bytes: int = 4000, global_budget=None,
                  pro_provider: Optional[ModelProvider] = None, pro_max_calls: int = 0,
-                 pro_from_stage: int = 2):
+                 pro_from_stage: int = 2, thinking_by_stage=(0, 0, 0, 0, 0)):
         self._provider = provider
         self._state, self._control_factory = state_store, control_factory
         self._check = evidence_check
@@ -87,12 +87,29 @@ class LlmWorker:
         self._pro_from_stage = max(0, int(pro_from_stage))
         self._pro_calls: Dict[str, int] = {}
         self._pro_down = False
+        # 思考模式按阶段预算（旋钮一：侦察/简单任务关思考防"思维过载"，攻坚多想）。
+        # 长度不为 5 视为未配置；网关不支持时粘滞关闭（fail-open）。
+        stages = tuple(thinking_by_stage or ())
+        self._thinking_by_stage = (tuple(max(0, int(x)) for x in stages)
+                                   if len(stages) == 5 else (0, 0, 0, 0, 0))
+        self._thinking_down = False
         self._system = DEFAULT_SYSTEM
         if prompt_path:
             with open(prompt_path, "r", encoding="utf-8") as fh:
                 self._system = fh.read().strip() or DEFAULT_SYSTEM
 
     # ------------------------------------------------------------------ public
+    def _thinking_budget(self, claim: Claim) -> int:
+        """按步数路线阶段取思考预算（0=关）；读取失败视为关闭（fail-open）。"""
+        if self._thinking_down or not any(self._thinking_by_stage) or self._state is None:
+            return 0
+        try:
+            _, saved = self._state.load(claim.challenge_id)
+            stage = int((saved.get("route") or {}).get("stage") or 0)
+            return int(self._thinking_by_stage[stage])
+        except Exception:
+            return 0
+
     def _select_provider(self, claim: Claim) -> ModelProvider:
         """换挡路由：stage>=pro_from_stage 的回合用 Pro，其余用主模型。
 
@@ -153,6 +170,7 @@ class LlmWorker:
         hint_sent = False
         while True:
             provider = None  # 仅在本轮 complete 前赋值；异常时区分是否 Pro 回退
+            thinking_used = 0  # 本轮思考预算；网关拒绝时粘滞关闭并重试
             try:
                 timeout, max_tokens = self._timeout, self._max_tokens
                 if control is not None:
@@ -171,19 +189,31 @@ class LlmWorker:
                            "timeout": timeout, "max_tokens": max_tokens}
                 if tools:
                     request["tools"] = tools
+                thinking_used = self._thinking_budget(claim)
+                if thinking_used > 0:
+                    request["thinking_budget"] = thinking_used
                 provider = self._select_provider(claim)
                 response = provider.complete(messages, **request)
             except ProviderTimeout:
+                if thinking_used > 0 and not self._thinking_down:
+                    self._thinking_down = True  # 思考参数不被网关支持：退回无思考重试
+                    continue
                 if provider is self._pro_provider:
                     self._pro_down = True  # Pro 故障：fail-open 回退主模型重试本轮
                     continue
                 return self._failure(claim, "failed", OUTCOME_TIMEOUT, "timeout", started, tokens, skills_loaded, tool_calls)
             except RateLimited:
+                if thinking_used > 0 and not self._thinking_down:
+                    self._thinking_down = True
+                    continue
                 if provider is self._pro_provider:
                     self._pro_down = True
                     continue
                 return self._failure(claim, "failed", OUTCOME_ERROR, "rate_limited", started, tokens, skills_loaded, tool_calls)
             except (ProviderError, ProviderConfigError) as exc:
+                if thinking_used > 0 and not self._thinking_down:
+                    self._thinking_down = True
+                    continue
                 if provider is self._pro_provider:
                     self._pro_down = True
                     continue
@@ -191,6 +221,9 @@ class LlmWorker:
             except (BudgetExceeded, LoopDetected) as exc:
                 return self._failure(claim, "failed", OUTCOME_ERROR, type(exc).__name__, started, tokens, skills_loaded, tool_calls)
             except Exception as exc:  # Provider 未按契约抛出的传输异常也要有界失败
+                if thinking_used > 0 and not self._thinking_down:
+                    self._thinking_down = True
+                    continue
                 if provider is self._pro_provider:
                     self._pro_down = True
                     continue

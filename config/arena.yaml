@@ -94,6 +94,12 @@ model:
   # 模型 ID 待确认网关支持后填入；空 = 不启用，行为与单模型完全一致。
   pro_model: ""
   pro_from_stage: 2
+  # 旋钮一：思考模式按步数路线阶段分配预算（token），0=关。对应口诀
+  # "侦察关思考（防 Flash 思维过载），攻坚多想（Pro 控预算）"：
+  # stage0 侦察/简单验证不开思考；stage1 轻思考；stage2 换路径攻坚开大；
+  # stage3/4 止损阶段归零。网关不支持 thinking 参数时自动粘滞回退。
+  # Pro 深思考轮数由 budget.pro_max_calls_per_challenge 兜底（每题 ≤8 次）。
+  thinking_by_stage: [0, 4000, 8000, 0, 0]
 storage:
   db_path: data/practice.db
 controller:

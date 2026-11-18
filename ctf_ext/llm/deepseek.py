@@ -112,7 +112,7 @@ class DeepSeekProvider(ModelProvider):
         return "DeepSeekProvider(company_gateway=True, model=deepseek-flash, key=***)"
 
     def complete(self, messages, *, system=None, json_mode=False, timeout=None,
-                 max_tokens=4096, tools=None):
+                 max_tokens=4096, tools=None, thinking_budget=0):
         if not self._api_key:
             raise ProviderConfigError("company model API key is not configured")
         if max_tokens <= 0:
@@ -120,6 +120,13 @@ class DeepSeekProvider(ModelProvider):
         safe_tools = _validate_tools(tools)
         normalized = [_normalize_message(message) for message in messages]
         payload = {"model": self._model, "messages": normalized, "max_tokens": max_tokens}
+        # 思考模式预算（借鉴 Tsecbench 冠军方案"简单不硬想"）：budget_tokens 必须
+        # 小于输出上限（Anthropic 契约），钳制后 <=0 视为不启用。
+        budget = int(thinking_budget or 0)
+        if budget > 0:
+            budget = min(budget, max_tokens - 1024)
+        if budget > 0:
+            payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
         if safe_tools:
             payload["tools"] = safe_tools
         instruction = system or ""

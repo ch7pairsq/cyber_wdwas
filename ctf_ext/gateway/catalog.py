@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
@@ -210,8 +211,50 @@ _ARENA_HTTP_SCHEMA = {
 }
 
 
+def _evidence_digest_argv(arguments, root):
+    """把模型参数转成 evidence_digest.py 的固定 argv；id 只收 64 位十六进制。"""
+    ids = arguments.get("evidence_ids") or []
+    if not isinstance(ids, list):
+        raise ValueError("evidence_ids must be a list")
+    clean = []
+    for raw in ids[:12]:
+        eid = str(raw).strip().lower()
+        if len(eid) == 64 and all(c in "0123456789abcdef" for c in eid):
+            clean.append(eid)
+    if not clean:
+        raise ValueError("no valid evidence ids")
+    # 证据库与工作区同级（root=data/workspaces，evidence=data/evidence）。
+    evidence_root = os.path.realpath(os.path.join(str(root), os.pardir, "evidence"))
+    # 脚本路径随模块位置推导：生产镜像在 /app，测试容器在 /src，行为一致。
+    digest_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "evidence_digest.py")
+    argv = ["python3", digest_script, "--root", evidence_root]
+    max_bytes = int(arguments.get("max_bytes") or 120000)
+    argv += ["--max-bytes", str(max(2000, min(max_bytes, 120000)))]
+    argv += clean
+    return argv
+
+
+_EVIDENCE_DIGEST_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "evidence_ids": {
+            "type": "array",
+            "description": "要关联复核的证据 sha256 列表（最多 12 个）",
+        },
+        "max_bytes": {
+            "type": "integer",
+            "description": "总输出字节上限（默认 120000，最大 120000）",
+        },
+    },
+    "required": ["evidence_ids"],
+}
+
+
 def default_specs() -> List[ToolSpec]:
     return [
+        _spec("evidence_digest", "按证据 id 一次性汇总多个证据文件原文，供跨文件证据关联与矛盾排查（只读）。连续卡住或线索多时优先使用。",
+              "python3", _evidence_digest_argv, _EVIDENCE_DIGEST_SCHEMA,
+              risk_level="read", timeout=30.0, max_output_bytes=130_000),
         _spec("arena_http", "向本次题目的服务地址发送受限 HTTP 请求（仅限 attempt 网段，走隧道）。响应为 JSON：status_line/headers/body。",
               "python3", _arena_http_argv, _ARENA_HTTP_SCHEMA,
               risk_level="arena_target", timeout=30.0, max_output_bytes=120_000),

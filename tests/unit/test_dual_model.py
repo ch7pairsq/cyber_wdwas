@@ -119,3 +119,63 @@ def test_no_pro_configured_behaves_as_single_model():
             usage={"total_tokens": 10}, raw={})])
         w = _worker(store, control, fast, None)  # 未配置 Pro
         assert w._select_provider(type("C", (), {"challenge_id": "c1"})()) is w._provider
+
+
+def test_thinking_by_stage_and_fail_open():
+    with fixture() as store:
+        control = SessionControl(store, "c1", max_steps=200, max_tokens=1_000_000,
+                                 stall_steps=1000, repeat_limit=1000)
+        eid = _evidence_id(store)
+        fast = FakeProvider([ProviderResponse(
+            text=json.dumps(_payload(eid), ensure_ascii=False),
+            usage={"total_tokens": 10}, raw={})])
+        w = _worker(store, control, fast, None)
+        w._thinking_by_stage = (0, 4000, 8000, 0, 0)
+        # stage 0：不开思考（侦察/简单任务防思维过载）
+        w.work(type("C", (), {"intent_id": "i1", "challenge_id": "c1",
+                              "attempt_no": 1, "strategy_key": "misc.triage.auto",
+                              "params": {}, "budget_seconds": 60})(),
+               {"challenge_id": "c1"})
+        assert "thinking_budget" not in fast.calls[0]["kwargs"]
+        # stage 2：换路径回合带思考预算
+        _drive_to_stage(store, control, 55)
+        fast2 = FakeProvider([ProviderResponse(
+            text=json.dumps(_payload(eid), ensure_ascii=False),
+            usage={"total_tokens": 10}, raw={})])
+        w2 = _worker(store, control, fast2, None)
+        w2._thinking_by_stage = (0, 4000, 8000, 0, 0)
+        w2.work(type("C", (), {"intent_id": "i2", "challenge_id": "c1",
+                               "attempt_no": 1, "strategy_key": "misc.triage.auto",
+                               "params": {}, "budget_seconds": 60})(),
+                {"challenge_id": "c1"})
+        assert fast2.calls[0]["kwargs"]["thinking_budget"] == 8000
+
+
+def test_thinking_rejected_falls_open_without_thinking():
+    with fixture() as store:
+        control = SessionControl(store, "c1", max_steps=200, max_tokens=1_000_000,
+                                 stall_steps=1000, repeat_limit=1000)
+        _drive_to_stage(store, control, 55)
+        eid = _evidence_id(store)
+
+        calls = []
+
+        class NoThinkingGateway:
+            def complete(self, messages, **kwargs):
+                calls.append(kwargs)
+                if kwargs.get("thinking_budget"):
+                    raise ProviderError("gateway rejects thinking param")
+                return ProviderResponse(
+                    text=json.dumps(_payload(eid), ensure_ascii=False),
+                    usage={"total_tokens": 10}, raw={})
+
+        w = _worker(store, control, NoThinkingGateway(), None)
+        w._thinking_by_stage = (0, 4000, 8000, 0, 0)
+        result = w.work(type("C", (), {"intent_id": "i1", "challenge_id": "c1",
+                                       "attempt_no": 1, "strategy_key": "misc.triage.auto",
+                                       "params": {}, "budget_seconds": 60})(),
+                        {"challenge_id": "c1"})
+        assert result.candidate_answer == FLAG  # 思考被拒后仍无思考完成
+        assert w._thinking_down is True
+        assert calls[0].get("thinking_budget") == 8000
+        assert "thinking_budget" not in calls[1]  # 第二次自动不带该参数

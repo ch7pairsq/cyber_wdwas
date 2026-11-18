@@ -238,7 +238,8 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
                            global_budget=global_budget,
                            pro_provider=pro_provider,
                            pro_max_calls=int(budget.get("pro_max_calls_per_challenge") or 0),
-                           pro_from_stage=int(model_cfg.get("pro_from_stage") or 2))
+                           pro_from_stage=int(model_cfg.get("pro_from_stage") or 2),
+                           thinking_by_stage=tuple(model_cfg.get("thinking_by_stage") or ()))
     else:
         worker = RuleBasedWorker(harness, evidence_store=evidence,
                                  state_store=state, control_factory=control_factory)

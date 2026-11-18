@@ -187,3 +187,17 @@ def test_config_rejects_gateway_model_search_and_install_overrides():
                      {"policy": {"web_search": True}}, {"policy": {"runtime_install": True}},
                      {"app": {"mode": "competition"}}):
         assert validate_config(dict(config(), **override))
+
+
+def test_thinking_budget_passes_through_and_clamps():
+    # budget 小于输出余量：原样进 payload
+    _, session2 = invoke(thinking_budget=2000, max_tokens=4096)
+    sent = session2.calls[0][1]["json"]
+    assert sent["thinking"] == {"type": "enabled", "budget_tokens": 2000}
+    # budget 超过输出余量：钳制到 max_tokens-1024
+    _, session3 = invoke(thinking_budget=8000, max_tokens=4096)
+    sent3 = session3.calls[0][1]["json"]
+    assert sent3["thinking"]["budget_tokens"] == 3072
+    # budget=0：不带 thinking 键（单模型旧行为）
+    _, session4 = invoke(max_tokens=4096)
+    assert "thinking" not in session4.calls[0][1]["json"]
