@@ -83,6 +83,7 @@ policy:
   - cstool
   - checksec
   - patchelf
+  - git
   - z3
   - strace
   - ltrace

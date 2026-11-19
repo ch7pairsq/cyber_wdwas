@@ -19,6 +19,7 @@ _SAFE_NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}")
 
 
 def _resolve_path(arguments: Dict[str, Any], work_root: Optional[Path]) -> str:
+    """路径参数解析：限长/禁空字节，相对路径以工作区为根，越界即拒绝。"""
     value = arguments.get("path")
     if not isinstance(value, str) or not value or "\x00" in value or len(value) > 4096:
         raise ValueError("invalid path")
@@ -33,6 +34,7 @@ def _resolve_path(arguments: Dict[str, Any], work_root: Optional[Path]) -> str:
 
 
 def _positive_int(arguments: Dict[str, Any], name: str, default: int, low: int, high: int) -> int:
+    """整数参数白名单：类型必须是 int 且落在 [low, high]，否则拒绝。"""
     value = arguments.get(name, default)
     if type(value) is not int or not low <= value <= high:
         raise ValueError("invalid " + name)
@@ -41,6 +43,7 @@ def _positive_int(arguments: Dict[str, Any], name: str, default: int, low: int, 
 
 def _bounded_str(arguments: Dict[str, Any], name: str, default: str,
                  max_len: int = 128, pattern: Optional[str] = None) -> str:
+    """字符串参数白名单：限长/禁换行与空字节，可选正则全匹配。"""
     value = arguments.get(name, default)
     if value is None:
         value = default
@@ -171,6 +174,7 @@ def _spec(name: str, description: str, command: str, builder, schema: Dict[str, 
           *, timeout: float = 30.0, max_output_bytes: int = 200_000,
           risk_level: str = "read", idempotent: bool = True,
           stdin_argument: str = "", stdin_max_bytes: int = 0) -> ToolSpec:
+    """工具描述工厂：统一绑定只读风险级、原始证据策略与固定主命令。"""
     return ToolSpec(
         name=name, version="debian-bookworm", description=description + DESCRIPTION_PREFIX,
         risk_level=risk_level, allowed_scope="challenge", timeout_seconds=timeout,
@@ -330,7 +334,38 @@ _PDF_IMAGES_SCHEMA = {
 }
 
 
+_GIT_HISTORY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "path": {"type": "string", "minLength": 1,
+                 "description": "题目工作区内仓库路径（含 .git 的目录或裸 .git 目录）"},
+        "mode": {"type": "string", "enum": ["log", "show", "fsck"],
+                 "description": "log=全分支提交与文件变动；show=读取对象（commit:path 取回被删文件）；fsck=悬空/不可达对象",
+                 "default": "log"},
+        "rev": {"type": "string", "pattern": r"[A-Za-z0-9._~^:/][A-Za-z0-9._~^:/-]{0,199}",
+                "description": "show 模式的对象：提交哈希/分支名/commit:path"},
+    },
+    "required": ["path"],
+    "additionalProperties": False,
+}
+
+
+def _git_history_argv(arguments, work_root):
+    """git_history.py 固定 argv：log 看历史、fsck 找悬空、show 取对象；rev 白名单正则拦截选项注入。"""
+    path = _resolve_path(arguments, work_root)
+    mode = str(arguments.get("mode") or "log")
+    if mode not in ("log", "show", "fsck"):
+        raise ValueError("invalid mode")
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "git_history.py")
+    argv = ["python3", script, "--git-dir", path, "--mode", mode]
+    if mode == "show":
+        argv += ["--rev", _bounded_str(arguments, "rev", "HEAD", 200,
+                 pattern=r"[A-Za-z0-9._~^:/][A-Za-z0-9._~^:/-]{0,199}")]
+    return argv
+
+
 def default_specs() -> List[ToolSpec]:
+    """内建工具目录：24 个只读/受控工具，全部绑定固定主命令与白名单参数。"""
     return [
         _spec("ocr_text", "识别图片中的文字（tesseract，中英文）。截图、扫描件、题面图片先用它取文本。",
               "tesseract", _ocr_text_argv, _OCR_TEXT_SCHEMA,
@@ -378,9 +413,12 @@ def default_specs() -> List[ToolSpec]:
               risk_level="execute", idempotent=False, timeout=60.0, max_output_bytes=50_000),
         _spec("disasm_bytes", "把十六进制机器码按指定架构反汇编。", "cstool", _disasm_bytes,
               _schema_bytes()),
+        _spec("git_history", "只读读取工作区 Git 仓库历史。mode=log 列全分支提交与每提交文件变动（找删除/改名）；mode=fsck 列悬空与不可达对象（amend/reset 残留）；mode=show+rev 读取对象内容（commit:path 取回被删文件）。", "python3", _git_history_argv, _GIT_HISTORY_SCHEMA,
+              timeout=60.0, max_output_bytes=200_000),
     ]
 
 
 def register_default_tools(registry: ToolRegistry) -> None:
+    """把全部内建工具注册进 ToolRegistry（启动期一次）。"""
     for spec in default_specs():
         registry.register(spec)

@@ -200,5 +200,113 @@
       "license": "MIT",
       "reviewed_at": "2026-11-19"
     }
+  },
+  {
+    "name": "web.sqlinjection",
+    "domain": "web",
+    "trigger": "SQL 注入：报错回显/联合查询/盲注逐字符提取",
+    "keywords": ["sql", "sqli", "union", "blind", "database", "sqlite", "mysql", "select", "quote", "injection"],
+    "prerequisites": ["arena_http", "python_exec"],
+    "tokens_hint": 600,
+    "risk": "read",
+    "file": "web.sqlinjection.md",
+    "pivot": ["web.ssti", "web.jwt"],
+    "source": {"type": "internal"}
+  },
+  {
+    "name": "web.ssti",
+    "domain": "web",
+    "trigger": "服务端模板注入：探测串区分引擎后读文件/执行命令",
+    "keywords": ["ssti", "template", "jinja", "mako", "twig", "render", "engine", "curly"],
+    "prerequisites": ["arena_http", "python_exec"],
+    "tokens_hint": 600,
+    "risk": "read",
+    "file": "web.ssti.md",
+    "pivot": ["web.sqlinjection", "web.ssrf"],
+    "source": {"type": "internal"}
+  },
+  {
+    "name": "web.jwt",
+    "domain": "web",
+    "trigger": "JWT 伪造：alg 混淆/弱密钥爆破/重签载荷",
+    "keywords": ["jwt", "token", "alg", "hs256", "rs256", "kid", "base64url", "auth", "session"],
+    "prerequisites": ["python_exec", "arena_http"],
+    "tokens_hint": 600,
+    "risk": "read",
+    "file": "web.jwt.md",
+    "pivot": ["crypto.encoding", "web.ssti"],
+    "source": {"type": "internal"}
+  },
+  {
+    "name": "web.ssrf",
+    "domain": "web",
+    "trigger": "SSRF：URL 探测内网/协议/重定向绕过",
+    "keywords": ["ssrf", "url", "internal", "redirect", "webhook", "intranet", "fetch", "metadata"],
+    "prerequisites": ["arena_http", "python_exec"],
+    "tokens_hint": 600,
+    "risk": "read",
+    "file": "web.ssrf.md",
+    "pivot": ["web.ssti", "web.sqlinjection"],
+    "source": {"type": "internal"}
+  },
+  {
+    "name": "pwn.heap.uaf",
+    "domain": "pwn",
+    "trigger": "堆利用：UAF/tcache/fastbin 复用与 fd 劫持",
+    "keywords": ["heap", "uaf", "tcache", "fastbin", "chunk", "free", "malloc", "glibc", "fd", "menu"],
+    "prerequisites": ["checksec", "file_info", "python_exec"],
+    "tokens_hint": 700,
+    "risk": "read",
+    "file": "pwn.heap.uaf.md",
+    "pivot": ["pwn.stack.recon"],
+    "source": {"type": "internal"}
+  },
+  {
+    "name": "crypto.lattice.lll",
+    "domain": "crypto",
+    "trigger": "格攻击：LLL 归约/Coppersmith 小根",
+    "keywords": ["lattice", "lll", "coppersmith", "knapsack", "matrix", "shortest", "polynomial", "hidden", "subset"],
+    "prerequisites": ["python_exec"],
+    "tokens_hint": 700,
+    "risk": "read",
+    "file": "crypto.lattice.lll.md",
+    "pivot": ["crypto.rsa.small_e", "crypto.prng.mt19937"],
+    "source": {"type": "internal"}
+  },
+  {
+    "name": "misc.pt.zipfile",
+    "domain": "misc",
+    "trigger": "PyTorch 文件：zip 容器/pickle 解析张量",
+    "keywords": ["pytorch", "pt", "pth", "ckpt", "pickle", "tensor", "checkpoint", "state", "dict", "maze"],
+    "prerequisites": ["file_info", "python_exec"],
+    "tokens_hint": 600,
+    "risk": "read",
+    "file": "misc.pt.zipfile.md",
+    "pivot": ["forensics.archive_layers", "crypto.encoding"],
+    "source": {"type": "internal"}
+  },
+  {
+    "name": "misc.llmagent.guard",
+    "domain": "misc",
+    "trigger": "LLM Agent 题：接口探测/对抗三路/假 flag 防御",
+    "keywords": ["llm", "agent", "bot", "chat", "prompt", "injection", "ai", "conversation"],
+    "prerequisites": ["arena_http", "python_exec"],
+    "tokens_hint": 600,
+    "risk": "read",
+    "file": "misc.llmagent.guard.md",
+    "pivot": ["web.jwt", "web.sqlinjection"],
+    "source": {"type": "internal"}
+  },
+  {
+    "name": "forensics.git.history",
+    "domain": "forensics",
+    "trigger": "Git 历史恢复：全分支提交/悬空对象/被删文件",
+    "keywords": ["git", "history", "commit", "dangling", "fsck", "reflog", "deleted", "blob", "tree"],
+    "prerequisites": ["git_history", "file_info", "archive_extract"],
+    "tokens_hint": 600,
+    "risk": "read",
+    "file": "forensics.git.history.md",
+    "pivot": ["forensics.stego.image", "crypto.encoding"],
+    "source": {"type": "internal"}
   }
 ]

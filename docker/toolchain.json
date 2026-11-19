@@ -233,6 +233,20 @@
       "notes": "磁盘镜像/文件系统取证"
     },
     {
+      "name": "git",
+      "package": "git",
+      "source": "apt",
+      "bins": [
+        "git"
+      ],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": true,
+      "risk": "read",
+      "license": "GPL-2.0-or-later",
+      "notes": "Git 历史恢复取证（配合注册工具 git_history）"
+    },
+    {
       "name": "exiftool",
       "package": "libimage-exiftool-perl",
       "source": "apt",
