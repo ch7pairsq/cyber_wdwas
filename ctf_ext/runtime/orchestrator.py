@@ -27,6 +27,11 @@ from .watchdog import ClaimTimeout, DeadlineGuard, recover_expired_leases
 
 
 class Orchestrator:
+    # deadline 后收尾宽限（秒）：真实平台提交回执往返可达 client_timeout=40s，
+    # 只给 1s 会把在途回执关在门外——该题永远停在 SENDING，分数丢失且
+    # 正式赛一次性窗口无重赛机会。排空即返回，happy path 无额外墙钟。
+    final_drain_seconds = 30.0
+
     def __init__(self, harness, board, scheduler, worker,
                  evidence=None, metrics: Optional[Metrics] = None,
                  worker_name: str = "worker-1", lease_seconds: float = 60.0,
@@ -485,6 +490,18 @@ class Orchestrator:
             self._metrics.incr("submissions." + str(status).lower())
             self._metrics.observe("submissions.latency_seconds", float(event.get("latency_seconds") or 0))
 
+    def _drain_gateway(self) -> None:
+        """运行收尾：有界宽限内排空在途提交，然后关网关。
+
+        flush 排空 inflight 即返回；宽限耗尽才放弃（残留行留在 SENDING，
+        由 recover_legacy 挂查询）。异常只记事件，不阻断 finalize。
+        """
+        try:
+            self._collect_submissions(self._gateway.flush(timeout=self.final_drain_seconds))
+        except Exception as exc:
+            self._board.append_event("gateway_flush_failed", "", {"error": type(exc).__name__})
+        self._gateway.close()
+
     # ---------------------------------------------------------------- run loop
     def run(self, max_seconds: float = 120.0) -> Dict:
         deadline = self._clock() + max_seconds
@@ -510,11 +527,7 @@ class Orchestrator:
         else:
             self._run_serial(deadline, tasks, results, solved, global_budget)
         if self._gateway is not None:
-            try:
-                self._collect_submissions(self._gateway.flush(timeout=min(1, max(0, deadline - self._clock()))))
-            except Exception as exc:
-                self._board.append_event("gateway_flush_failed", "", {"error": type(exc).__name__})
-            self._gateway.close()
+            self._drain_gateway()
         solved = self._solved()
         for result in results:
             if result["submission"]:

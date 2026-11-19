@@ -1,0 +1,139 @@
+# 正式赛配置（arena 协议 / 平台托管 harness 启动）。
+#
+# 2026-11 官方规则口径：
+# - 一次性答题机会：整场只有 1 次，结束不能重开 → 所有预算宁可偏大，
+#   崩溃由 scripts/run_official.sh 的 supervisor 续跑（同一 DB 断点恢复）。
+# - 27 题、4 小时连续计时（从开始答题起，不能暂停）→ 启动传
+#   --seconds = 4h - 收尾余量（scripts/run_official.sh 默认 13800s）。
+# - 排名 tiebreaker 是有效耗时（首次平台 API 调用 → 最后一次得分）：
+#   先易后难快拿分、gate 确认即滚动提交（机制已就位）。
+# - 3 个题目环境并发上限 → parallel_agents / max_envs / max_running_projects
+#   三处保持一致。
+#
+# 注意：不要把 app.mode 设为 "competition"——config.py 校验会强制要求
+# protocol=official（遗留占位），实际平台是 arena 协议。
+app:
+  mode: practice
+
+concurrency:
+  max_workers: 4
+  # 题内串行：同题同时只跑 1 个意图（会话状态共享，并发写会打架）。
+  max_project_workers: 1
+  # 平台环境上限 3 个（409 environment_limit）：在跑题数不超过 3。
+  max_running_projects: 3
+  executor: serial
+
+budget:
+  # 27 题 × 4h 窗口、3 路并行 → 总挑战秒 ≈ 41400，均摊 ~1530s/题。
+  # 单题预算取均摊偏下（1500s）：停滞题及时轮转让位，耗尽题由
+  # endgame 加时兜底（×2 追加授权）。
+  per_challenge_seconds: 1500
+  claim_timeout_seconds: 1200
+  max_model_tokens_per_intent: 600000
+  max_tool_calls_per_intent: 300
+  # 运行级全局 token 上限 5000 万（用户 2026-11-19 定版，按 27 题算）。
+  # 一次性机会下这是止损保险丝而非预算规划——耗尽会 run_stopped 终止
+  # 整个运行，正式赛口径下宁可偏大。
+  max_model_tokens_total: 50000000
+  repeat_limit: 6
+  stall_steps: 30
+  # 终局加时：全部可解题做完且剩余时间 > endgame_min_seconds 时，对预算
+  # 耗尽（stopped）的题授权一次追加额度——token/工具上限 ×(1+bonus)、
+  # 会话有效期延到运行截止。0 = 关闭。累计账本不清零，硬停止语义保留。
+  endgame_token_bonus: 2.0
+  # Pro（换挡模型）每题调用硬上限：防烧穿全局预算；Pro/Flash 走同一账本。
+  pro_max_calls_per_challenge: 8
+
+download:
+  max_single_bytes: 20971520
+  max_total_bytes: 104857600
+
+policy:
+  authorized_scope: []
+  web_search: false
+  runtime_install: false
+  sandbox_required: false
+  command_allowlist:
+  - python3
+  - unzip
+  - zip
+  - xz
+  - bzip2
+  - zstd
+  - strings
+  - objdump
+  - readelf
+  - nm
+  - file
+  - binwalk
+  - foremost
+  - fls
+  - icat
+  - mmls
+  - exiftool
+  - 7z
+  - steghide
+  - pngcheck
+  - openssl
+  - xxd
+  - jq
+  - gdb
+  - pwn
+  - ROPgadget
+  - cstool
+  - checksec
+  - patchelf
+  - z3
+  - strace
+  - ltrace
+  - qemu-x86_64
+  - qemu-aarch64
+  - pdftotext
+  - pdfinfo
+  - qrencode
+  - tesseract
+  - zbarimg
+  authorized_arena_targets:
+  - 10.201.0.0/16
+
+model:
+  provider: baizhi_anthropic
+  base_url: https://ai-api-gateway.app.baizhi.cloud/api/anthropic
+  model: deepseek-flash
+  api_key_env: BAIZHI_API_KEY
+  max_tokens: 4096
+  tools_enabled: true
+  # 双模型换挡：pro_model 非空时，stage>=pro_from_stage 的换路径回合与提交
+  # 前评审路由到 Pro（同一网关同一凭据）；调用失败/每题次数超限自动回退。
+  pro_model: ""
+  pro_from_stage: 2
+  # 思考模式按步数路线阶段分配预算（token），0=关：侦察不开思考、攻坚多想。
+  thinking_by_stage: [0, 4000, 8000, 0, 0]
+
+storage:
+  db_path: data/official.db
+
+controller:
+  thresholds:
+  - 30
+  - 50
+  - 70
+  - 100
+  # 步数窗口按意图重置，200 是单意图止损上限。
+  max_steps: 200
+  # 跨题并行 worker 数：对齐平台 3 环境上限（题内串行见 concurrency）。
+  parallel_acceptance: true
+  parallel_agents: 3
+  max_tool_rounds: 40
+
+harness:
+  protocol: arena
+  competition_locked: false
+  arena:
+    # 平台 API 地址；正式赛如变更以裁判组公告为准。
+    base_url: http://10.201.0.77:8090
+    auto_start: true
+    # on_demand: 每个意图执行前按需拉起环境，省槽位。
+    env_policy: on_demand
+    max_envs: 3
+    client_timeout_seconds: 40

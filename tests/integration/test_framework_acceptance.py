@@ -5,12 +5,14 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 from unittest.mock import patch
 
 from ctf_ext.__main__ import build_runtime
 from ctf_ext.config import HotConfig, validate_config
 from ctf_ext.store.blackboard import IntentDraft, WorkerResult
+from ctf_ext.harness.gateway import SubmitGateway
 from ctf_ext.harness.schema import SubmitReceipt
 from tests.framework_support import FLAG, expect, fixture
 
@@ -93,6 +95,50 @@ def test_K01_offline_twenty_cases_including_five_adversarial_inputs():
         assert orch._board._db.execute("SELECT COUNT(*) FROM submissions WHERE status='REJECTED'").fetchone()[0] == 0
         assert orch._board._db.execute('SELECT COUNT(*) FROM command_log').fetchone()[0] == 30
         assert result['quality']['accepted_first_30m_conversion'] == .75
+        orch._board.close()
+
+
+def test_final_drain_recovers_inflight_submission_at_deadline():
+    # 一次性窗口（正式赛 4h）：主循环 deadline 时 SENDING 的提交必须在
+    # 收尾宽限内收回回执，不能停在 SENDING 丢分。旧实现收尾 flush 只有
+    # min(1, 剩余) 秒（deadline 后为 0），回执往返一慢就永远丢失。
+    with tempfile.TemporaryDirectory() as root:
+        orch = build_runtime(root + '/run.db', root + '/evidence')
+        entered, release = threading.Event(), threading.Event()
+
+        class SlowAdapter:
+            def __init__(self):
+                self.calls, self.queries = [], []
+
+            def submit_answer(self, sub):
+                self.calls.append(sub)
+                entered.set()
+                if not release.wait(10):
+                    raise TimeoutError()
+                return SubmitReceipt('ACCEPTED', 'drained')
+
+            def get_receipt(self, key):
+                self.queries.append(key)
+                return None
+
+        slow = SlowAdapter()
+        orch._gateway = SubmitGateway(orch._state, slow)
+        # run(2) 的主循环最早 ~1.5s 就因无待领工作退出；放行时间取 4s，
+        # 远超旧实现的 ≤1s 收尾预算（旧代码必然停在 SENDING），
+        # 新实现靠 final_drain_seconds=30 的宽限收回回执。
+        timer = threading.Timer(4.0, release.set)
+        timer.daemon = True
+        timer.start()
+        try:
+            result = orch.run(2)
+        finally:
+            release.set()
+            timer.cancel()
+        assert entered.is_set()  # 提交确实进入过在途
+        assert slow.calls and slow.calls[0].challenge_id == 'ch-mock-1'
+        status = orch._board._db.execute('SELECT status FROM submissions').fetchone()[0]
+        assert status == 'ACCEPTED'
+        assert result['solved'] == ['ch-mock-1']  # 收尾宽限计入 solved
         orch._board.close()
 
 

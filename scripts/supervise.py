@@ -5,6 +5,9 @@
 Orchestrator/看门狗完成。示例：
   python3 scripts/supervise.py --heartbeat data/heartbeat --stale-seconds 180 \
       --max-restarts 3 -- python3 -m ctf_ext run --mode llm --heartbeat-file data/heartbeat
+
+正式赛一次性窗口：加 --deadline-seconds 13800，重启时自动把子进程
+--seconds 收缩为剩余时间，总墙钟不超过窗口。
 """
 import argparse
 import os
@@ -54,11 +57,32 @@ def terminate(proc, grace=5.0):
             pass
 
 
-def run(command, heartbeat=None, stale_seconds=180.0, max_restarts=3, backoff=2.0):
+def set_seconds(command, value):
+    """把子进程命令里的 --seconds 收缩为 value（无则追加）。"""
+    out = list(command)
+    for idx, arg in enumerate(out):
+        if arg == '--seconds' and idx + 1 < len(out):
+            out[idx + 1] = str(value)
+            return out
+    return out + ['--seconds', str(value)]
+
+
+def run(command, heartbeat=None, stale_seconds=180.0, max_restarts=3, backoff=2.0,
+        deadline_seconds=None, min_remaining=90.0):
+    # 正式赛一次性窗口：deadline_seconds 从 supervisor 启动起算的总墙钟。
+    # 每次启动/重启都把子进程 --seconds 收缩为剩余时间；剩余不足
+    # min_remaining 时不再重启（不够完成一次有意义的恢复）。
+    t0 = time.monotonic()
     restarts = 0
     while True:
+        cmd = list(command)
+        if deadline_seconds is not None:
+            remaining = deadline_seconds - (time.monotonic() - t0)
+            if remaining <= 0:
+                return 0  # 总窗口耗尽：不再启动新进程
+            cmd = set_seconds(cmd, remaining)
         started = time.monotonic()
-        proc = subprocess.Popen(command, start_new_session=True)
+        proc = subprocess.Popen(cmd, start_new_session=True)
         stale = False
         while True:
             returncode = proc.poll()
@@ -74,6 +98,10 @@ def run(command, heartbeat=None, stale_seconds=180.0, max_restarts=3, backoff=2.
         returncode = proc.poll()
         if returncode == 0 and not stale:
             return 0
+        if deadline_seconds is not None:
+            remaining = deadline_seconds - (time.monotonic() - t0)
+            if remaining <= min_remaining:
+                return returncode if returncode is not None else 1
         if not should_restart(returncode, stale, restarts, max_restarts):
             return returncode if returncode is not None else 1
         restarts += 1
@@ -89,6 +117,11 @@ def main(argv=None):
     parser.add_argument("--stale-seconds", type=float, default=180.0)
     parser.add_argument("--max-restarts", type=int, default=3)
     parser.add_argument("--backoff", type=float, default=2.0)
+    parser.add_argument("--deadline-seconds", type=float, default=None,
+                        help="总墙钟预算（从 supervisor 启动起算）；重启时把子进程 "
+                             "--seconds 收缩为剩余时间，到点后不再重启")
+    parser.add_argument("--min-remaining", type=float, default=90.0,
+                        help="剩余时间低于该值时不再重启")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     command = list(args.command)
@@ -98,8 +131,13 @@ def main(argv=None):
         parser.error("a command is required after --")
     if args.stale_seconds <= 0:
         parser.error("--stale-seconds must be positive")
+    if args.deadline_seconds is not None and args.deadline_seconds <= 0:
+        parser.error("--deadline-seconds must be positive")
+    if args.min_remaining < 0:
+        parser.error("--min-remaining must be non-negative")
     return run(command, heartbeat=args.heartbeat, stale_seconds=args.stale_seconds,
-               max_restarts=max(0, args.max_restarts), backoff=args.backoff)
+               max_restarts=max(0, args.max_restarts), backoff=args.backoff,
+               deadline_seconds=args.deadline_seconds, min_remaining=args.min_remaining)
 
 
 if __name__ == "__main__":
