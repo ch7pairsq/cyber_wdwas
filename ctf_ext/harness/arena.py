@@ -525,6 +525,15 @@ class ArenaHarnessAdapter(HarnessAdapter):
                     # 已计数：视为接受的幂等回执，不重发（附录 E）。
                     return SubmitReceipt(status="ACCEPTED", receipt_id="dup-" + key[:8],
                                          detail="already counted")
+                if "409" in text and "invalid_state" in text.lower():
+                    # invalid_state ≠ 答案错误：题目可能已被其他路径（如早前提交）
+                    # 完成。先只读查询平台题目列表对账；能证实已完成 → 幂等接受；
+                    # 证实不了 → 落 UNKNOWN（不伪造 REJECTED 终态），等待人工对账。
+                    if self._probe_challenge_state(code):
+                        return SubmitReceipt(status="ACCEPTED", receipt_id="state-" + key[:8],
+                                             detail="platform reports challenge already completed")
+                    return SubmitReceipt(status="UNKNOWN",
+                                         detail="invalid_state without completion confirmation; reconcile manually")
                 return SubmitReceipt(status="REJECTED", detail=text[:300])
         status = ""
         if isinstance(resp, dict):
@@ -537,6 +546,40 @@ class ArenaHarnessAdapter(HarnessAdapter):
 
     def get_receipt(self, idempotency_key: str) -> Optional[SubmitReceipt]:
         return self._receipts.get(idempotency_key)
+
+    def _probe_challenge_state(self, code: str) -> bool:
+        """409 invalid_state 时的只读对账：查题目列表判断该题是否已完成。
+
+        平台没有独立的回执查询端点；题目列表若携带完成态字段即可判定。
+        字段名各版本不一（solved/completed/correct/...），逐个试探；
+        查不到完成态时保守返回 False，由调用方落 UNKNOWN，不伪造终态。
+        """
+        try:
+            resp = self._client.request("GET", self._paths["list"])
+        except Exception:
+            return False
+        items = resp if isinstance(resp, list) else (resp.get("challenges")
+                                                    or resp.get("items") or [])
+        if not isinstance(items, list):
+            return False
+        truthy = ("true", "yes", "1", "solved", "completed", "correct", "accepted")
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            item_code = str(item.get("unique_code") or item.get("uniqueCode")
+                            or item.get("id") or "").strip()
+            if item_code != code:
+                continue
+            for field in ("solved", "completed", "correct", "accepted",
+                          "is_completed", "is_solved", "flag_correct"):
+                value = item.get(field)
+                if value is True or value == 1:
+                    return True
+                if isinstance(value, str) and value.strip().lower() in truthy:
+                    return True
+            if str(item.get("status") or "").strip().lower() in truthy:
+                return True
+        return False
 
     # ---------------------------------------------------------------- finalize
     def finalize(self, summary: RunSummary) -> dict:

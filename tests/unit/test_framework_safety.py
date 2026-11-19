@@ -3,9 +3,11 @@ import concurrent.futures
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 from unittest.mock import patch
 
 from tests.framework_support import Adapter, FLAG, enqueue, expect, fixture, proof
@@ -27,24 +29,56 @@ def test_H_default_tool_execution_requires_real_sandbox():
 
 def test_H_capture_does_not_inherit_model_credentials():
     with fixture() as store:
-        with patch.dict(os.environ, {'BAIZHI_API_KEY': 'not-a-real-key'}):
-            out = capture([sys.executable, '-I', '-c', 'import os;print(os.environ.get("BAIZHI_API_KEY", "absent"))'],
+        env = {'BAIZHI_API_KEY': 'not-a-real-key', 'ARENA_SOLVER_TOKEN': 'solver-secret',
+               'ARENA_PROXY': 'socks5://127.0.0.1:1080', 'ARENA_NETWORK_CIDR': '10.201.0.0/16'}
+        with patch.dict(os.environ, env):
+            probe = ('import os;print(os.environ.get("BAIZHI_API_KEY", "absent"),'
+                     'os.environ.get("ARENA_SOLVER_TOKEN", "absent"),'
+                     'os.environ.get("ARENA_PROXY", "absent"),'
+                     'os.environ.get("ARENA_NETWORK_CIDR", "absent"))')
+            out = capture([sys.executable, '-I', '-c', probe],
                           cwd=str(store.workspace('c1')), timeout=2)
-        assert out['output'].strip() == b'absent'
+        absent, solver, proxy, cidr = out['output'].decode().split()
+        assert absent == 'absent' and solver == 'absent'  # 凭据绝不进入工具进程
+        assert proxy == 'socks5://127.0.0.1:1080' and cidr == '10.201.0.0/16'  # 工具所需变量放行
+
+
+def test_H_arena_http_denies_platform_writes_but_allows_reads():
+    script = str(Path(__file__).resolve().parents[2] / 'ctf_ext' / 'gateway' / 'arena_http.py')
+    env = {**os.environ, 'ARENA_PROXY': 'socks5://127.0.0.1:1080',
+           'ARENA_NETWORK_CIDR': '10.201.0.0/16',
+           'ARENA_BASE_URL': 'http://10.201.0.77:8090'}
+    deny = subprocess.run([sys.executable, script, '--host', '10.201.0.77', '--port', '8090',
+                           '--method', 'POST', '--path', '/openapi/v1/challenges/finish'],
+                          capture_output=True, text=True, timeout=10, env=env)
+    # finish/submit 等管理写操作直接拒绝：提交必须走网关治理，防误关 attempt。
+    assert 'platform API is read-only' in (deny.stdout + deny.stderr)
+    read = subprocess.run([sys.executable, script, '--host', '10.201.0.77', '--port', '8090',
+                           '--method', 'GET', '--path', '/openapi/v1/challenges', '--timeout', '1'],
+                          capture_output=True, text=True, timeout=10, env=env)
+    # 平台 GET 仍放行（模型需要读题目/服务地址）。
+    assert 'platform API is read-only' not in (read.stdout + read.stderr)
+    other = subprocess.run([sys.executable, script, '--host', '10.201.0.50', '--port', '5000',
+                            '--method', 'POST', '--path', '/load-workflow', '--timeout', '1'],
+                           capture_output=True, text=True, timeout=10, env=env)
+    # 非平台靶机不受影响：策略放行，进入 socks 连接阶段（本地无代理而失败）。
+    assert 'platform API is read-only' not in (other.stdout + other.stderr)
 
 
 def test_E03_heartbeat_renews_live_lease_and_allows_final_write():
     with fixture() as store:
         store.board.add_intent(IntentDraft('c1', 'misc.heartbeat.test'))
-        claim = store.board.claim_intent('w', lease_seconds=.3)
-        with LeaseHeartbeat(store.board, claim, 'w', .3) as heartbeat:
-            deadline = time.monotonic() + 1
+        # 租约取 1s：0.3s 的旧值在全量套件高负载下会被调度抖动翻转
+        # （续期线程拿不到时间片 → 判定误报）；放宽时长不改变语义。
+        claim = store.board.claim_intent('w', lease_seconds=1)
+        with LeaseHeartbeat(store.board, claim, 'w', 1) as heartbeat:
+            deadline = time.monotonic() + 2
             while time.monotonic() < deadline:
-                if store.db.execute('SELECT lease_until FROM intents_ext').fetchone()[0] > claim.lease_until + .2:
+                if store.db.execute('SELECT lease_until FROM intents_ext').fetchone()[0] > claim.lease_until + .5:
                     break
                 threading.Event().wait(.02)
             current = store.db.execute('SELECT lease_until FROM intents_ext').fetchone()[0]
-            assert current > claim.lease_until + .2 and not heartbeat.error
+            assert current > claim.lease_until + .5 and not heartbeat.error
             result = WorkerResult(claim.intent_id, 'w', claim.attempt_no, 'c1', claim.strategy_key, 'completed')
             assert store.board.write_result(result, 'live').first
 

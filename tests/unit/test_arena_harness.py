@@ -20,6 +20,10 @@ class _StubArena(BaseHTTPRequestHandler):
     started: set = set()
     submissions: list = []
     finished: list = []
+    # invalid_state 模拟：平台因"题目已完成/attempt 已关闭"拒绝提交（非答案错误）。
+    invalid_state: set = {"CH-DONE", "CH-CLOSED"}
+    # True = 题目列表携带完成态字段（供 invalid_state 对账探测）。
+    extra_challenges: bool = False
 
     def log_message(self, *args):  # 静默
         pass
@@ -45,10 +49,19 @@ class _StubArena(BaseHTTPRequestHandler):
                 return self._json({"content": "flag{arena_stub_1}\n"})
             return self._json({"files": ["handouts/note.txt"]})
         if self.path.startswith("/openapi/v1/challenges") or self.path == "/openapi/v1/challenges":
-            return self._json({"challenges": [{
+            items = [{
                 "unique_code": "CH-1", "name": "stub base64", "category": "misc",
                 "description": "decode me", "files": ["handouts/note.txt"], "points": 100,
-            }]})
+            }]
+            if _StubArena.extra_challenges:
+                items = [{
+                    "unique_code": "CH-DONE", "name": "already solved", "category": "misc",
+                    "completed": True,
+                }, {
+                    "unique_code": "CH-CLOSED", "name": "attempt closed", "category": "misc",
+                    "completed": False,
+                }] + items
+            return self._json({"challenges": items})
         return self._json({"error": "not found"}, 404)
 
     def do_POST(self):
@@ -66,6 +79,10 @@ class _StubArena(BaseHTTPRequestHandler):
             return self._json({"started": True})
         if self.path.startswith("/openapi/v1/challenges/submit"):
             code = self.path.split("unique_code=")[-1].split("&")[0]
+            if code in _StubArena.invalid_state:
+                return self._json({"code": "invalid_state",
+                                   "message": "the attempt or challenge is not in a state "
+                                              "that allows this operation"}, 409)
             if code not in _StubArena.started:
                 return self._json({"error": "challenge_not_started"}, 409)
             _StubArena.submissions.append(payload)
@@ -83,6 +100,7 @@ def arena_url():
     _StubArena.started = set()
     _StubArena.submissions = []
     _StubArena.finished = []
+    _StubArena.extra_challenges = False
     server = HTTPServer(("127.0.0.1", 0), _StubArena)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -221,3 +239,28 @@ def test_ensure_environment_raises_on_environment_limit(arena_url):
     ad.read_tasks()
     with pytest.raises(ArenaProtocolError):
         ad.ensure_environment("CH-LIMIT")
+
+
+def test_submit_invalid_state_with_completed_challenge_is_accepted(arena_url):
+    # 409 invalid_state + 列表证实已完成 → 幂等接受，不伪造 REJECTED。
+    _StubArena.extra_challenges = True
+    ad = _adapter(arena_url, auto_start=False, env_policy="on_demand")
+    ad.startup()
+    sub = Submission(challenge_id="CH-DONE", answer="flag{arena_stub_1}",
+                     idempotency_key="k-done")
+    receipt = ad.submit_answer(sub)
+    assert receipt.status == "ACCEPTED"
+    assert "already completed" in receipt.detail
+    assert _StubArena.submissions == []  # 重发之外的对账不产生新提交
+
+
+def test_submit_invalid_state_without_completion_stays_unknown(arena_url):
+    # 409 invalid_state 但列表证实不了完成态 → UNKNOWN（诚实待对账），不是 REJECTED。
+    _StubArena.extra_challenges = True
+    ad = _adapter(arena_url, auto_start=False, env_policy="on_demand")
+    ad.startup()
+    sub = Submission(challenge_id="CH-CLOSED", answer="flag{arena_stub_1}",
+                     idempotency_key="k-closed")
+    receipt = ad.submit_answer(sub)
+    assert receipt.status == "UNKNOWN"
+    assert "invalid_state" in receipt.detail

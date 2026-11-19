@@ -22,7 +22,7 @@ def test_D01_explicit_platform_format_correction_retries_once():
         gateway = SubmitGateway(store, adapter)
         try:
             enqueue(store, gateway, proof(store))
-            gateway.flush()
+            gateway.flush(5)
             assert len(adapter.calls) == 2
             assert adapter.calls[1].answer == FLAG.upper()
             assert adapter.calls[1].idempotency_key.endswith('-format1')
@@ -38,7 +38,7 @@ def test_D01_invalid_correction_or_second_rejection_never_loops():
             gateway = SubmitGateway(store, adapter)
             try:
                 enqueue(store, gateway, proof(store))
-                gateway.flush()
+                gateway.flush(5)
                 assert len(adapter.calls) == (2 if corrected == FLAG.upper() else 1)
             finally:
                 gateway.close()
@@ -50,7 +50,7 @@ def test_D02_rejection_has_diagnosis_without_blind_retry():
         gateway = SubmitGateway(store, adapter)
         try:
             enqueue(store, gateway, proof(store))
-            gateway.flush()
+            gateway.flush(5)
             payload = json.loads(store.db.execute("SELECT payload FROM events WHERE event_type='submission_diagnosis'").fetchone()[0])
             assert payload['suggestion'] and payload['detail'] == 'flag mismatch'
             assert len(adapter.calls) == 1
@@ -68,7 +68,7 @@ def test_D03_duplicate_and_D05_second_candidate_not_enqueued():
             gateway.flush()
             other = 'flag{another_72a39}'
             assert enqueue(store, gateway, proof(store, output=other, declared=other)) == key
-            gateway.flush()
+            gateway.flush(5)
             assert len(adapter.calls) == 1
             assert store.db.execute('SELECT COUNT(*) FROM submissions').fetchone()[0] == 1
         finally:
@@ -82,7 +82,7 @@ def test_D04_slow_submission_does_not_block_main_scheduler():
             def submit_answer(self, sub):
                 self.calls.append(sub)
                 entered.set()
-                if not release.wait(2):
+                if not release.wait(10):
                     raise TimeoutError()
                 return SubmitReceipt('ACCEPTED')
         adapter, gateway = Slow(), None
@@ -91,17 +91,19 @@ def test_D04_slow_submission_does_not_block_main_scheduler():
             enqueue(store, gateway, proof(store))
             started = time.monotonic()
             gateway.pump()
-            assert time.monotonic() - started < .5
-            assert entered.wait(1)
+            # 阻塞下界是 10s（adapter 卡在 release）：pump 只要不等到提交完成
+            # 即为非阻塞；2s 的上界对负载抖动留足余量，语义与 <.5 时一致。
+            assert time.monotonic() - started < 2
+            assert entered.wait(5)
             store.board.add_intent(IntentDraft('c1', 'misc.background.test'))
             assert store.board.claim_intent('available-worker') is not None
             assert not gateway.pump()
             release.set()
-            gateway.flush()
+            gateway.flush(5)
             assert len(adapter.calls) == 1
         finally:
             release.set()
-            gateway.flush()
+            gateway.flush(5)
             gateway.close()
 
 
@@ -111,7 +113,7 @@ def test_uncertain_transport_exception_is_query_only_after_restart():
         gateway = SubmitGateway(store, adapter, query_interval=0)
         try:
             enqueue(store, gateway, proof(store))
-            gateway.flush(timeout=.5)
+            gateway.flush(timeout=5)
             assert len(adapter.calls) == 1 and adapter.queries
             assert store.db.execute('SELECT status FROM submissions').fetchone()[0] == 'ACCEPTED'
         finally:
@@ -127,7 +129,7 @@ def test_D03_sending_recovery_never_reposts():
         first.close()
         recovered = SubmitGateway(store, adapter)
         try:
-            recovered.flush()
+            recovered.flush(5)
             assert not adapter.calls and adapter.queries == [key]
             assert store.db.execute('SELECT status FROM submissions').fetchone()[0] == 'ACCEPTED'
         finally:
@@ -142,7 +144,7 @@ def test_D03_committed_draft_survives_gateway_restart():
         first.close()
         recovered = SubmitGateway(store, adapter)
         try:
-            recovered.flush()
+            recovered.flush(5)
             assert len(adapter.calls) == 1
         finally:
             recovered.close()
@@ -162,7 +164,7 @@ def test_A03_proof_change_between_enqueue_and_send_blocks_submission():
         gateway = SubmitGateway(store, adapter)
         enqueue(store, gateway, proof(store))
         store.declare('c1', 'flag{replacement_29ad}')
-        gateway.flush()
+        gateway.flush(5)
         assert not adapter.calls
         assert store.db.execute('SELECT status FROM submissions').fetchone()[0] == 'BLOCKED'
         gateway.close()

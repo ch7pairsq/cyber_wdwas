@@ -96,6 +96,21 @@ def main():
         sys.exit("DENY: ARENA_NETWORK_CIDR invalid")
     if ip not in net:
         sys.exit("DENY: target outside attempt network")
+    # 平台 API 对模型工具只读：submit 走网关（gate/幂等/对账治理），
+    # start/finish 属管理操作由 harness 适配器执行。防止模型绕过治理
+    # 重复提交或误触 finish 提前关闭整个 attempt。
+    base_url = os.environ.get("ARENA_BASE_URL", "")
+    if base_url:
+        try:
+            parsed = urllib.parse.urlsplit(base_url)
+            platform_ip = ipaddress.ip_address(parsed.hostname or "")
+            platform_port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        except ValueError:
+            platform_ip, platform_port = None, None
+        if platform_ip is not None and ip == platform_ip and args.port == platform_port \
+                and args.method not in ("GET", "HEAD", "OPTIONS"):
+            sys.exit("DENY: platform API is read-only for tools "
+                     "(submit via gateway; start/finish via harness adapter)")
     if len(args.body.encode()) > 64_000:
         sys.exit("DENY: body too large")
     max_bytes = int(os.environ.get("ARENA_HTTP_MAX_BYTES") or MAX_DEFAULT)

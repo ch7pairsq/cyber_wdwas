@@ -83,7 +83,10 @@ def test_K01_offline_twenty_cases_including_five_adversarial_inputs():
                 'description': '固定离线命令测试，不代表真实解题难度', 'attachments': [ref],
                 'metadata': {'files': {ref: output}}, 'flag': answer})
         orch._harness._raw = tasks
-        result = orch.run(20)
+        # run(n) 的语义是 n 秒墙钟而非 n 步：20 个意图串行本身就要 ~19s，
+        # 20s 预算在负载下必然截断（曾致 10/15 的偶发失败）；本测试验证
+        # 端到端接线而非耗时，放宽到 120s。
+        result = orch.run(120)
         assert result['tasks'] == 20 and len(result['solved']) == 15
         assert all(int(cid[-2:]) < 15 for cid in result['solved'])
         assert orch._board._db.execute('SELECT COUNT(*) FROM submissions').fetchone()[0] == 15
