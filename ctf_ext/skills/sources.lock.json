@@ -1,0 +1,17 @@
+{
+  "sources": [
+    {
+      "id": "ljagiello-ctf-skills",
+      "repo": "https://github.com/ljagiello/ctf-skills",
+      "commit": "20d182d9377f0467830f314bb0f843cae4dbf55e",
+      "license": "MIT",
+      "retrieved_at": "2026-11-19",
+      "used_paths": [
+        "ctf-crypto/SKILL.md",
+        "ctf-reverse/SKILL.md",
+        "ctf-forensics/SKILL.md"
+      ],
+      "usage": "只人工蒸馏方法、判据与换路规则；未复制脚本、命令或大段正文"
+    }
+  ]
+}

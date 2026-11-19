@@ -66,6 +66,7 @@ def test_valid_response_becomes_worker_result():
     assert result.candidate_answer == "flag{demo}"
     assert sha in result.evidence_ids
     assert result.resource_usage["model_tokens"] == 120
+    assert result.resource_usage["skills_indexed"] == []
     assert len(provider.calls) == 1
     assert provider.calls[0]["kwargs"]["json_mode"] is True
 

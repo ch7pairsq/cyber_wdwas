@@ -1,6 +1,7 @@
 """ocr_text / pdf_images 工具：注册、argv 构造与端到端（依赖镜像内 tesseract/PIL）。"""
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -14,6 +15,7 @@ from ctf_ext.gateway.tools import ToolRegistry
 TESSERACT = Path("/usr/bin/tesseract")
 SYSTEM_PY = Path("/usr/bin/python3")
 HAS_OCR_STACK = TESSERACT.exists() and SYSTEM_PY.exists()
+HAS_PDFIMAGES = shutil.which("pdfimages") is not None
 
 
 def _registry(work_root=None):
@@ -85,6 +87,7 @@ def _minimal_pdf_with_image(path: Path) -> None:
     path.write_bytes(out + xref + trailer)
 
 
+@pytest.mark.skipif(not HAS_PDFIMAGES, reason="镜像无 poppler/pdfimages")
 def test_pdf_images_list_and_extract_end_to_end(tmp_path):
     registry = _registry(str(tmp_path))
     _minimal_pdf_with_image(tmp_path / "doc.pdf")

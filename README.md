@@ -25,6 +25,14 @@ Docker 与参赛状态中的容器记录为此前结果，不包含本次尚未�
 - 交付方式改为镜像仓库与文件上传（`docker save`）双轨支持，详见 [参赛约束](docs/COMPETITION.md)。
 - 验证口径：本机零依赖运行器单元 **189/189**、集成与 chaos **21/21**（含本轮新增 22 项），CLI Mock 一轮 exit 0。本机未安装 pytest，`test_arena_harness`／`test_concurrency`／`test_framework_control` 三个模块本轮未执行；测试矩阵尚未登记本轮新增用例。
 
+## 2026-11-19 增量：竞赛建议评审与鲁棒性修复
+
+- [4 小时竞赛优化 1.1：依据、修订方案、实际落地与未完成项](docs/COMPETITION-ROBUSTNESS-1.1.md)。不把固定五路并行、12 次无 flag 或统一预算阈值当成普适最优方案；未开启新并行或真实模型调用。
+- 工具长输出按 UTF-8 字节生成预览，保留带偏移的有界关键观察卡；卡片始终是未验证候选。修复 summary 证据只归档前 12KB 导致缓存/回读丢尾部的问题，改为归档完整有界输出。
+- 全局 Token 账本支持重启即识别耗尽、多控制器事务累加及损坏账本失败关闭；单题请求受全局余额约束。仍无并发在途额度预留，不能承诺绝不超支。
+- 本轮新增 **17 项**，已运行无参数单元/集成/chaos **230 通过、0 失败**；缺 pytest 的 4 个模块及依赖 tmp_path 的 6 项未执行，PyYAML/requests 真实分支也未验收。未安装依赖、未复建镜像、未提交官方平台。
+- 子目标级伪进展判断、跨压缩关键事实索引、生产沙箱与全赛程验收仍待完成，不宣称此次修复已解决所有停滞或幻觉问题。
+
 ## 离线工具链（构建期打包）
 
 工具随镜像构建，比赛时只调用，不下载、不安装。清单固定在 `docker/toolchain.json`，`core` 覆盖文件/压缩/编码/二进制基础分析，`ctf` 增加 `binwalk`、`foremost`、`sleuthkit`、`exiftool`、`7zip`、`steghide`、`pngcheck`、`gdb`、`strace/ltrace`、`qemu-user`、`poppler`、QR 工具，以及 Reverse 用的 `pwntools`/`ROPgadget`/`cstool`/`checksec`/`patchelf`/`z3`；`sage`、`ghidra`、`nuclei` 等重型或主动扫描工具不进入默认镜像。构建阶段从 Debian 官方 apt 源安装并复制包内版权说明，运行阶段移除 pip/apt/uv/dpkg 入口；`check_competition.py` 与 `preflight.py --strict` 会校验工具二进制，缺失即失败。`ToolRegistry` 已接入 `--mode llm` 工具循环：模型只能调用注册表内的 18 个结构化只读/受控工具（侦察、压缩包、隐写、PDF、QR、反汇编、ROP），执行仍经过策略、预算、工作目录、command_log 与证据登记；默认沙箱要求为开启，缺少真实隔离时工具调用 fail-closed；网关暂不支持 Anthropic `tools` 时可用 `model.tools_enabled=false` 关闭工具定义传输。内置技能库现有 10 节，覆盖 crypto/reverse/pwn/forensics/misc 五个域并支持分类别名。来源、体积取舍和验证命令见 [离线工具链](docs/TOOLCHAIN.md)。

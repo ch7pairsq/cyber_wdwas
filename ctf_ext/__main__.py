@@ -226,12 +226,21 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
             skill_loader = SkillLoader()
         except (OSError, ValueError):
             skill_loader = None  # 技能索引损坏不能阻断解题
+        skills_cfg = cfg.get("skills") or {}
+        if not isinstance(skills_cfg, dict):
+            skills_cfg = {}  # 非法配置回退默认，不能阻断启动
+        try:
+            skills_index_max_bytes = int(skills_cfg.get("index_max_bytes") or 600)
+        except (TypeError, ValueError):
+            skills_index_max_bytes = 600
         worker = LlmWorker(provider, prompt_path=PROMPT_PATH,
                            state_store=state, control_factory=control_factory,
                            evidence_check=evidence.verify,
                            timeout=float((cfg.get("model") or {}).get("request_timeout_seconds") or 120),
                            max_tokens=int((cfg.get("model") or {}).get("max_tokens") or 4096),
                            skill_loader=skill_loader,
+                           skills_mode=str(skills_cfg.get("mode") or "preload"),
+                           skills_index_max_bytes=skills_index_max_bytes,
                            tool_registry=tool_registry,
                            tool_cwd=lambda cid: str(state.workspace(cid)),
                            max_tool_rounds=int((cfg.get("controller") or {}).get("max_tool_rounds") or 40),

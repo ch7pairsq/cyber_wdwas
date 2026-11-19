@@ -2,7 +2,7 @@
   {
     "name": "crypto.rsa.small_e",
     "domain": "crypto",
-    "prerequisites": ["python3"],
+    "prerequisites": ["python3", "evidence_digest"],
     "keywords": ["rsa", "public", "modulus", "cipher", "exponent"],
     "tokens_hint": 1200,
     "risk": "compute",
@@ -11,7 +11,7 @@
   {
     "name": "crypto.encoding",
     "domain": "crypto",
-    "prerequisites": ["python3", "openssl", "xxd"],
+    "prerequisites": ["python3", "hexdump", "strings"],
     "keywords": ["base64", "hex", "xor", "rot", "caesar", "decode", "encode", "cipher", "text"],
     "tokens_hint": 700,
     "risk": "read",
@@ -20,7 +20,7 @@
   {
     "name": "reverse.elf.static",
     "domain": "reverse",
-    "prerequisites": ["file", "checksec", "objdump", "readelf"],
+    "prerequisites": ["file_info", "checksec", "strings", "elf_headers", "symbols", "disassemble", "disasm_bytes"],
     "keywords": ["elf", "binary", "reverse", "static", "stripped", "disassemble", "objdump"],
     "tokens_hint": 900,
     "risk": "read",
@@ -29,7 +29,7 @@
   {
     "name": "reverse.shellcode",
     "domain": "reverse",
-    "prerequisites": ["cstool"],
+    "prerequisites": ["disasm_bytes", "python_exec", "hexdump"],
     "keywords": ["shellcode", "machine", "code", "syscall", "asm", "bytes", "disassemble"],
     "tokens_hint": 700,
     "risk": "read",
@@ -38,7 +38,7 @@
   {
     "name": "pwn.stack.recon",
     "domain": "pwn",
-    "prerequisites": ["checksec", "ROPgadget", "objdump"],
+    "prerequisites": ["checksec", "rop_gadgets", "strings", "disassemble"],
     "keywords": ["pwn", "stack", "rop", "gadget", "overflow", "binary", "canary", "libc"],
     "tokens_hint": 800,
     "risk": "read",
@@ -47,7 +47,7 @@
   {
     "name": "forensics.zip",
     "domain": "forensics",
-    "prerequisites": ["unzip"],
+    "prerequisites": ["archive_list", "archive_extract", "binwalk_scan", "python_exec", "strings"],
     "keywords": ["zip", "archive", "pseudo", "comment", "crc"],
     "tokens_hint": 800,
     "risk": "read",
@@ -56,7 +56,7 @@
   {
     "name": "forensics.archive_layers",
     "domain": "forensics",
-    "prerequisites": ["7z", "binwalk"],
+    "prerequisites": ["archive_list", "archive_extract", "binwalk_scan", "binwalk_extract", "file_info"],
     "keywords": ["archive", "nested", "7z", "zip", "layers", "password", "binwalk", "extract"],
     "tokens_hint": 800,
     "risk": "execute",
@@ -65,7 +65,7 @@
   {
     "name": "forensics.stego.image",
     "domain": "forensics",
-    "prerequisites": ["pngcheck", "exiftool", "steghide", "binwalk"],
+    "prerequisites": ["file_info", "png_check", "metadata", "binwalk_scan", "steghide_extract", "qr_decode"],
     "keywords": ["png", "jpg", "jpeg", "bmp", "steghide", "stego", "lsb", "exif", "metadata", "image", "hidden"],
     "tokens_hint": 800,
     "risk": "execute",
@@ -74,7 +74,7 @@
   {
     "name": "forensics.pdf",
     "domain": "forensics",
-    "prerequisites": ["pdftotext", "exiftool", "binwalk"],
+    "prerequisites": ["pdf_text", "metadata", "binwalk_scan", "pdf_images", "ocr_text", "qr_decode"],
     "keywords": ["pdf", "document", "embedded", "text", "attachment"],
     "tokens_hint": 600,
     "risk": "read",
@@ -83,10 +83,122 @@
   {
     "name": "misc.qr",
     "domain": "misc",
-    "prerequisites": ["zbarimg", "pngcheck"],
+    "prerequisites": ["qr_decode", "file_info", "png_check"],
     "keywords": ["qr", "qrcode", "barcode", "zbar", "scan", "image"],
     "tokens_hint": 600,
     "risk": "read",
     "file": "misc.qr.md"
+  },
+  {
+    "name": "crypto.dh.degenerate",
+    "domain": "crypto",
+    "trigger": "DH/X25519 参数；先查 g=0/1/p-1、u=0/1、共享值全零",
+    "keywords": ["dh", "diffie", "hellman", "x25519", "shared", "secret", "zero", "degenerate", "low", "order"],
+    "prerequisites": ["python_exec", "hexdump"],
+    "tokens_hint": 900,
+    "risk": "compute",
+    "file": "crypto.dh.degenerate.md",
+    "source": {
+      "type": "external",
+      "repo": "https://github.com/ljagiello/ctf-skills",
+      "path": "ctf-crypto/SKILL.md",
+      "commit": "20d182d9377f0467830f314bb0f843cae4dbf55e",
+      "license": "MIT",
+      "reviewed_at": "2026-11-19"
+    }
+  },
+  {
+    "name": "crypto.prng.mt19937",
+    "domain": "crypto",
+    "trigger": "32 位随机输出/token/时间种子；MT19937 状态恢复",
+    "keywords": ["mt19937", "mersenne", "twister", "random", "rand", "prng", "state", "seed", "predict", "624"],
+    "prerequisites": ["python_exec"],
+    "tokens_hint": 950,
+    "risk": "compute",
+    "file": "crypto.prng.mt19937.md",
+    "source": {
+      "type": "external",
+      "repo": "https://github.com/ljagiello/ctf-skills",
+      "path": "ctf-crypto/SKILL.md",
+      "commit": "20d182d9377f0467830f314bb0f843cae4dbf55e",
+      "license": "MIT",
+      "reviewed_at": "2026-11-19"
+    }
+  },
+  {
+    "name": "crypto.rsa.common_modulus",
+    "domain": "crypto",
+    "trigger": "同一 n、多组 e/c、同一明文；gcd(e1,e2)=1",
+    "keywords": ["rsa", "common", "modulus", "same", "gcd", "bezout", "broadcast"],
+    "prerequisites": ["python_exec"],
+    "tokens_hint": 800,
+    "risk": "compute",
+    "file": "crypto.rsa.common_modulus.md",
+    "pivot": ["crypto.rsa.small_e"],
+    "source": {
+      "type": "external",
+      "repo": "https://github.com/ljagiello/ctf-skills",
+      "path": "ctf-crypto/SKILL.md",
+      "commit": "20d182d9377f0467830f314bb0f843cae4dbf55e",
+      "license": "MIT",
+      "reviewed_at": "2026-11-19"
+    }
+  },
+  {
+    "name": "reverse.bytecode.python",
+    "domain": "reverse",
+    "trigger": ".pyc/marshal/PyInstaller/Python 字节码；看 magic 与 co_consts",
+    "keywords": ["python", "bytecode", "pyc", "marshal", "dis", "pyinstaller", "code", "consts"],
+    "prerequisites": ["file_info", "hexdump", "python_exec"],
+    "tokens_hint": 900,
+    "risk": "read",
+    "file": "reverse.bytecode.python.md",
+    "pivot": ["reverse.vm.custom"],
+    "source": {
+      "type": "external",
+      "repo": "https://github.com/ljagiello/ctf-skills",
+      "path": "ctf-reverse/SKILL.md",
+      "commit": "20d182d9377f0467830f314bb0f843cae4dbf55e",
+      "license": "MIT",
+      "reviewed_at": "2026-11-19"
+    }
+  },
+  {
+    "name": "forensics.pcap.triage",
+    "domain": "forensics",
+    "trigger": "pcap/pcapng；先看链路类型、包数、协议与可疑流",
+    "keywords": ["pcap", "pcapng", "packet", "capture", "network", "traffic", "tcp", "udp", "usb", "dns"],
+    "prerequisites": ["file_info", "strings", "hexdump", "python_exec"],
+    "tokens_hint": 1000,
+    "risk": "read",
+    "file": "forensics.pcap.triage.md",
+    "pivot": ["crypto.encoding", "forensics.archive_layers"],
+    "source": {
+      "type": "external",
+      "repo": "https://github.com/ljagiello/ctf-skills",
+      "path": "ctf-forensics/SKILL.md",
+      "commit": "20d182d9377f0467830f314bb0f843cae4dbf55e",
+      "license": "MIT",
+      "reviewed_at": "2026-11-19"
+    }
+  },
+  {
+    "name": "reverse.vm.custom",
+    "domain": "reverse",
+    "trigger": "opcode 数组/dispatch 循环/自定义指令集；写最小解释器",
+    "keywords": ["vm", "bytecode", "opcode", "dispatch", "interpreter", "custom", "stack", "register"],
+    "prerequisites": ["file_info", "strings", "disassemble", "disasm_bytes", "python_exec"],
+    "tokens_hint": 900,
+    "risk": "read",
+    "file": "reverse.vm.custom.md",
+    "pivot": ["reverse.bytecode.python", "reverse.elf.static"],
+    "source": {
+      "type": "external",
+      "repo": "https://github.com/ljagiello/ctf-skills",
+      "path": "ctf-reverse/SKILL.md",
+      "commit": "20d182d9377f0467830f314bb0f843cae4dbf55e",
+      "license": "MIT",
+      "reviewed_at": "2026-11-19"
+    }
   }
 ]

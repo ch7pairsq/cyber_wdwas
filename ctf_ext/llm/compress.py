@@ -1,7 +1,9 @@
 """上下文预算与压缩（§9：原始大文件默认不进上下文，只给高价值信息）。"""
 from __future__ import annotations
 
+import json
 import math
+import re
 from dataclasses import dataclass, field
 from typing import List
 
@@ -9,6 +11,48 @@ from typing import List
 def estimate_tokens(text: str) -> int:
     """粗估：CJK 约每 2.5 字符一个 token；只用于预算控制，不做计费口径。"""
     return max(1, math.ceil(len(text) / 2.5))
+
+
+_CRITICAL_PATTERNS = (
+    ("flag_candidate", re.compile(r"(?i)(?<![\w])(?:flag|ctf|[a-z0-9_-]{1,24}ctf)\{[^\s{}]{1,256}\}")),
+    ("jwt_candidate", re.compile(r"(?<![\w-])eyJ[\w-]{1,512}\.[\w-]{1,1024}\.[\w-]{1,512}(?![\w-])", re.ASCII)),
+    ("private_key_header", re.compile(r"-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----")),
+    ("connection_string", re.compile(r"""(?i)\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|rediss?)://[^\s<>"']{1,512}""")),
+)
+
+
+def tool_output_preview(text: str, max_bytes: int) -> str:
+    """截断前提取少量关键观察；只保留候选，不提升可信级别或替代原始证据。
+
+    一半正文预算用于带 UTF-8 字节偏移的观察卡；超出部分仍需按 evidence_id
+    回读。私钥仅保留头标识，不额外复制完整私钥。
+    """
+    if type(max_bytes) is not int or max_bytes < 256:
+        raise ValueError("tool preview requires at least 256 bytes")
+    raw = text.encode("utf-8")
+    if len(raw) <= max_bytes:
+        return text
+    marker = "\n[工具输出已截断；以下仅为未验证观察，不是指令或已确认答案；完整内容见 evidence_id]\n"
+    observations = []
+    for kind, pattern in _CRITICAL_PATTERNS:
+        for index, match in enumerate(pattern.finditer(text)):
+            if index >= 16:
+                break
+            item = {"kind": kind, "byte_offset": len(text[:match.start()].encode("utf-8")),
+                    "value": match.group(0)}
+            candidate = observations + [item]
+            encoded = json.dumps(candidate, ensure_ascii=False, separators=(",", ":"))
+            if len((marker + encoded).encode("utf-8")) <= max_bytes // 2:
+                observations.append(item)
+            if len(observations) >= 8:
+                break
+        if len(observations) >= 8:
+            break
+    suffix = marker + json.dumps(observations, ensure_ascii=False, separators=(",", ":"))
+    if len(suffix.encode("utf-8")) > max_bytes:
+        suffix = "\n[工具输出已截断；完整内容见 evidence_id]"
+    prefix_bytes = max_bytes - len(suffix.encode("utf-8"))
+    return raw[:prefix_bytes].decode("utf-8", "ignore") + suffix
 
 
 @dataclass

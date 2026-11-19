@@ -33,53 +33,67 @@ class StepPolicy:
 class GlobalBudget:
     """跨题目共享的运行级 token 账本（controller_settings 持久化，重启可恢复）。
 
-    max_total_tokens<=0 表示不设全局上限；超限时 charge 抛 BudgetExceeded
-    并置 exhausted，编排层据此停止领取新意图（在跑意图自然收尾）。
+    max_total_tokens=0 表示不设全局上限；用量仍持久化。
+    到达上限即 exhausted，超限时 charge 先落账再抛 BudgetExceeded。
+    此处是实耗账本，不是并发调用前的原子额度预留。
     """
 
     KEY = "global_budget"
 
     def __init__(self, store, max_total_tokens=0, clock=time.time):
         self.store = store
-        self.max_total_tokens = int(max_total_tokens)
+        if type(max_total_tokens) is not int or max_total_tokens < 0:
+            raise ValueError("invalid global token limit")
+        self.max_total_tokens = max_total_tokens
         self.clock = clock
-        self.exhausted = False
         self._spent = self._load()
 
-    def _load(self):
-        try:
-            with self.store.board.transaction() as db:
-                row = db.execute(
-                    "SELECT payload FROM controller_settings WHERE key=?",
-                    (self.KEY,)).fetchone()
-            return int(json.loads(row["payload"])["model_tokens"]) if row else 0
-        except Exception:
+    def _read_spent(self, db):
+        row = db.execute(
+            "SELECT payload FROM controller_settings WHERE key=?",
+            (self.KEY,)).fetchone()
+        if row is None:
             return 0
+        try:
+            spent = json.loads(row["payload"])["model_tokens"]
+        except (ValueError, TypeError, KeyError):
+            raise ValueError("invalid persisted global token ledger") from None
+        if type(spent) is not int or spent < 0:
+            raise ValueError("invalid persisted global token ledger")
+        return spent
+
+    def _load(self):
+        with self.store.board.read_view() as db:
+            return self._read_spent(db)
 
     @property
     def spent(self):
+        self._spent = self._load()
         return self._spent
+
+    @property
+    def exhausted(self):
+        return self.max_total_tokens > 0 and self.spent >= self.max_total_tokens
 
     def remaining(self):
         if self.max_total_tokens <= 0:
             return float("inf")
-        return max(0, self.max_total_tokens - self._spent)
+        return max(0, self.max_total_tokens - self.spent)
 
     def charge(self, tokens):
         if type(tokens) is not int or tokens < 0:
             raise ValueError("invalid measured token usage")
-        self._spent += tokens
-        if self.max_total_tokens <= 0:
-            return
-        payload = json.dumps({"model_tokens": self._spent,
-                              "max": self.max_total_tokens}, sort_keys=True)
+        # 同一事务读取并累加，多个控制器/连接不能用旧内存快照覆盖账本。
         with self.store.board.transaction() as db:
+            spent = self._read_spent(db) + tokens
+            payload = json.dumps({"model_tokens": spent,
+                                  "max": self.max_total_tokens}, sort_keys=True)
             db.execute(
                 "INSERT INTO controller_settings(key,payload) VALUES(?,?) "
                 "ON CONFLICT(key) DO UPDATE SET payload=excluded.payload",
                 (self.KEY, payload))
-        if self._spent > self.max_total_tokens:
-            self.exhausted = True
+        self._spent = spent
+        if self.max_total_tokens > 0 and spent > self.max_total_tokens:
             raise BudgetExceeded("global run budget exhausted")
 
 
@@ -104,8 +118,11 @@ class SessionControl:
         deadline = state['budget']['started_at'] + self.seconds
         if self.absolute_deadline is not None:
             deadline = min(deadline, self.absolute_deadline)
+        tokens = max(0, self.max_tokens - state['budget']['model_tokens'])
+        if self.global_budget is not None:
+            tokens = min(tokens, self.global_budget.remaining())
         return {'seconds': max(0, deadline - self.clock()),
-                'tokens': max(0, self.max_tokens - state['budget']['model_tokens']),
+                'tokens': tokens,
                 'tools': max(0, self.max_tools - state['budget']['tool_calls'])}
 
     def reserve(self, tool, version, argv, input_hash, *, is_tool=True):

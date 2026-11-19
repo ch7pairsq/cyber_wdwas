@@ -1,0 +1,10 @@
+{"id":"crypto_dh","domain":"crypto","query":"diffie hellman shared secret zero","expect":["crypto.dh.degenerate"],"forbid":["crypto.rsa.small_e"]}
+{"id":"crypto_mt19937","domain":"crypto","query":"mt19937 random state 624 outputs","expect":["crypto.prng.mt19937"],"forbid":["crypto.rsa.small_e"]}
+{"id":"crypto_common_modulus","domain":"crypto","query":"rsa same modulus common modulus gcd","expect":["crypto.rsa.common_modulus"],"forbid":["crypto.dh.degenerate"]}
+{"id":"crypto_small_e","domain":"crypto","query":"rsa small exponent cube root","expect":["crypto.rsa.small_e"]}
+{"id":"reverse_python_bytecode","domain":"reverse","query":"python bytecode pyc marshal dis","expect":["reverse.bytecode.python"],"forbid":["reverse.elf.static"]}
+{"id":"reverse_custom_vm","domain":"reverse","query":"custom vm opcode dispatch bytecode","expect":["reverse.vm.custom"]}
+{"id":"reverse_elf","domain":"reversing","query":"elf stripped static","expect":["reverse.elf.static"]}
+{"id":"forensics_pcap","domain":"forensics","query":"pcap packet capture network traffic","expect":["forensics.pcap.triage"],"forbid":["crypto.rsa.small_e"]}
+{"id":"forensics_stego","domain":"stego","query":"png steghide lsb","expect":["forensics.stego.image"]}
+{"id":"misc_qr","domain":"misc","query":"qr barcode scan image","expect":["misc.qr"]}

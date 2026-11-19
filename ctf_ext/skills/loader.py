@@ -13,6 +13,14 @@ from typing import Dict, List, Optional, Tuple
 
 _SKILLS_DIR = Path(__file__).resolve().parent
 
+# 目录只放“方法名/触发词”，不放命令；这些关键词仍保留在索引里供 select 使用，
+# 只是生成目录时过滤掉，避免把工具名误当成可执行动作。
+_INDEX_TRIGGER_DENY = {
+    "7z", "binwalk", "steghide", "zbar", "zbarimg", "unzip", "openssl",
+    "gmpy2", "angr", "ghidra", "sage", "exiftool", "pngcheck", "pdftotext",
+    "cstool", "objdump", "readelf", "nm", "ropgadget", "checksec",
+}
+
 # 平台/题面常见分类名到技能域的归一；只做映射，不改变选择算法。
 _DOMAIN_ALIASES = {
     "reversing": "reverse",
@@ -53,8 +61,61 @@ class SkillLoader:
 
     def list_index(self) -> List[Dict[str, object]]:
         """索引给规划器看：名称/领域/前置/预估大小/风险，不含正文。"""
-        return [dict(name=s["name"], domain=s["domain"], prerequisites=s["prerequisites"],
-                     tokens_hint=s["tokens_hint"], risk=s["risk"]) for s in self._index]
+        return [dict(name=s["name"], domain=s["domain"],
+                     prerequisites=s.get("prerequisites") or [],
+                     tokens_hint=s.get("tokens_hint") or 0,
+                     risk=s.get("risk") or "unknown",
+                     deprecated=bool(s.get("deprecated"))) for s in self._index]
+
+    def index_text(self, max_bytes: int = 600) -> str:
+        """生成给 Worker 看的紧凑目录；只读索引元数据，不读 section 正文。
+
+        目录只回答“有哪些方法、何时值得打开”，不包含命令和判据。
+        超长时按字节预算截断，始终 fail-open：返回空串而不是抛错。
+        """
+        try:
+            limit = max(0, int(max_bytes))
+        except (TypeError, ValueError):
+            limit = 600
+        if not limit:
+            return ""
+        grouped: Dict[str, List[str]] = {}
+        for meta in self._index:
+            if meta.get("deprecated") or str(meta.get("risk") or "") == "deprecated":
+                continue
+            name = str(meta.get("name") or "")
+            domain = str(meta.get("domain") or "")
+            if not name or not domain:
+                continue
+            short = name.split(".", 1)[1] if "." in name else name
+            trigger = meta.get("trigger")
+            if not isinstance(trigger, str) or not trigger.strip():
+                keywords = meta.get("keywords") or []
+                if not isinstance(keywords, (list, tuple)):
+                    keywords = []
+                words = [str(k).strip() for k in keywords if str(k).strip()]
+                words = [w for w in words if w.casefold() not in _INDEX_TRIGGER_DENY]
+                trigger = "/".join(words[:3])
+            trigger = " ".join(str(trigger).split())[:24]
+            entry = short + ("(" + trigger + ")" if trigger else "")
+            grouped.setdefault(domain, []).append(entry)
+        lines = ["{}: {}".format(domain, " | ".join(entries)) for domain, entries in grouped.items()]
+        out: List[str] = []
+        used = 0
+        for line in lines:
+            size = len(line.encode("utf-8")) + (1 if out else 0)
+            if used + size <= limit:
+                out.append(line)
+                used += size
+                continue
+            # 只在一个域名放不下时保留截断标记，避免输出超过预算。
+            if not out and limit >= 6:
+                cut = line.encode("utf-8")[:limit - 3].decode("utf-8", "ignore")
+                out.append(cut + "...")
+            elif out and used + 4 <= limit:
+                out.append("...")
+            break
+        return "\n".join(out)
 
     def find(self, name: str) -> Dict[str, object]:
         for s in self._index:
