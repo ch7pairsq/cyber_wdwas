@@ -79,6 +79,10 @@ def main() -> int:
         detail = proc.stderr.decode("utf-8", errors="replace").strip()
         print("git_history: git exited {}: {}".format(proc.returncode, detail[:500]))
         return 1
+    # fsck 等命令把报告写 stderr（rc=0 也是有效结果）：成功时同样回传，不丢证据。
+    if proc.stderr:
+        sys.stdout.buffer.write(b"# stderr\n")
+        sys.stdout.buffer.write(proc.stderr)
     return 0
 
 
