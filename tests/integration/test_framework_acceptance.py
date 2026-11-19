@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from ctf_ext.__main__ import build_runtime
 from ctf_ext.config import HotConfig, validate_config
+from ctf_ext.domain.models import Challenge
 from ctf_ext.store.blackboard import IntentDraft, WorkerResult
 from ctf_ext.harness.gateway import SubmitGateway
 from ctf_ext.harness.schema import SubmitReceipt
@@ -139,6 +140,55 @@ def test_final_drain_recovers_inflight_submission_at_deadline():
         status = orch._board._db.execute('SELECT status FROM submissions').fetchone()[0]
         assert status == 'ACCEPTED'
         assert result['solved'] == ['ch-mock-1']  # 收尾宽限计入 solved
+        orch._board.close()
+
+
+def test_resource_housekeeping_reclaims_finished_workspaces():
+    # 4h × 27 题连续运行，平台临时盘只有 10GiB：终态题的工作区
+    # （handouts + 工具产物）必须及时回收，且不能碰在跑题。
+    with tempfile.TemporaryDirectory() as root:
+        orch = build_runtime(root + '/run.db', root + '/evidence')
+        # workspace_path 只读推导：不创建目录
+        ghost = orch._state.workspace_path('ghost-cid')
+        assert not ghost.exists()
+        # c1：REJECTED 终态、无在途意图 → 可回收
+        # c2：ACCEPTED 但意图仍 RUNNING → 保留
+        # c3：SENDING 在途提交 → 保留（重派发要校验工作区证据）
+        orch._board.add_challenge(Challenge(id='c1', name='c1', category='misc'))
+        orch._board.add_challenge(Challenge(id='c2', name='c2', category='misc'))
+        orch._board.add_challenge(Challenge(id='c3', name='c3', category='misc'))
+        orch._board.add_intent(IntentDraft('c2', 'misc.housekeeping.running'))
+        orch._board.add_intent(IntentDraft('c3', 'misc.housekeeping.sending'))
+        orch._board.claim_intent('w', lease_seconds=60)  # c2 → RUNNING
+        orch._board.claim_intent('w2', lease_seconds=60)  # c3 → RUNNING
+        orch._board._db.executemany(
+            'INSERT INTO submissions(idempotency_key,challenge_id,answer,status,evidence_ids,updated_at)'
+            ' VALUES(?,?,?,?,?,0)',
+            [('k1', 'c1', 'flag{x1}', 'REJECTED', 'e1'),
+             ('k2', 'c2', 'flag{x2}', 'ACCEPTED', 'e2'),
+             ('k3', 'c3', 'flag{x3}', 'SENDING', 'e3')])
+        orch._board._db.commit()
+        for cid in ('c1', 'c2', 'c3'):
+            blob = orch._state.workspace(cid) / 'handouts'
+            blob.mkdir()
+            (blob / 'big.bin').write_bytes(b'x' * 4096)
+        orch._cleanup_finished_workspaces()
+        assert not orch._state.workspace_path('c1').exists()  # 终态 → 回收
+        assert orch._state.workspace_path('c2').exists()  # 意图在跑 → 保留
+        assert orch._state.workspace_path('c3').exists()  # 在途提交 → 保留
+        assert orch._board._db.execute(
+            "SELECT COUNT(*) FROM events WHERE event_type='workspace_reclaimed'").fetchone()[0] == 1
+        # c2 意图终结后，下一轮回收
+        orch._board._db.execute("UPDATE intents_ext SET status='COMPLETED' WHERE challenge_id='c2'")
+        orch._board._db.commit()
+        orch._cleanup_finished_workspaces()
+        assert not orch._state.workspace_path('c2').exists()
+        assert orch._state.workspace_path('c3').exists()  # SENDING 仍保留
+        # 水位守护：强制执行一遍不抛错，事件通道可用
+        orch._housekeeping(force=True)
+        assert orch._board._db.execute(
+            "SELECT COUNT(*) FROM events WHERE event_type IN ('disk_pressure','resource_snapshot',"
+            "'workspace_reclaimed')").fetchone()[0] >= 1
         orch._board.close()
 
 

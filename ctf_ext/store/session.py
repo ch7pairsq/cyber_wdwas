@@ -62,10 +62,14 @@ class StateStore:
                 raise ValueError("routing policy frozen for this run database")
             db.execute("INSERT OR IGNORE INTO controller_settings VALUES('routing',?)", (payload,))
 
-    def workspace(self, challenge_id):
+    def workspace_path(self, challenge_id):
+        """只读路径推导（不创建目录、不做符号链接检查）：资源回收等场景用。"""
         if not isinstance(challenge_id, str) or not challenge_id:
             raise ValueError("invalid challenge identity")
-        path = self.root / hashlib.sha256(challenge_id.encode()).hexdigest()
+        return self.root / hashlib.sha256(challenge_id.encode()).hexdigest()
+
+    def workspace(self, challenge_id):
+        path = self.workspace_path(challenge_id)
         if path.is_symlink():
             raise ValueError("workspace symlink forbidden")
         path.mkdir(exist_ok=True, mode=0o700)

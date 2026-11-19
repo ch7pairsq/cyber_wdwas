@@ -10,6 +10,8 @@
 """
 from __future__ import annotations
 
+import shutil
+import sys
 import threading
 import time
 from typing import Dict, List, Optional
@@ -31,6 +33,10 @@ class Orchestrator:
     # 只给 1s 会把在途回执关在门外——该题永远停在 SENDING，分数丢失且
     # 正式赛一次性窗口无重赛机会。排空即返回，happy path 无额外墙钟。
     final_drain_seconds = 30.0
+    # 资源守护节拍（秒）：终态工作区回收 + 磁盘水位检查的低频闸。
+    housekeeping_interval_seconds = 60.0
+    # 临时盘剩余低于该值记 disk_pressure 事件并强制回收一轮（平台 10GiB）。
+    disk_pressure_free_bytes = 1.5 * 1024 * 1024 * 1024
 
     def __init__(self, harness, board, scheduler, worker,
                  evidence=None, metrics: Optional[Metrics] = None,
@@ -83,6 +89,9 @@ class Orchestrator:
         factory = getattr(worker, "_control_factory", None)
         if callable(factory):
             factory.endgame = self._endgame
+        # 资源守护时间闸（主监控线程独占访问，无需加锁）。
+        self._last_housekeeping = 0.0
+        self._last_snapshot = 0.0
 
     # ------------------------------------------------------------ hot config
     def apply_config(self, cfg: Dict) -> None:
@@ -502,6 +511,87 @@ class Orchestrator:
             self._board.append_event("gateway_flush_failed", "", {"error": type(exc).__name__})
         self._gateway.close()
 
+    # -------------------------------------------------------------- resources
+    def _housekeeping(self, force: bool = False) -> None:
+        """低频资源守护：终态工作区回收 + 磁盘水位 + 内存快照。
+
+        平台给一次答题的资源是 4 核/6GiB/10GiB 临时盘（官方建议大文件放
+        /tmp）；4h × 27 题连续运行时，完成题的 handouts 与工具产物不及时
+        回收会侵蚀磁盘，拖慢后续题目的附件物化。只在主监控线程运行，
+        时间闸保证对主循环的开销可忽略。
+        """
+        now = time.monotonic()
+        if not force and now - self._last_housekeeping < self.housekeeping_interval_seconds:
+            return
+        self._last_housekeeping = now
+        self._cleanup_finished_workspaces()
+        free = None
+        try:
+            if self._state is not None:
+                free = shutil.disk_usage(str(self._state.root)).free
+        except Exception:
+            free = None
+        if free is not None and free < self.disk_pressure_free_bytes:
+            # 水位告急：再强制清一轮（_cleanup_finished_workspaces 幂等）。
+            self._board.append_event("disk_pressure", "", {"free_mb": int(free / 1e6)})
+            self._cleanup_finished_workspaces()
+        if now - self._last_snapshot >= 10 * self.housekeeping_interval_seconds:
+            self._last_snapshot = now
+            snapshot = {"disk_free_mb": None, "rss_mb": None}
+            if free is not None:
+                snapshot["disk_free_mb"] = int(free / 1e6)
+            try:
+                import resource as _resource
+                raw = _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss
+                # linux 单位 KB，darwin 单位字节；仅作内存泄漏观察指标。
+                snapshot["rss_mb"] = int(raw / 1024 if sys.platform != "darwin" else raw / (1024 * 1024))
+            except Exception:
+                pass
+            self._board.append_event("resource_snapshot", "", snapshot)
+
+    def _cleanup_finished_workspaces(self) -> None:
+        """删除已终结题目的工作区（handouts + 工具产物），幂等。
+
+        三条件同时成立才回收：有提交记录、无 DRAFT/SENDING 在途提交
+        （重派发需校验工作区内的声明与证据）、无 READY/RUNNING/
+        FAILED_RETRYABLE 意图（后续尝试还可能用到）。工作区路径是
+        workspace_root 下的 sha256 名目录，不存在路径穿越。
+        """
+        if self._state is None:
+            return
+        try:
+            rows = self._board._db.execute(
+                "SELECT DISTINCT challenge_id FROM submissions WHERE challenge_id NOT IN"
+                " (SELECT challenge_id FROM submissions WHERE status IN ('DRAFT','SENDING'))"
+            ).fetchall()
+            live = {r[0] for r in self._board._db.execute(
+                "SELECT DISTINCT challenge_id FROM intents_ext"
+                " WHERE status IN ('READY','RUNNING','FAILED_RETRYABLE')").fetchall()}
+        except Exception as exc:
+            self._board.append_event("cleanup_error", "", {"error": type(exc).__name__})
+            return
+        freed_mb = 0.0
+        for (cid,) in rows:
+            if not isinstance(cid, str) or not cid or cid in live:
+                continue
+            path = self._state.workspace_path(cid)
+            if path.is_symlink() or not path.is_dir():
+                continue
+            try:
+                total = sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
+                shutil.rmtree(path, ignore_errors=True)
+            except Exception as exc:
+                self._board.append_event("cleanup_error", cid, {"error": type(exc).__name__})
+                continue
+            if path.exists():
+                continue  # 删除失败（占用等）：不强抢，下轮重试
+            freed_mb += total / 1e6
+            self._metrics.incr("resources.workspaces_reclaimed")
+            self._board.append_event("workspace_reclaimed", cid,
+                                     {"freed_mb": round(total / 1e6, 1)})
+        if freed_mb:
+            self._metrics.observe("resources.workspace_freed_mb", freed_mb)
+
     # ---------------------------------------------------------------- run loop
     def run(self, max_seconds: float = 120.0) -> Dict:
         deadline = self._clock() + max_seconds
@@ -528,6 +618,7 @@ class Orchestrator:
             self._run_serial(deadline, tasks, results, solved, global_budget)
         if self._gateway is not None:
             self._drain_gateway()
+        self._housekeeping(force=True)  # 运行收尾：回收全部终态工作区
         solved = self._solved()
         for result in results:
             if result["submission"]:
@@ -562,6 +653,7 @@ class Orchestrator:
             self._touch_heartbeat()
             try:
                 self.reload_config_if_changed()
+                self._housekeeping()
                 recover_expired_leases(self._board)
                 out = self.step()
             except KeyboardInterrupt:
@@ -618,6 +710,7 @@ class Orchestrator:
                         # 热配置与租约看门狗只在监控线程执行，避免多线程竞争。
                         self.reload_config_if_changed()
                         recover_expired_leases(self._board)
+                        self._housekeeping()
                         self._grant_endgame(tasks, solved, deadline)
                     except Exception as exc:
                         self._board.append_event("monitor_error", "", {"error": type(exc).__name__,
