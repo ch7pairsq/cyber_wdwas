@@ -272,8 +272,73 @@ _PYTHON_EXEC_SCHEMA = {
 }
 
 
+_OCR_LANGS = ("eng", "chi_sim", "eng+chi_sim")
+_OCR_PSM = (3, 6, 11, 12, 13)  # 3=自动 6=统一块 11/12=稀疏 13=原始行
+
+
+def _ocr_text_argv(arguments, work_root):
+    """tesseract 固定 argv：识别结果打到 stdout，不在工作区落文件。"""
+    path = _resolve_path(arguments, work_root)
+    lang = _bounded_str(arguments, "lang", "eng+chi_sim", 32, pattern=r"[a-z_+]+")
+    psm = _positive_int(arguments, "psm", 3, 3, 13)
+    if lang not in _OCR_LANGS:
+        raise ValueError("invalid lang")
+    if psm not in _OCR_PSM:
+        raise ValueError("invalid psm")
+    return ["tesseract", path, "stdout", "-l", lang, "--psm", str(psm)]
+
+
+_OCR_TEXT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "path": {"type": "string", "minLength": 1,
+                 "description": "题目工作区内的图片路径（png/jpg/bmp 等）"},
+        "lang": {"type": "string", "enum": list(_OCR_LANGS),
+                 "description": "识别语言：eng / chi_sim / eng+chi_sim", "default": "eng+chi_sim"},
+        "psm": {"type": "integer", "enum": list(_OCR_PSM),
+                "description": "版面模式：3 自动 / 6 统一块 / 11 12 稀疏 / 13 原始行", "default": 3},
+    },
+    "required": ["path"],
+    "additionalProperties": False,
+}
+
+
+def _pdf_images_argv(arguments, work_root):
+    """pdf_images.py 固定 argv：list 看清单，extract 抽 PNG 到工作区。"""
+    path = _resolve_path(arguments, work_root)
+    mode = str(arguments.get("mode") or "list")
+    if mode not in ("list", "extract"):
+        raise ValueError("invalid mode")
+    prefix = _bounded_str(arguments, "prefix", "pdfimg", 64,
+                          pattern=r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}")
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pdf_images.py")
+    return ["python3", script, "--mode", mode, "--prefix", prefix, path]
+
+
+_PDF_IMAGES_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "path": {"type": "string", "minLength": 1,
+                 "description": "题目工作区内的 PDF 路径"},
+        "mode": {"type": "string", "enum": ["list", "extract"],
+                 "description": "list=内嵌图片清单；extract=抽成 <prefix>-<页>-<序>.png", "default": "list"},
+        "prefix": {"type": "string", "pattern": r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}",
+                   "description": "抽取输出文件名前缀", "default": "pdfimg"},
+    },
+    "required": ["path"],
+    "additionalProperties": False,
+}
+
+
 def default_specs() -> List[ToolSpec]:
     return [
+        _spec("ocr_text", "识别图片中的文字（tesseract，中英文）。截图、扫描件、题面图片先用它取文本。",
+              "tesseract", _ocr_text_argv, _OCR_TEXT_SCHEMA,
+              risk_level="read", timeout=60.0, max_output_bytes=100_000),
+        _spec("pdf_images", "列出或抽取 PDF 内嵌图片（extract 抽成工作区 PNG，会写文件）。扫描版 PDF 先 list 再 extract，对抽出的 PNG 用 ocr_text / qr_decode。",
+              "python3", _pdf_images_argv, _PDF_IMAGES_SCHEMA,
+              risk_level="execute", idempotent=False, timeout=120.0,
+              max_output_bytes=100_000),
         _spec("python_exec", "在工作区内执行一段 Python 解题代码（crypto 运算、编码链、自定义解析、隐写像素处理等），代码经 stdin 提交；print 输出与 traceback 都会回传。",
               "python3", _python_exec_argv, _PYTHON_EXEC_SCHEMA,
               risk_level="execute", idempotent=False, timeout=120.0,

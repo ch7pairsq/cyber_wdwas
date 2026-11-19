@@ -6,7 +6,7 @@ from ctf_ext.gateway.catalog import default_specs, register_default_tools
 from ctf_ext.gateway.policy import PolicyConfig, PolicyEngine
 from ctf_ext.gateway.tools import ToolRegistry
 
-EXECUTE_TOOLS = {"archive_extract", "binwalk_extract", "steghide_extract", "python_exec"}
+EXECUTE_TOOLS = {"archive_extract", "binwalk_extract", "steghide_extract", "python_exec", "pdf_images"}
 
 
 def _registry():

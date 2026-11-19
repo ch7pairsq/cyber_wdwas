@@ -78,6 +78,7 @@ policy:
   - pdftotext
   - pdfinfo
   - qrencode
+  - tesseract
   - zbarimg
   authorized_arena_targets:
   - 10.201.0.0/16
