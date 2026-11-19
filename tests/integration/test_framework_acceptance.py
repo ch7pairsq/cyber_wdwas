@@ -166,4 +166,11 @@ def test_invalid_hot_config_and_missing_quota_fail_closed():
 def test_I02_J01_parallel_is_explicitly_disabled_until_acceptance():
     cfg = config()
     cfg['controller'] = {'parallel_agents': 3}
+    # 无显式验收标志：仍拒绝（闸门保持默认关闭）。
+    assert validate_config(cfg)
+    # 2026-11-19 用户验收通过：parallel_acceptance=true 显式放行，三题并行、题内 intent 串行。
+    cfg['controller']['parallel_acceptance'] = True
+    assert not validate_config(cfg)
+    # 验收标志不豁免非法值。
+    cfg['controller']['parallel_agents'] = 0
     assert validate_config(cfg)

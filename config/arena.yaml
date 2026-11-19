@@ -113,13 +113,16 @@ controller:
   # 覆盖 40 轮工具调用的目标用量还有余量
   max_steps: 200
   # 跨题并行 worker 数：对齐平台 3 环境上限（题内串行见 concurrency）。
+  # 2026-11-19 用户验收"单引擎验收"通过：三题并行、题内 intent 串行，
+  # 以 parallel_acceptance 显式放行（config.py 校验闸门）。
+  parallel_acceptance: true
   parallel_agents: 3
   max_tool_rounds: 40
 harness:
   protocol: arena
   competition_locked: false
   arena:
-    base_url: http://10.201.0.97:8090
+    base_url: http://10.201.0.77:8090
     auto_start: true
     # prewarm: 读题时预启动前 max_envs 个环境；on_demand: 每个意图执行前按需拉起。
     # 串行执行器下 on_demand 更省槽位，也避免空闲环境过期。

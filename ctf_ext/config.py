@@ -205,8 +205,12 @@ def _validate_config(cfg):
     controller = cfg.get("controller") or {}
     from .runtime.control import StepPolicy
     StepPolicy(tuple(controller.get("thresholds", (30, 50, 70, 100))))
-    if controller.get("parallel_agents", 1) != 1:
-        errors.append("parallel agents remain disabled until single-engine acceptance")
+    pa = controller.get("parallel_agents", 1)
+    if pa != 1 and not controller.get("parallel_acceptance", False):
+        errors.append("parallel agents require controller.parallel_acceptance=true "
+                      "(single-engine acceptance; granted by user 2026-11-19)")
+    if not isinstance(pa, int) or pa < 1:
+        errors.append("controller.parallel_agents must be a positive integer")
     if controller.get("max_steps", 100) < 1:
         errors.append("controller.max_steps must be positive")
     return errors
