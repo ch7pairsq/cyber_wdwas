@@ -129,10 +129,11 @@ class ToolRegistry:
             if spec.stdin_max_bytes and len(value.encode("utf-8")) > spec.stdin_max_bytes:
                 return ToolResult(status="denied", error_code="INVALID_ARGUMENTS")
             stdin_data = value.encode("utf-8")
-        return self.execute(name, argv, cwd=cwd, control=control, stdin_data=stdin_data)
+        return self.execute(name, argv, cwd=cwd, control=control, stdin_data=stdin_data,
+                            args_json=json.dumps(arguments or {}, sort_keys=True, ensure_ascii=False))
 
     def execute(self, name: str, argv: Sequence[str], cwd: Optional[str] = None, *,
-                control=None, stdin_data: bytes = b"") -> ToolResult:
+                control=None, stdin_data: bytes = b"", args_json: str = "") -> ToolResult:
         name_decision = self._policy.decide_tool_name(name)
         if name_decision.action != "allow":
             return ToolResult(status="denied", error_code=name_decision.reason_code)
@@ -155,8 +156,11 @@ class ToolRegistry:
         try:
             if cwd is None and self._state is not None and control is not None:
                 cwd = str(self._state.workspace(control.challenge_id))
+            # input_hash 必须覆盖真实参数（如 python_exec 的代码），否则同一工具的
+            # 所有调用共享签名与缓存：重复调用被误判为 loop，且新代码会拿到旧缓存。
             input_hash = hashlib.sha256(json.dumps(
-                {"argv": list(argv), "cwd": str(cwd or "")}, sort_keys=True).encode()).hexdigest()
+                {"argv": list(argv), "cwd": str(cwd or ""), "input": args_json},
+                sort_keys=True, ensure_ascii=False).encode()).hexdigest()
             cache_key = None
             if self._state is not None and control is not None:
                 cache_key = self._state.cache_key(

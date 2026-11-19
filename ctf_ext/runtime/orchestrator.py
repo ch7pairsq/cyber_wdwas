@@ -607,7 +607,8 @@ class Orchestrator:
                         recover_expired_leases(self._board)
                         self._grant_endgame(tasks, solved, deadline)
                     except Exception as exc:
-                        self._board.append_event("monitor_error", "", {"error": type(exc).__name__})
+                        self._board.append_event("monitor_error", "", {"error": type(exc).__name__,
+                            "detail": repr(exc)[:300]})
                 if not any(t.is_alive() for t in threads):
                     break
                 time.sleep(min(self._poll_seconds, max(0.0, deadline - self._clock())))
@@ -667,7 +668,9 @@ class Orchestrator:
             grants = self._endgame
             factory.endgame = grants
         granted = False
-        for cid in sorted(tasks):
+        # tasks 元素是 ChallengeInput 对象（不可排序、不是 id），统一取 challenge_id。
+        ids = sorted(getattr(t, "challenge_id", str(t)) for t in tasks)
+        for cid in ids:
             if cid in solved or cid in self._endgame_granted:
                 continue
             try:
@@ -685,6 +688,13 @@ class Orchestrator:
                 continue
             grants[cid] = self._endgame_bonus
             self._endgame_granted.add(cid)
+            # 授权必须复位会话：否则调度器把 stopped 的题永久排除，
+            # pass2 意图永远 READY 无人认领（endgame 失效的根因）。
+            try:
+                from .control import reset_intent_window
+                reset_intent_window(self._state, cid, revive_stopped=True)
+            except Exception:
+                pass
             self._board.append_event("endgame_grant", cid, {
                 "token_bonus": self._endgame_bonus,
                 "remaining_seconds": int(deadline - self._clock())})

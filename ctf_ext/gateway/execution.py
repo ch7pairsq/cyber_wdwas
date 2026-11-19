@@ -26,7 +26,10 @@ def capture(argv, *, cwd, timeout, limit=200_000, input_data=b'', discard_stderr
                                 # 合并后会被当作命令输出污染证据。
                                 stderr=subprocess.DEVNULL if discard_stderr else subprocess.STDOUT,
                                 start_new_session=True,
-                                env={'PATH': os.environ.get('PATH', os.defpath), 'LC_ALL': 'C.UTF-8'})
+                                # 环境白名单放行 ARENA_*：arena_http 等工具必须拿到
+                                # 代理与授权网段才能工作（剥离后工具直接 DENY 退出）。
+                                env={'PATH': os.environ.get('PATH', os.defpath), 'LC_ALL': 'C.UTF-8',
+                                     **{k: v for k, v in os.environ.items() if k.startswith('ARENA_')}})
         output, total, timed_out, truncated = bytearray(), 0, False, False
         selector = selectors.DefaultSelector()
         selector.register(proc.stdout, selectors.EVENT_READ)

@@ -14,22 +14,19 @@ concurrency:
   max_running_projects: 3
   executor: serial
 budget:
-  # 按 25 题正式赛规模校准（只考虑合理性，不考虑费用）：
-  # - 单意图 40 轮 ≈ 40-55 万 token、10-20 分钟
-  # - 单题会话按 2-3 个意图规划 → 100 万 token / 90 分钟上限
-  # - claim_timeout 是单意图硬超时，必须大于 40 轮的墙钟时间
-  per_challenge_seconds: 5400
-  claim_timeout_seconds: 1800
-  max_model_tokens_per_intent: 1000000
+  # 按 8 题 2 小时窗口校准：短预算快轮转，耗尽的题靠 endgame 加时兜底。
+  per_challenge_seconds: 2400
+  claim_timeout_seconds: 1500
+  max_model_tokens_per_intent: 600000
   max_tool_calls_per_intent: 300
-  # 运行级全局上限：25 题 × 预期 ~80 万均值，防绕圈止损（非费用控制）
+  # 运行级全局上限：8 题 × 预期 ~80 万均值，防绕圈止损（非费用控制）
   max_model_tokens_total: 20000000
-  repeat_limit: 8
-  stall_steps: 60
+  repeat_limit: 6
+  stall_steps: 30
   # 终局加时：全部可解题做完且剩余时间 > endgame_min_seconds 时，对预算
   # 耗尽（stopped）的题授权一次追加额度——token/工具上限 ×(1+bonus)、
   # 会话有效期延到运行截止。0 = 关闭。累计账本不清零，硬停止语义保留。
-  endgame_token_bonus: 0.5
+  endgame_token_bonus: 2.0
   # Pro（换挡模型）每题调用硬上限：防烧穿全局预算；Pro/Flash 走同一账本。
   pro_max_calls_per_challenge: 8
 download:

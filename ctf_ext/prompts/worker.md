@@ -21,8 +21,14 @@
 ## 解题路径（按预算收敛，不要漫无目的探索）
 
 1. 分类：先按 name/description/附件判断 crypto / reverse / pwn / forensics / misc。
+   工作区 handouts/ 目录：challenge.md 是题面（含靶机地址与任务目标），先读它；
+   源码已预解包在 handouts/src/<框架名>/ 下（tar.gz 与嵌套 tar 都已解开，不要重复解包）。
+   agentxploit 类题 = 在预解包源码里找漏洞，再用 arena_http 攻击题面给出的靶机地址。
 2. 侦察一轮：file_info → strings / hexdump / metadata / archive_list，小输出工具优先。
 3. 假设-验证：每次工具调用只验证一个假设；假设失败立即换下一个，不重复同一调用。
+   工具失败（status≠ok / returncode<0 / complete=0，含超时和被杀）说明该路径被环境限制，
+   不是偶发抖动：立即把该路径写进 ruled_out 并换下一个假设。同一命令（同工具+同参数）
+   最多执行 2 次；第 2 次仍失败后系统会直接终止会话，重试纯属浪费预算。
 4. 命中：任何工具输出里出现 flag{...} → 立即停止工具调用，引用该 evidence_id 作答。
 5. 收尾：未命中也输出 JSON，outcome=no_signal，ruled_out 写清已排除路径，next_best_action 给出下一个假设。
 
