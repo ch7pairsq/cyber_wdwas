@@ -14,6 +14,7 @@ STATIC_DIR = Path(__file__).parent / "static"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """应用生命周期：启动时初始化 SQLite（建表 + 列迁移）。"""
     db.configure(db.DEFAULT_DB)
     yield
 
@@ -34,6 +35,7 @@ app.include_router(export.router)
 
 @app.get("/", include_in_schema=False)
 def index():
+    """返回内嵌管理界面首页。"""
     return FileResponse(STATIC_DIR / "index.html")
 
 

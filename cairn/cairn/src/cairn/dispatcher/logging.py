@@ -4,9 +4,11 @@ import logging
 
 
 class DispatcherLogFormatter(logging.Formatter):
+    """日志格式器：缩短调度器 logger 前缀，输出短模块名。"""
     _PREFIX = "cairn.dispatcher."
 
     def format(self, record: logging.LogRecord) -> str:
+        """剥前缀并注入 shortname 字段后交给父类格式化。"""
         name = record.name
         if name.startswith(self._PREFIX):
             shortname = name[len(self._PREFIX):]
@@ -17,6 +19,7 @@ class DispatcherLogFormatter(logging.Formatter):
 
 
 def configure_logging(level: str = "INFO", *, bare: bool = False) -> None:
+    """初始化调度器日志：bare 模式只输出消息正文，默认带时间戳与模块名。"""
     handler = logging.StreamHandler()
     if bare:
         handler.setFormatter(logging.Formatter(fmt="%(message)s"))

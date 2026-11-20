@@ -19,6 +19,7 @@ FSIZE_BYTES = 20 * 1024 * 1024
 
 
 def _apply_limits() -> None:
+    """设置子进程资源限额（CPU/内存/进程数/文件大小）；单项失败尽力跳过。"""
     # 尽力而为：个别平台/内核不允许某个限额（如 macOS 无 RLIMIT_AS 生效值、
     # 或容器硬上限更低），跳过该单项而不是整个工具失败；超时仍由注册表兜底。
     for rlimit, value in ((resource.RLIMIT_CPU, CPU_SECONDS),
@@ -32,6 +33,7 @@ def _apply_limits() -> None:
 
 
 def main() -> int:
+    """stdin 读代码 → 限额 → exec 执行；异常 traceback 打到 stdout 供模型自修。"""
     raw = sys.stdin.buffer.read()
     if len(raw) > 20_000:
         print("python_exec: code too large ({} bytes > 20000)".format(len(raw)))

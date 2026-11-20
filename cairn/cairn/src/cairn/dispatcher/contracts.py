@@ -6,6 +6,7 @@ from cairn.dispatcher.output_parser import extract_json_object
 
 
 def parse_json_output(stdout: str) -> dict[str, Any]:
+    """worker 输出文本 → JSON 对象（容错解析）。"""
     return extract_json_object(stdout)
 
 
@@ -62,6 +63,7 @@ def _looks_like_explore_data(payload: dict[str, Any]) -> bool:
 def validate_reason_payload(
     payload: dict[str, Any], open_intents_empty: bool, max_intents: int,
 ) -> tuple[str, dict[str, Any] | list[dict[str, Any]] | None]:
+    """reason 输出契约：判 rejected/complete/intents/noop 并做结构与上限校验。"""
     accepted, data = _unwrap_wrapped_payload(payload)
     if accepted is False:
         return "rejected", None
@@ -102,6 +104,7 @@ def validate_reason_payload(
 
 
 def validate_bootstrap_execute_payload(payload: dict[str, Any]) -> tuple[str, dict[str, str] | None]:
+    """bootstrap 执行阶段契约：必须产出 fact.description + complete.description。"""
     accepted, data = _unwrap_wrapped_payload(payload)
     if accepted is False:
         return "rejected", None
@@ -133,6 +136,7 @@ def validate_bootstrap_execute_payload(payload: dict[str, Any]) -> tuple[str, di
 
 
 def validate_bootstrap_conclude_payload(payload: dict[str, Any]) -> tuple[str, str | None]:
+    """bootstrap 收尾阶段契约：只接受 fact.description（可选 complete）。"""
     accepted, data = _unwrap_wrapped_payload(payload)
     if accepted is False:
         return "rejected", None
@@ -155,6 +159,7 @@ def validate_bootstrap_conclude_payload(payload: dict[str, Any]) -> tuple[str, s
 
 
 def validate_explore_payload(payload: dict[str, Any]) -> tuple[str, str | None]:
+    """explore 契约：必须给出非空 description 作为事实。"""
     accepted, data = _unwrap_wrapped_payload(payload)
     if accepted is False:
         return "rejected", None

@@ -18,6 +18,13 @@ for module in ('ctf_ext', 'cairn', 'fastapi', 'uvicorn', 'requests', 'yaml', 'do
 from ctf_ext.llm.deepseek import DEFAULT_BASE_URL, DEFAULT_MODEL
 assert DEFAULT_BASE_URL == 'https://ai-api-gateway.app.baizhi.cloud/api/anthropic'
 assert DEFAULT_MODEL == 'deepseek-flash'
+# 2026-11-20 起默认主通道为 DeepSeek 官方 API；双模型换挡白名单同步锁定。
+from ctf_ext.llm.openai_compat import (ALLOWED_MODELS as OFFICIAL_MODELS,
+                                       DEFAULT_BASE_URL as OFFICIAL_BASE_URL,
+                                       DEFAULT_MODEL as OFFICIAL_DEFAULT_MODEL)
+assert OFFICIAL_BASE_URL == 'https://api.deepseek.com'
+assert OFFICIAL_DEFAULT_MODEL == 'deepseek-flash'
+assert OFFICIAL_MODELS == ('deepseek-flash', 'deepseek-v4-pro')
 assert not Path('/var/run/docker.sock').exists()
 assert not Path('/app/.env').exists()
 

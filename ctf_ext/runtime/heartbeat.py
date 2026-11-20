@@ -11,12 +11,15 @@ from typing import Optional
 
 
 class HeartbeatFile:
+    """进程存活心跳文件：原子写时间戳；age/is_stale 供 supervisor 判卡死。"""
     def __init__(self, path: Optional[str], clock=time.time):
+        """path 为心跳文件路径；未配置时 touch 为 no-op。"""
         self.path = Path(path).resolve() if path else None
         self.clock = clock
         self.last_error = ""
 
     def touch(self) -> bool:
+        """原子刷新心跳时间戳（.tmp 写入后 os.replace）；失败只记录错误。"""
         if self.path is None:
             return False
         try:
@@ -31,6 +34,7 @@ class HeartbeatFile:
 
     @staticmethod
     def age(path: Optional[str], now: Optional[float] = None) -> Optional[float]:
+        """心跳文件年龄（秒）；文件缺失返回 None。"""
         if not path:
             return None
         try:

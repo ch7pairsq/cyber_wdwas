@@ -40,6 +40,7 @@ def run_bootstrap_task(
     worker: WorkerConfig,
     cancellation: TaskCancellation,
 ) -> str:
+    """bootstrap 任务：冷启动项目执行（写首条事实与完成描述），返回任务终态串。"""
     driver = get_driver(worker.type, config.runtime.execution)
     task_started = time.perf_counter()
     healthcheck_timeout = config.runtime.healthcheck_timeout

@@ -34,11 +34,14 @@ _DOMAIN_ALIASES = {
 
 
 class SkillNotFound(Exception):
+    """请求的技能名不在索引中。"""
     pass
 
 
 class SkillLoader:
+    """技能库加载器：索引常驻内存，正文按需读取并缓存（线程安全）。"""
     def __init__(self, skills_dir: Optional[Path] = None):
+        """加载并严格校验 index.json（字段齐全、文件名不得逃逸 sections/）。"""
         self._dir = Path(skills_dir) if skills_dir else _SKILLS_DIR
         self._lock = threading.Lock()
         with (self._dir / "index.json").open("r", encoding="utf-8") as fh:
@@ -118,6 +121,7 @@ class SkillLoader:
         return "\n".join(out)
 
     def find(self, name: str) -> Dict[str, object]:
+        """按名称查索引条目；不存在抛 SkillNotFound。"""
         for s in self._index:
             if s["name"] == name:
                 return s

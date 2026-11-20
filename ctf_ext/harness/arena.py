@@ -58,6 +58,7 @@ class ArenaClient:
 
     def __init__(self, base_url: str, token: str, timeout: float = 30.0,
                  proxy: str = ""):
+        """base_url/token 必填；proxy 可选 SOCKS5（[user:pass@]host:port）。"""
         if not base_url:
             raise ArenaProtocolError("arena base_url is required")
         if not token:
@@ -181,6 +182,7 @@ class ArenaClient:
 
     def request(self, method: str, path: str, query: Dict[str, str] = None,
                 payload: Dict[str, Any] = None) -> Any:
+        """统一请求入口：Bearer 鉴权；配置代理时走 SOCKS5 隧道，否则直连。"""
         url = self.base_url + path
         if query:
             url += "?" + urllib.parse.urlencode(query)
@@ -273,6 +275,7 @@ class ArenaHarnessAdapter(HarnessAdapter):
                  max_envs: int = 3,
                  client_timeout: float = 30.0,
                  env_policy: str = "prewarm"):
+        """端点路径均可覆盖；env_policy 决定 prewarm / on_demand 两种环境策略。"""
         self._client = ArenaClient(base_url, token, timeout=client_timeout,
                                    proxy=proxy)
         self._paths = {"help": help_path, "list": list_path, "start": start_path,
@@ -300,6 +303,7 @@ class ArenaHarnessAdapter(HarnessAdapter):
 
     # ------------------------------------------------------------------ startup
     def startup(self) -> HarnessContext:
+        """拉取 help（权威规则来源）并建立 v1-arena 上下文。"""
         # help 是权威工作流与规则来源；内容只入 metadata，不做协议推断。
         self.help_text = self._client.request("GET", self._paths["help"])
         self._ctx = HarnessContext(protocol="v1-arena", competition_id="cyber-arena")
@@ -307,6 +311,7 @@ class ArenaHarnessAdapter(HarnessAdapter):
 
     # --------------------------------------------------------------- read_tasks
     def read_tasks(self) -> List[ChallengeInput]:
+        """拉取题目清单并标准化；prewarm 模式下同时预启动前 max_envs 个环境。"""
         if not self._ctx:
             raise RuntimeError("startup() must be called before read_tasks()")
         resp = self._client.request("GET", self._paths["list"])
@@ -433,6 +438,7 @@ class ArenaHarnessAdapter(HarnessAdapter):
             return info
 
     def task_description(self, challenge_id: str):
+        """返回该题最新描述（含运行环境附注）；未知题返回 None。"""
         for task in self._tasks:
             if task.challenge_id == challenge_id:
                 return task.description
@@ -498,6 +504,7 @@ class ArenaHarnessAdapter(HarnessAdapter):
 
     # ----------------------------------------------------------------- submit
     def submit_answer(self, submission: Submission) -> SubmitReceipt:
+        """幂等提交：同 key 返回首次回执；底层对 409 特殊状态做对账。"""
         key = submission.idempotency_key
         if key in self._receipts:  # 幂等：不重复判定（附录 E）
             return self._receipts[key]
@@ -545,6 +552,7 @@ class ArenaHarnessAdapter(HarnessAdapter):
         return SubmitReceipt(status="UNKNOWN", detail=str(resp)[:300])
 
     def get_receipt(self, idempotency_key: str) -> Optional[SubmitReceipt]:
+        """按幂等键查询本地已记录回执。"""
         return self._receipts.get(idempotency_key)
 
     def _probe_challenge_state(self, code: str) -> bool:

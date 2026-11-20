@@ -39,6 +39,7 @@ def run_reason_task(
     worker: WorkerConfig,
     cancellation: TaskCancellation,
 ) -> str:
+    """reason 任务：项目级规划（领取 reason 锁，产出新 Intent 或宣告完成），返回终态串。"""
     driver = get_driver(worker.type, config.runtime.execution)
     task_started = time.perf_counter()
     healthcheck_timeout = config.runtime.healthcheck_timeout

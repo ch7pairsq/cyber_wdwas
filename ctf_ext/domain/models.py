@@ -26,11 +26,13 @@ def build_attempt_key(challenge_id: str, strategy_key: str, params: Dict[str, An
 
 
 def new_id(prefix: str) -> str:
+    """生成带前缀的短随机 ID（前缀-12位hex），用于意图/尝试等实体标识。"""
     return "{}-{}".format(prefix, uuid.uuid4().hex[:12])
 
 
 @dataclass
 class Challenge:
+    """题目领域对象：来自 Harness 的标准化输入（id/分类/描述/附件/难度等）。"""
     id: str
     name: str
     category: str = "unknown"
@@ -43,6 +45,7 @@ class Challenge:
 
 @dataclass
 class Attempt:
+    """一次尝试的完整记录：策略、前提、动作、结果与证据引用，落库前由契约校验。"""
     id: str
     challenge_id: str
     strategy_key: str
@@ -60,6 +63,7 @@ class Attempt:
 
 @dataclass
 class Lesson:
+    """经验教训条目：从已完成的尝试中提炼，可被后续题目的上下文检索复用。"""
     id: str
     challenge_id: str
     text: str
@@ -69,4 +73,5 @@ class Lesson:
 
 
 def to_dict(obj: Any) -> Dict[str, Any]:
+    """dataclass → dict 的统一序列化入口（落库/交接包用）。"""
     return asdict(obj)

@@ -34,15 +34,23 @@ CREATE TABLE IF NOT EXISTS submission_jobs (
 
 
 def ensure_schema(conn):
+    """创建控制器层扩展表（sessions/command_log/tool_cache/gate_decisions 等），幂等。"""
     conn.executescript(SCHEMA)
 
 
 class StateConflict(Exception):
+    """CAS 保存冲突：revision 已被其他线程/进程修改，需重新 load 后再保存。"""
     pass
 
 
 class StateStore:
+    """控制器持久化仓：会话状态（CAS）、FLAG 声明、命令日志与工具缓存。
+
+    与黑板共用同一 sqlite 连接（事务边界一致），文件操作限定在
+    0700 权限的 workspace 根目录下，拒绝符号链接逃逸。
+    """
     def __init__(self, board, evidence, workspace_root, clock=time.time):
+        """workspace_root 为各题目隔离工作区的父目录（0700，拒绝符号链接）。"""
         self.board, self.db, self.evidence = board, board._db, evidence
         self.root = Path(workspace_root).resolve()
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -69,6 +77,7 @@ class StateStore:
         return self.root / hashlib.sha256(challenge_id.encode()).hexdigest()
 
     def workspace(self, challenge_id):
+        """返回题目独立工作区目录（0700 实体目录）；存在符号链接即拒绝。"""
         path = self.workspace_path(challenge_id)
         if path.is_symlink():
             raise ValueError("workspace symlink forbidden")
@@ -114,6 +123,7 @@ class StateStore:
         }
 
     def load(self, challenge_id):
+        """读取 (revision, state)；无记录时返回默认状态，不隐式创建。"""
         with self.board.read_view() as db:
             row = db.execute("SELECT revision,payload FROM sessions WHERE challenge_id=?", (challenge_id,)).fetchone()
         if row:
@@ -141,12 +151,14 @@ class StateStore:
         return {cid: found.get(cid) or (0, self._default_state(cid)) for cid in ids}
 
     def challenge_ids(self):
+        """全部已有会话的题目 id（按字典序）。"""
         with self.board.read_view() as db:
             return [row['challenge_id'] for row in db.execute(
                 "SELECT challenge_id FROM sessions ORDER BY challenge_id")]
 
     @staticmethod
     def validate(state):
+        """严格 schema 校验：键集/类型/枚举/预算字段逐项检查，不合格直接抛错。"""
         required = {'schema_version', 'challenge_id', 'steps', 'tried_paths', 'evidence_ids',
                     'hypotheses', 'budget', 'route', 'call_signatures', 'last_progress_step', 'status'}
         if set(state) != required or state['schema_version'] != 1:
@@ -183,6 +195,7 @@ class StateStore:
             raise ValueError('state too large; archive before patching')
 
     def save(self, challenge_id, revision, state):
+        """CAS 保存：revision 匹配才写入；0 表示首次创建（冲突抛 StateConflict）。"""
         self.validate(state)
         if state['challenge_id'] != challenge_id:
             raise ValueError('cross-challenge state')
@@ -201,6 +214,7 @@ class StateStore:
         return revision + 1
 
     def patch(self, challenge_id, mutate):
+        """读出状态深拷贝后应用 mutate，再 CAS 写回；读改写原子性由 save 保证。"""
         revision, state = self.load(challenge_id)
         updated = copy.deepcopy(state)
         mutate(updated)
@@ -208,7 +222,9 @@ class StateStore:
         return updated
 
     def compact(self, challenge_id):
+        """上下文压缩：完整 state 归档进证据库，正文只保留最近 10 条路径/假设。"""
         def trim(state):
+            """压缩事务体：归档完整 state 入证据库，正文只留最近 10 条。"""
             # 原始命令、输出与完整 state 留在内容寻址归档，不以摘要代替证据。
             archive = self.evidence.put_bytes(json.dumps(state, ensure_ascii=False).encode(), kind='state_archive')
             state['evidence_ids'] = list(dict.fromkeys(state['evidence_ids'] + [archive]))
@@ -217,6 +233,7 @@ class StateStore:
         return self.patch(challenge_id, trim)
 
     def restore_evidence(self, evidence_id):
+        """按 evidence_id 精确回读证据字节；路径逃逸或哈希不符即拒绝。"""
         with self.board.read_view() as db:
             row = db.execute('SELECT path FROM evidence WHERE sha256=?', (evidence_id,)).fetchone()
         if not row or not row['path'] or not self.evidence.verify(evidence_id):
@@ -228,12 +245,14 @@ class StateStore:
 
     @staticmethod
     def cache_key(challenge_id, target_revision, environment, tool, version, argv, input_hash):
+        """工具缓存键 = sha256(题目/目标版本/环境/工具/版本/argv/输入哈希)。"""
         if not all((challenge_id, target_revision, environment, tool, version, input_hash)):
             raise ValueError('cache identity incomplete')
         data = [challenge_id, target_revision, environment, tool, version, list(argv), input_hash]
         return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
 
     def cached(self, key):
+        """查询未过期且完整成功的命令缓存；证据已损坏时视为未命中。"""
         with self.board.read_view() as db:
             row = db.execute('SELECT command_id FROM tool_cache WHERE key=? AND expires>?', (key, self.clock())).fetchone()
             command = (db.execute('SELECT * FROM command_log WHERE id=?', (row['command_id'],)).fetchone()

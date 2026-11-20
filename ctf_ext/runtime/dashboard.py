@@ -81,6 +81,7 @@ STATUS_COLORS = {
 
 
 def collect_snapshot(conn) -> Dict[str, Any]:
+    """聚合运行快照：Intent/尝试/提交计数、事件流、配置版本与 token/工具用量。"""
     rows = lambda sql, args=(): [dict(r) for r in conn.execute(sql, args).fetchall()]
     intents = {r["status"]: r["c"] for r in rows(
         "SELECT status, COUNT(*) c FROM intents_ext GROUP BY status")}
@@ -171,6 +172,7 @@ def _bench_table(bench: Dict[str, Any]) -> str:
 
 def render_dashboard(snapshot: Dict[str, Any], bench: Optional[Dict[str, Any]] = None,
                      db_path: str = "") -> str:
+    """快照 → 自包含 HTML 页（KPI 卡片 + 状态表 + worker 基准表）。"""
     intents = snapshot["intents"]
     total = sum(intents.values())
     completed = intents.get("COMPLETED", 0)
@@ -244,6 +246,7 @@ def render_dashboard(snapshot: Dict[str, Any], bench: Optional[Dict[str, Any]] =
 
 
 def write_dashboard(conn, path: str, bench_path: Optional[str] = None, db_path: str = "") -> str:
+    """采集快照并渲染为 HTML 写入 path；可选加载 worker 基准数据。"""
     bench = None
     if bench_path and os.path.exists(bench_path):
         with open(bench_path, "r", encoding="utf-8") as fh:

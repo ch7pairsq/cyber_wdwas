@@ -25,5 +25,6 @@ LOCAL_DRIVERS: dict[str, WorkerDriver] = {
 
 
 def get_driver(name: str, execution: str = "container") -> WorkerDriver:
+    """按 worker 类型与执行模式取适配器单例（local 变体复用宿主 CLI 配置）。"""
     drivers = LOCAL_DRIVERS if execution == "local" else DRIVERS
     return drivers[name]

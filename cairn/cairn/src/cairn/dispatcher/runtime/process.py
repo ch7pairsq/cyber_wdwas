@@ -16,6 +16,7 @@ EXEC_KILL_JOIN_TIMEOUT_SECONDS = 5.0
 
 @dataclass(slots=True)
 class ProcessResult:
+    """worker 进程执行结果：退出码/输出流与超时、取消标记。"""
     returncode: int
     stdout: str
     stderr: str
@@ -32,17 +33,27 @@ class ExecProcess(Protocol):
     surface so the task runners, heartbeat lease and cancellation stay backend-agnostic.
     """
 
-    def start(self) -> None: ...
+    def start(self) -> None:
+        """启动进程。"""
+        ...
 
-    def communicate(self, timeout: float | None) -> ProcessResult: ...
+    def communicate(self, timeout: float | None) -> ProcessResult:
+        """等待结束并返回结果。"""
+        ...
 
-    def kill(self) -> None: ...
+    def kill(self) -> None:
+        """强杀进程。"""
+        ...
 
-    def cancel(self, reason: str) -> None: ...
+    def cancel(self, reason: str) -> None:
+        """按原因取消进程。"""
+        ...
 
 
 class ManagedProcess:
+    """容器内 exec 进程：后台线程采集输出，支持超时强杀与取消。"""
     def __init__(self, container: Container, command: list[str], env: dict[str, str]):
+        """container 为宿主容器对象；command/env 为 exec 命令与环境。"""
         self.command = command
         self.env = env
         self._container = container
@@ -58,6 +69,7 @@ class ManagedProcess:
         self._done = threading.Event()
 
     def start(self) -> None:
+        """启动进程（容器 exec 或本地子进程）并开启输出采集。"""
         exec_info = self._api.exec_create(
             self._container.id,
             self.command,
@@ -72,6 +84,7 @@ class ManagedProcess:
         self._reader.start()
 
     def communicate(self, timeout: float | None) -> ProcessResult:
+        """等待进程结束（超时则强杀）并返回 ProcessResult。"""
         assert self._reader is not None
         self._reader.join(timeout=timeout)
         if self._reader.is_alive():
@@ -95,6 +108,7 @@ class ManagedProcess:
         )
 
     def kill(self) -> None:
+        """查 exec 详情定位 PID 后强杀进程。"""
         if self._exec_id is None:
             return
         try:
@@ -111,6 +125,7 @@ class ManagedProcess:
         self._kill_pid(int(pid))
 
     def cancel(self, reason: str) -> None:
+        """外部取消：记录原因并强杀进程（幂等）。"""
         if self._cancel_reason is None:
             self._cancel_reason = reason
         self.kill()

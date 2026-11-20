@@ -13,6 +13,7 @@ import sys
 
 
 def _safe_read(path: str, limit: int):
+    """读取证据文件头尾节选与真实长度；调用方负责哈希校验。"""
     with open(path, "rb") as fh:
         head = fh.read(limit)
         rest = fh.read()
@@ -20,6 +21,7 @@ def _safe_read(path: str, limit: int):
 
 
 def main() -> int:
+    """按 id 逐个汇总证据：哈希校验 → 预算内取头尾节选 → 定界输出。"""
     ap = argparse.ArgumentParser(prog="evidence_digest")
     ap.add_argument("--root", required=True, help="evidence store 根目录")
     ap.add_argument("--max-bytes", type=int, default=120000)

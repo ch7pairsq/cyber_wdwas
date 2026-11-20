@@ -20,7 +20,9 @@ class SubmissionLocked(Exception):
 
 
 class SubmitGateway:
+    """持久化提交网关：Outbox 模式，主线程写库、守护线程发网络请求。"""
     def __init__(self, store, adapter, policy=None, *, query_interval=5, clock=time.time):
+        """store 提供共享 sqlite 连接；adapter 为 Harness 提交通道。"""
         self.store, self.db, self.adapter = store, store.db, adapter
         self.policy, self.clock, self.query_interval = policy, clock, query_interval
         self._requests, self._responses = queue.Queue(), queue.Queue()
@@ -30,6 +32,7 @@ class SubmitGateway:
 
     @staticmethod
     def key(challenge_id, answer):
+        """幂等键：sha256(challenge_id|normalized_flag)，同题同答同键。"""
         return 'sub-' + hashlib.sha256((challenge_id + '|' + normalized_flag(answer)).encode()).hexdigest()
 
     def enqueue(self, db, decision):
@@ -166,6 +169,7 @@ class SubmitGateway:
             db.execute("INSERT OR IGNORE INTO submission_jobs SELECT idempotency_key,'legacy-query-only',0,? FROM submissions WHERE status IN ('SENDING','UNKNOWN')", (self.clock(),))
 
     def flush(self, timeout=1):
+        """限时泵送：循环 pump 直到无在途请求或超时，返回完成回执列表。"""
         deadline = time.monotonic() + max(0, timeout)
         completed = self.pump()
         while self._inflight and time.monotonic() < deadline:
@@ -174,6 +178,7 @@ class SubmitGateway:
         return completed
 
     def close(self):
+        """停机：置关闭标志并投哨兵结束守护线程（不等待网络调用）。"""
         self._closed = True
         if self._thread:
             self._requests.put(None)

@@ -8,10 +8,12 @@ from fastapi import HTTPException
 from cairn.server.models import Intent, ProjectMeta, ProjectReason
 
 def utcnow() -> str:
+    """UTC 时间戳（ISO 格式，秒级）。"""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def next_project_id(conn: sqlite3.Connection) -> str:
+    """全局计数器生成项目 id（proj_001 起）。"""
     conn.execute("UPDATE counters SET value = value + 1 WHERE name = 'project'")
     row = conn.execute("SELECT value FROM counters WHERE name = 'project'").fetchone()
     return f"proj_{row['value']:03d}"
@@ -20,6 +22,7 @@ def next_project_id(conn: sqlite3.Connection) -> str:
 def _next_scoped_id(
     conn: sqlite3.Connection, kind: str, prefix: str, project_id: str
 ) -> str:
+    """项目内计数器生成 scoped id（fact/intent/hint）。"""
     conn.execute(
         "INSERT OR IGNORE INTO scoped_counters (project_id, kind, value) VALUES (?, ?, 0)",
         (project_id, kind),
@@ -37,18 +40,22 @@ def _next_scoped_id(
 
 
 def next_fact_id(conn: sqlite3.Connection, project_id: str) -> str:
+    """项目内事实 id。"""
     return _next_scoped_id(conn, "fact", "f", project_id)
 
 
 def next_intent_id(conn: sqlite3.Connection, project_id: str) -> str:
+    """项目内意图 id。"""
     return _next_scoped_id(conn, "intent", "i", project_id)
 
 
 def next_hint_id(conn: sqlite3.Connection, project_id: str) -> str:
+    """项目内提示 id。"""
     return _next_scoped_id(conn, "hint", "h", project_id)
 
 
 def get_project_or_404(conn: sqlite3.Connection, project_id: str) -> sqlite3.Row:
+    """取项目行，缺失即 404。"""
     row = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
     if row is None:
         raise HTTPException(404, "Project not found")
@@ -56,6 +63,7 @@ def get_project_or_404(conn: sqlite3.Connection, project_id: str) -> sqlite3.Row
 
 
 def check_project_active(conn: sqlite3.Connection, project_id: str) -> sqlite3.Row:
+    """要求项目处于 active，否则 403。"""
     row = get_project_or_404(conn, project_id)
     if row["status"] != "active":
         raise HTTPException(403, f"Project is {row['status']}")
@@ -63,6 +71,7 @@ def check_project_active(conn: sqlite3.Connection, project_id: str) -> sqlite3.R
 
 
 def check_project_hint_writable(conn: sqlite3.Connection, project_id: str) -> sqlite3.Row:
+    """提示写入权限检查（任意已知状态均可写）。"""
     row = get_project_or_404(conn, project_id)
     if row["status"] not in ("active", "stopped", "completed"):
         raise HTTPException(403, f"Project is {row['status']}")
@@ -70,6 +79,7 @@ def check_project_hint_writable(conn: sqlite3.Connection, project_id: str) -> sq
 
 
 def check_project_completed(conn: sqlite3.Connection, project_id: str) -> sqlite3.Row:
+    """要求项目已完成（重开接口用），否则 403。"""
     row = get_project_or_404(conn, project_id)
     if row["status"] != "completed":
         raise HTTPException(403, f"Project is {row['status']}")
@@ -79,6 +89,7 @@ def check_project_completed(conn: sqlite3.Connection, project_id: str) -> sqlite
 def validate_facts_exist(
     conn: sqlite3.Connection, project_id: str, fact_ids: list[str]
 ) -> None:
+    """校验引用的事实 id 全部存在，缺失即 404。"""
     for fid in fact_ids:
         row = conn.execute(
             "SELECT 1 FROM facts WHERE id = ? AND project_id = ?", (fid, project_id)
@@ -88,11 +99,13 @@ def validate_facts_exist(
 
 
 def validate_goal_not_in_sources(fact_ids: list[str]) -> None:
+    """goal 伪事实不得作为 Intent 来源。"""
     if "goal" in fact_ids:
         raise HTTPException(400, "goal cannot be used in from")
 
 
 def validate_intent_creator_worker(creator: str, worker: str | None) -> None:
+    """worker 只能为空或等于 creator。"""
     if worker is not None and worker != creator:
         raise HTTPException(400, "worker must be null or equal to creator")
 
@@ -100,6 +113,7 @@ def validate_intent_creator_worker(creator: str, worker: str | None) -> None:
 def get_intent_or_404(
     conn: sqlite3.Connection, project_id: str, intent_id: str
 ) -> sqlite3.Row:
+    """取项目内 Intent 行，缺失即 404。"""
     row = conn.execute(
         "SELECT * FROM intents WHERE id = ? AND project_id = ?",
         (intent_id, project_id),
@@ -112,6 +126,7 @@ def get_intent_or_404(
 def get_claimable_open_intent_or_404(
     conn: sqlite3.Connection, project_id: str, intent_id: str, worker: str
 ) -> sqlite3.Row:
+    """领取前置校验：先过期失效租约，再确保 Intent 未完成且未被他人持有。"""
     expire_workers(conn, project_id)
     row = get_intent_or_404(conn, project_id, intent_id)
     if row["to_fact_id"] is not None:
@@ -124,6 +139,7 @@ def get_claimable_open_intent_or_404(
 def get_releasable_open_intent_or_404(
     conn: sqlite3.Connection, project_id: str, intent_id: str, worker: str
 ) -> sqlite3.Row:
+    """释放前置校验：Intent 未完成且持有者是自己（或无人持有）。"""
     expire_workers(conn, project_id)
     row = get_intent_or_404(conn, project_id, intent_id)
     if row["to_fact_id"] is not None:
@@ -136,6 +152,7 @@ def get_releasable_open_intent_or_404(
 
 
 def get_completion_intent_or_409(conn: sqlite3.Connection, project_id: str) -> sqlite3.Row:
+    """取唯一指向 goal 的完成 Intent，缺失/重复即 409。"""
     rows = conn.execute(
         "SELECT * FROM intents WHERE project_id = ? AND to_fact_id = 'goal'",
         (project_id,),
@@ -148,6 +165,7 @@ def get_completion_intent_or_409(conn: sqlite3.Connection, project_id: str) -> s
 
 
 def intent_to_model(conn: sqlite3.Connection, row: sqlite3.Row, project_id: str) -> Intent:
+    """Intent 行 + 来源表 → Intent 模型。"""
     sources = conn.execute(
         "SELECT fact_id FROM intent_sources WHERE intent_id = ? AND project_id = ? ORDER BY rowid",
         (row["id"], project_id),
@@ -166,6 +184,7 @@ def intent_to_model(conn: sqlite3.Connection, row: sqlite3.Row, project_id: str)
 
 
 def build_intents(conn: sqlite3.Connection, project_id: str) -> list[Intent]:
+    """按创建时间装配项目全部 Intent 模型。"""
     rows = conn.execute(
         "SELECT * FROM intents WHERE project_id = ? ORDER BY created_at",
         (project_id,),
@@ -174,16 +193,19 @@ def build_intents(conn: sqlite3.Connection, project_id: str) -> list[Intent]:
 
 
 def get_intent_timeout(conn: sqlite3.Connection) -> int:
+    """读取 Intent 租约超时（秒）。"""
     row = conn.execute("SELECT intent_timeout FROM settings WHERE rowid = 1").fetchone()
     return row["intent_timeout"]
 
 
 def get_reason_timeout(conn: sqlite3.Connection) -> int:
+    """读取 reason 锁超时（秒）。"""
     row = conn.execute("SELECT reason_timeout FROM settings WHERE rowid = 1").fetchone()
     return row["reason_timeout"]
 
 
 def project_reason_from_row(row: sqlite3.Row) -> ProjectReason | None:
+    """项目行中的 reason 锁字段 → ProjectReason 模型（无锁返回 None）。"""
     if row["reason_worker"] is None:
         return None
     return ProjectReason(
@@ -195,6 +217,7 @@ def project_reason_from_row(row: sqlite3.Row) -> ProjectReason | None:
 
 
 def project_meta_from_row(row: sqlite3.Row) -> ProjectMeta:
+    """项目行 → ProjectMeta 模型。"""
     return ProjectMeta(
         id=row["id"],
         title=row["title"],
@@ -206,6 +229,7 @@ def project_meta_from_row(row: sqlite3.Row) -> ProjectMeta:
 
 
 def clear_project_reason(conn: sqlite3.Connection, project_id: str) -> None:
+    """清空项目 reason 锁字段。"""
     conn.execute(
         """
         UPDATE projects
@@ -220,6 +244,7 @@ def clear_project_reason(conn: sqlite3.Connection, project_id: str) -> None:
 
 
 def expire_workers(conn: sqlite3.Connection, project_id: str | None = None) -> None:
+    """把心跳超时的 Intent 持有者置空（隐式释放租约）。"""
     timeout = get_intent_timeout(conn)
     now = utcnow()
     query = """
@@ -238,6 +263,7 @@ def expire_workers(conn: sqlite3.Connection, project_id: str | None = None) -> N
 
 
 def expire_reason_leases(conn: sqlite3.Connection, project_id: str | None = None) -> None:
+    """把心跳超时的项目 reason 锁清空。"""
     timeout = get_reason_timeout(conn)
     now = utcnow()
     query = """

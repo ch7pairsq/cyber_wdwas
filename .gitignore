@@ -13,3 +13,4 @@ build/
 !.env.example
 !.env.sample
 venv/
+.DS_Store

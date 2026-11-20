@@ -8,17 +8,21 @@ CATEGORIES = ("intents", "model", "tools", "knowledge", "submissions", "resource
 
 
 class Metrics:
+    """线程安全进程内计数器：incr 计数，observe 记录 sum/count 样本。"""
     def __init__(self):
+        """_lock 保护计数器字典（多 worker 线程并发更新）。"""
         self._lock = threading.Lock()
         self._counters = {}
         self._started = time.time()
 
     def incr(self, name: str, value: int = 1) -> int:
+        """累加计数并返回当前值（事件计数/用量累计）。"""
         with self._lock:
             self._counters[name] = self._counters.get(name, 0) + value
             return self._counters[name]
 
     def observe(self, name: str, value: float) -> None:
+        """记录连续量样本（延迟/耗时等），以 name.sum/name.count 落盘。"""
         with self._lock:
             self._counters.setdefault(name + ".sum", 0)
             self._counters.setdefault(name + ".count", 0)
@@ -26,6 +30,7 @@ class Metrics:
             self._counters[name + ".count"] += 1
 
     def snapshot(self) -> dict:
+        """计数器快照 + 运行时长；只读拷贝，供报告/看板消费。"""
         with self._lock:
             data = dict(self._counters)
         data["uptime_seconds"] = round(time.time() - self._started, 3)
@@ -37,6 +42,7 @@ def framework_metrics(db, task_count):
     import json
 
     def _load_object(raw):
+        """安全 JSON 解析：非 dict 或损坏返回 None（计入 unreadable）。"""
         try:
             value = json.loads(raw)
         except (TypeError, ValueError):

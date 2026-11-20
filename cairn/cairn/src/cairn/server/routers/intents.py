@@ -31,6 +31,7 @@ router = APIRouter(tags=["intents"])
     status_code=201,
 )
 def create_intent(project_id: str, body: CreateIntentRequest):
+    """创建 Intent：来源事实集 + 描述（可带 worker 立即自领取）。"""
     with get_conn() as conn:
         check_project_active(conn, project_id)
         validate_facts_exist(conn, project_id, body.from_)
@@ -76,6 +77,7 @@ def create_intent(project_id: str, body: CreateIntentRequest):
     response_model=Intent,
 )
 def heartbeat(project_id: str, intent_id: str, body: HeartbeatRequest):
+    """Intent 租约续期（同时实现领取：把 worker 写回行）。"""
     with get_conn() as conn:
         check_project_active(conn, project_id)
         get_claimable_open_intent_or_404(conn, project_id, intent_id, body.worker)
@@ -98,6 +100,7 @@ def heartbeat(project_id: str, intent_id: str, body: HeartbeatRequest):
     response_model=Intent,
 )
 def release(project_id: str, intent_id: str, body: HeartbeatRequest):
+    """释放 Intent 租约（持有者本人）。"""
     with get_conn() as conn:
         check_project_active(conn, project_id)
         row = get_releasable_open_intent_or_404(conn, project_id, intent_id, body.worker)
@@ -120,6 +123,7 @@ def release(project_id: str, intent_id: str, body: HeartbeatRequest):
     response_model=ConcludeResponse,
 )
 def conclude(project_id: str, intent_id: str, body: ConcludeRequest):
+    """完成 Intent：写入结论事实并回填 to_fact_id/concluded_at。"""
     with get_conn() as conn:
         check_project_active(conn, project_id)
         get_claimable_open_intent_or_404(conn, project_id, intent_id, body.worker)

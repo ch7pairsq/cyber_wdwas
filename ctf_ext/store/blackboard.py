@@ -34,25 +34,30 @@ _SUCCESS_LIKE = (OUTCOME_SUCCESS, OUTCOME_NO_SIGNAL)
 
 
 class DuplicateStrategy(Exception):
+    """同策略去重命中：携带冲突的 attempt_key 与阻塞来源（intent 或 attempt）。"""
     def __init__(self, attempt_key: str, blocked_by: str):
+        """blocked_by 标识阻塞来源（intent/attempt），便于调度层决策。"""
         super().__init__("duplicate strategy {} blocked by {}".format(attempt_key, blocked_by))
         self.attempt_key = attempt_key
         self.blocked_by = blocked_by
 
 
 class StaleWrite(Exception):
+    """过期/错主写入：租约已过期、owner 不匹配或 attempt_no 不符时抛出。"""
     pass
 
 
 class EvidenceNotRegistered(Exception):
     """引用未登记/哈希不匹配的证据（附录 D.1-3：写入 Fact 前证据必须已存在）。"""
     def __init__(self, evidence_ids):
+        """携带全部未登记/哈希不符的证据 id 供修复。"""
         super().__init__("evidence not registered or hash mismatch: {}".format(list(evidence_ids)))
         self.evidence_ids = list(evidence_ids)
 
 
 @dataclass
 class IntentDraft:
+    """新 Intent 草稿：策略、参数、优先级与预算估算，入库前生成 attempt_key 去重。"""
     challenge_id: str
     strategy_key: str
     params: Dict[str, Any] = field(default_factory=dict)
@@ -65,6 +70,7 @@ class IntentDraft:
 
 @dataclass
 class Claim:
+    """一次成功领取的租约凭据：attempt_no 用于释放/写结果时的乐观校验。"""
     intent_id: str
     challenge_id: str
     strategy_key: str
@@ -77,6 +83,7 @@ class Claim:
 
 @dataclass
 class WorkerResult:
+    """Worker 输出的标准封装：契约校验通过后经 write_result 幂等落库。"""
     intent_id: str
     owner: str
     attempt_no: int
@@ -98,6 +105,7 @@ class WorkerResult:
 
 @dataclass
 class WriteReceipt:
+    """写结果回执：first=False 表示幂等命中，返回首次 attempt_id。"""
     first: bool
     idempotency_key: str
     attempt_id: Optional[str] = None
@@ -111,7 +119,9 @@ def compute_priority(draft: IntentDraft) -> float:
 
 
 class Blackboard:
+    """黑板：意图/租约/尝试/事实/提交的共享状态库，全部写操作走事务与乐观校验。"""
     def __init__(self, db: sqlite3.Connection, lease_default: float = 180.0, evidence_check=None):
+        """db 为共享 SQLite 连接；lease_default 为租约时长；evidence_check 用于证据引用校验。"""
         self._db = db
         self._lock = threading.RLock()
         self._lease_default = lease_default
@@ -152,6 +162,7 @@ class Blackboard:
 
     # ---------------------------------------------------------------- intents
     def add_challenge(self, challenge) -> None:
+        """登记题目（幂等）：重复导入同一题目不覆盖已有元数据。"""
         with self.transaction() as db:
             db.execute(
                 "INSERT OR IGNORE INTO challenges(id, name, category, description, attachments, points_hint,"
@@ -240,6 +251,7 @@ class Blackboard:
             )
 
     def heartbeat(self, intent_id: str, worker: str, extend: float = 120.0) -> bool:
+        """续约租约：只对在租且未过期的 Intent 生效，失败表示租约已丢失。"""
         with self.transaction() as db:
             cur = db.execute(
                 "UPDATE intents_ext SET lease_until=MAX(lease_until, ?), updated_at=?"
@@ -250,6 +262,7 @@ class Blackboard:
 
     def release(self, intent_id: str, worker: str, outcome: str,
                 attempt_no: Optional[int] = None) -> None:
+        """释放租约：成功类结果置 COMPLETED，否则置 FAILED_RETRYABLE 待重试。"""
         status = {"success": COMPLETED, "no_signal": COMPLETED}.get(outcome, FAILED_RETRYABLE)
         sql = ("UPDATE intents_ext SET status=?, owner=NULL, lease_until=NULL, note=?, updated_at=?"
                " WHERE id=? AND owner=? AND status='RUNNING'")
@@ -263,6 +276,7 @@ class Blackboard:
             db.execute(sql, args)
 
     def list_open(self, challenge_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """列出开放 Intent（READY/RUNNING/FAILED_RETRYABLE），按优先级倒序。"""
         sql = "SELECT * FROM intents_ext WHERE status IN ('READY','RUNNING','FAILED_RETRYABLE')"
         args: tuple = ()
         if challenge_id:
@@ -304,6 +318,7 @@ class Blackboard:
         return int(row["n"] or 0)
 
     def accepted_challenge_ids(self) -> set:
+        """已获平台 ACCEPTED 的题目集合（调度层直接排除重解）。"""
         with self.read_view() as db:
             rows = db.execute(
                 "SELECT DISTINCT challenge_id FROM submissions WHERE status='ACCEPTED'"
@@ -311,6 +326,7 @@ class Blackboard:
         return {row["challenge_id"] for row in rows}
 
     def confirmed_challenge_ids(self) -> set:
+        """已过三门确认（可能还在提交中）的题目集合。"""
         with self.read_view() as db:
             rows = db.execute(
                 "SELECT DISTINCT challenge_id FROM gate_decisions WHERE status='confirmed'"
@@ -318,6 +334,7 @@ class Blackboard:
         return {row["challenge_id"] for row in rows}
 
     def latest_submission(self, challenge_id: str) -> Optional[Dict[str, Any]]:
+        """该题最近一条提交记录（状态/回执/幂等键）。"""
         with self.read_view() as db:
             row = db.execute(
                 "SELECT status,receipt_id,idempotency_key FROM submissions"
@@ -326,6 +343,7 @@ class Blackboard:
         return dict(row) if row else None
 
     def pending_submission_count(self) -> int:
+        """尚未收到终态回执的提交数（收尾排空判断用）。"""
         with self.read_view() as db:
             row = db.execute(
                 "SELECT COUNT(*) AS n FROM submissions WHERE status IN ('DRAFT','SENDING','UNKNOWN')"
@@ -419,12 +437,14 @@ class Blackboard:
             return WriteReceipt(first=True, idempotency_key=idempotency_key, attempt_id=attempt_id)
 
     def get_attempt(self, attempt_id: str) -> Optional[Dict[str, Any]]:
+        """按 id 取尝试记录。"""
         with self.read_view() as db:
             row = db.execute("SELECT * FROM attempts WHERE id=?", (attempt_id,)).fetchone()
         return dict(row) if row else None
 
     def recent_attempts(self, challenge_id: str, strategy_key: Optional[str] = None,
                         limit: int = 20) -> List[Dict[str, Any]]:
+        """近期尝试列表（可按策略过滤），供交接包与审计。"""
         sql = "SELECT * FROM attempts WHERE challenge_id=?"
         args: List[Any] = [challenge_id]
         if strategy_key:
@@ -448,6 +468,7 @@ class Blackboard:
         """给 Worker 的最小交接包：近期尝试、教训与开 Intent，均有限量且脱敏。"""
         from . import lessons as lesson_store
         def safe(value, limit=300):
+            """脱敏包装：限长并抹去其他题号等敏感信息。"""
             return lesson_store.sanitize_lesson_text(str(value or ""), limit)
         attempts = []
         for row in self.recent_attempts(challenge_id, limit=max_attempts):
@@ -479,6 +500,7 @@ class Blackboard:
         }
 
     def get_challenge(self, challenge_id: str) -> Optional[Dict[str, Any]]:
+        """按 id 取题目元数据行。"""
         with self.read_view() as db:
             row = db.execute("SELECT * FROM challenges WHERE id=?", (challenge_id,)).fetchone()
         return dict(row) if row else None
@@ -527,4 +549,5 @@ class Blackboard:
             return int(cur.lastrowid)
 
     def close(self) -> None:
+        """关闭共享 SQLite 连接（进程退出前调用）。"""
         self._db.close()

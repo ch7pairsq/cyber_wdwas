@@ -22,17 +22,21 @@ class LocalBackend:
     """
 
     def __init__(self, config: LocalConfig):
+        """确定工作区根目录（默认调度器启动目录）。"""
         self._config = config
         root = config.workspace_root
         self._root = Path(root).expanduser() if root else Path.cwd()
 
     def close(self) -> None:
+        """无容器资源需要释放（接口一致性空实现）。"""
         return None
 
     def container_name(self, project_id: str) -> str:
+        """项目 → 本地工作目录路径（充当“容器名”角色）。"""
         return str(self._project_dir(project_id))
 
     def ensure_running(self, project_id: str) -> str:
+        """确保项目工作目录存在，返回目录路径。"""
         project_dir = self._project_dir(project_id)
         project_dir.mkdir(parents=True, exist_ok=True)
         LOG.debug("local project workdir ready project=%s dir=%s", project_id, project_dir)
@@ -46,6 +50,7 @@ class LocalBackend:
         timeout_seconds: int | None = None,
         kill_after_seconds: int = 5,
     ) -> LocalProcess:
+        """构造本地子进程：合并宿主环境与 worker 环境变量。"""
         merged_env = {**os.environ, **(env or {})}
         return LocalProcess(
             command,
@@ -56,6 +61,7 @@ class LocalBackend:
         )
 
     def write_text_file(self, container_name: str, path: str, content: str) -> None:
+        """直接写宿主文件（仅接受绝对路径）。"""
         target = Path(path)
         if not target.is_absolute():
             raise ValueError(f"local file path must be absolute: {path}")
@@ -63,12 +69,15 @@ class LocalBackend:
         target.write_text(content, encoding="utf-8")
 
     def needs_completed_cleanup(self, project_id: str) -> bool:
+        """remove 模式且目录存在时需要清理。"""
         return self._config.completed_action == "remove" and self._project_dir(project_id).exists()
 
     def needs_stopped_cleanup(self, project_id: str) -> bool:
+        """本地模式无停止态清理。"""
         return False
 
     def cleanup_completed(self, project_id: str) -> bool:
+        """remove 模式下删除项目工作目录。"""
         if self._config.completed_action == "remove":
             project_dir = self._project_dir(project_id)
             LOG.info("removing completed project workdir project=%s dir=%s", project_id, project_dir)
@@ -76,9 +85,11 @@ class LocalBackend:
         return True
 
     def cleanup_stopped(self, project_id: str) -> bool:
+        """本地模式无停止态处置（空实现）。"""
         return True
 
     def managed_container_names(self) -> list[str]:
+        """本地模式无容器（恒为空）。"""
         return []
 
     def _project_dir(self, project_id: str) -> Path:

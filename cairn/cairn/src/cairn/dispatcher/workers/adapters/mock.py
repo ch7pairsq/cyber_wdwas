@@ -123,9 +123,11 @@ else:
 
 
 class MockDriver(SeedSessionDriver):
+    """mock 适配器：python3 内嵌脚本按配置概率产出结果，用于端到端联调。"""
     type_name = "mock"
 
     def local_binary(self) -> str | None:
+        """本地模式依赖 python3。"""
         return "python3"
 
     @staticmethod
@@ -134,15 +136,19 @@ class MockDriver(SeedSessionDriver):
         return ["python3", "-c", _SCRIPT, json.dumps(behavior, ensure_ascii=False), prompt]
 
     def check_health(self, worker: WorkerConfig, *, timeout: float) -> HealthResult:
+        """按配置概率模拟健康/不健康（进程内随机，无真实网络）。"""
         outcomes = resolve_mock_behavior(worker.name, worker.env)["healthcheck"]["outcomes"]
         ok = random.random() < outcomes.get("ok", 0.0)
         return HealthResult(ok=ok, status=200 if ok else 503, detail="" if ok else "mock healthcheck fail")
 
     def describe_health(self, worker: WorkerConfig) -> str:
+        """健康检查方式描述。"""
         return "mock in-process healthcheck"
 
     def build_execute(self, worker: WorkerConfig, prompt: str, session: str | None) -> DriverResult:
+        """构造 mock 执行命令（行为配置经 argv 注入）。"""
         return DriverResult(argv=self._argv(worker, prompt), session=session)
 
     def build_conclude(self, worker: WorkerConfig, prompt: str, session: str) -> list[str]:
+        """mock 收尾与执行同命令。"""
         return self._argv(worker, prompt)

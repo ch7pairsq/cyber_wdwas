@@ -32,6 +32,7 @@ def sanitize_lesson_text(text: str, limit: int = _MAX_LESSON_CHARS) -> str:
 
 
 def _json_list(value: Any) -> List[str]:
+    """把 TEXT 列里的 JSON 数组安全解析为字符串列表；异常返回空列表。"""
     if isinstance(value, list):
         return [str(x) for x in value]
     try:
@@ -105,11 +106,13 @@ def record_attempt(db: sqlite3.Connection, attempt_id: str, domain: Optional[str
 
 
 def _domain_pattern(domain: str) -> str:
+    """构造匹配 tags 列 domain:xxx 标签的 LIKE 模式（JSON 转义后带通配符）。"""
     return "%" + json.dumps("domain:" + sanitize_lesson_text(domain, 40))[1:-1] + "%"
 
 
 def search(db: sqlite3.Connection, query: str = "", challenge_id: Optional[str] = None,
            domain: Optional[str] = None, limit: int = 10):
+    """按题目/领域/关键词检索未失效教训；最多返回 100 条，按时间倒序。"""
     sql = "SELECT * FROM lessons WHERE superseded=0"
     args: List[Any] = []
     if challenge_id:

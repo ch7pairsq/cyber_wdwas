@@ -9,9 +9,11 @@ from ..store.blackboard import Blackboard, Claim
 
 
 class Scheduler:
+    """优先级调度器：挑题（背压/开局加成）→ 按题领 Intent，跨题轮转。"""
     def __init__(self, board: Blackboard, max_project_workers: int = 2, max_running_projects: int = 3,
                  state_store=None, step_policy=None, clock=time.time, opening_seconds=1800,
                  retry_backoff_seconds: float = 0.0):
+        """max_project_workers 限制单题并发；max_running_projects 限制同时在跑的题数。"""
         self._board = board
         self._max_project_workers = max_project_workers
         self._max_running_projects = max_running_projects
@@ -59,6 +61,7 @@ class Scheduler:
         accepted = self._board.accepted_challenge_ids()
 
         def rank(cid):
+            """排序键：意图优先级 × 五阶段权重（开局难度加成）→ 公平轮转 → 题号。"""
             row = summary_by_id.get(cid) or {}
             factor = 1
             state = states.get(cid) or {}
@@ -89,6 +92,7 @@ class Scheduler:
         return sorted(eligible, key=rank)
 
     def pick_next(self, worker: str, lease_seconds: float = 180.0) -> Optional[Claim]:
+        """按优先级顺序逐题领 Intent；stage≥3 的题并发上限强制降为 1。"""
         eligible = self.eligible_challenges()
         if not eligible:
             return None

@@ -14,6 +14,7 @@ import sys
 
 
 def main() -> int:
+    """CLI 入口：list 模式打印内嵌图片清单；extract 模式抽 PNG 并列文件名。"""
     ap = argparse.ArgumentParser(prog="pdf_images")
     ap.add_argument("--mode", choices=("list", "extract"), required=True)
     ap.add_argument("--prefix", default="pdfimg")

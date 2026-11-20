@@ -51,6 +51,11 @@ FROM runtime AS competition
 RUN python /app/docker/strip_installers.py \
     && python /app/docker/check_competition.py
 ENV PYTHONNOUSERSITE=1 PIP_NO_INDEX=1 UV_OFFLINE=1
-LABEL io.cyber-wdwas.release-status="blocked-awaiting-official-harness"
+LABEL io.cyber-wdwas.release-status="official-arena-entry-wired"
 USER 10001:10001
-ENTRYPOINT ["python", "-m", "ctf_ext.competition"]
+# 正式赛入口（平台 Harness 托管拉起本镜像）：supervisor 包裹 agent，
+# 配置固定为 config/official-arena.yaml（Arena 平台协议）；凭据与平台地址
+# 由平台环境变量注入（BAIZHI_API_KEY / ARENA_SOLVER_TOKEN / ARENA_BASE_URL），
+# 缺凭据时快速失败：不回退 Mock、不安装依赖、不触发任何提交。
+# 总墙钟默认 13800s（4h 减收尾余量），可覆盖：docker run <image> [总秒数]。
+ENTRYPOINT ["bash", "/app/scripts/run_official.sh"]

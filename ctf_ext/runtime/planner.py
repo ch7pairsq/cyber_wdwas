@@ -21,15 +21,19 @@ REASON_NO_SIGNAL = "no_signal"
 
 
 class IntentPlanner:
+    """确定性规划器：失败/被拒/无信号时生成下一轮 followup Intent。"""
     def __init__(self, board, max_intents_per_challenge: int = 4):
+        """max_intents_per_challenge 为单题累计 Intent 上限（超出记事件不再规划）。"""
         self._board = board
         self.max_intents_per_challenge = max(1, int(max_intents_per_challenge))
 
     def set_limit(self, value) -> None:
+        """热更新单题 Intent 上限。"""
         self.max_intents_per_challenge = max(1, int(value))
 
     @staticmethod
     def _reason(result, decision) -> str:
+        """判定是否需要规划：confirmed 不规划，rejected/pending/no_signal 分别返回原因码。"""
         status = getattr(decision, "status", None)
         if status == "confirmed":
             return ""
@@ -43,6 +47,7 @@ class IntentPlanner:
 
     def plan(self, claim, result, decision=None, challenge: Optional[Dict[str, Any]] = None,
              attempt_id: Optional[str] = None) -> Optional[str]:
+        """生成 followup Intent（带已排除方向与教训）；blocked/超限/去重命中不扩展。"""
         reason = self._reason(result, decision)
         if not reason:
             return None

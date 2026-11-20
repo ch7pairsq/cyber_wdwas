@@ -22,8 +22,11 @@ MAX_ATTACHMENT_BYTES = 1_000_000
 
 
 class Worker(ABC):
+    """Worker 协议：领取的 Claim + 题目上下文 → 标准化 WorkerResult。"""
     @abstractmethod
-    def work(self, claim: Claim, challenge: Dict) -> WorkerResult: ...
+    def work(self, claim: Claim, challenge: Dict) -> WorkerResult:
+        """执行一次意图：产出经契约校验的 WorkerResult（不改黑板状态）。"""
+        ...
 
 
 class RuleBasedWorker(Worker):
@@ -32,6 +35,7 @@ class RuleBasedWorker(Worker):
     name = "rule-based"
 
     def __init__(self, harness, evidence_store=None, state_store=None, control_factory=None, environment=None):
+        """harness 仅允许 Mock 适配器；正式题目禁止本地保底解码（独立容器）。"""
         import uuid
         self._harness = harness
         self._evidence = evidence_store
@@ -40,9 +44,11 @@ class RuleBasedWorker(Worker):
         self._environment = environment or uuid.uuid4().hex
 
     def _read(self, ref: str) -> bytes:
+        """读取附件（限 1MB）；异常由调用方记录后继续。"""
         return self._harness.read_attachment(ref, max_bytes=MAX_ATTACHMENT_BYTES)
 
     def work(self, claim: Claim, challenge: Dict) -> WorkerResult:
+        """读取附件 → 证据登记 → base64 解码 → 提取 flag → 声明并返回结果。"""
         evidence_ids: List[str] = []
         texts: List[str] = []
         failures: List[str] = []
@@ -116,6 +122,7 @@ class RuleBasedWorker(Worker):
 
     @staticmethod
     def _try_base64(text: str) -> Optional[str]:
+        """尝试 base64 严格解码并转 UTF-8；非可解码文本返回 None。"""
         compact = "".join(text.split())
         if len(compact) < 8:
             return None

@@ -8,6 +8,7 @@ router = APIRouter(tags=["settings"])
 
 @router.get("/settings", response_model=Settings)
 def get_settings():
+    """读取全局超时设置。"""
     with get_conn() as conn:
         row = conn.execute("SELECT intent_timeout, reason_timeout FROM settings WHERE rowid = 1").fetchone()
         return Settings(intent_timeout=row["intent_timeout"], reason_timeout=row["reason_timeout"])
@@ -15,6 +16,7 @@ def get_settings():
 
 @router.put("/settings", response_model=Settings)
 def update_settings(body: Settings):
+    """更新全局超时设置。"""
     with get_conn() as conn:
         conn.execute(
             "UPDATE settings SET intent_timeout = ?, reason_timeout = ? WHERE rowid = 1",

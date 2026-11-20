@@ -83,6 +83,7 @@ CREATE TABLE IF NOT EXISTS scoped_counters (
 
 
 def configure(path: Path) -> None:
+    """设置库文件路径并建表/迁移（幂等，仅首次生效）。"""
     global _db_path
     if _db_path is not None:
         return
@@ -105,6 +106,7 @@ def _ensure_project_columns(conn: sqlite3.Connection) -> None:
 
 @contextmanager
 def get_conn() -> Generator[sqlite3.Connection, None, None]:
+    """打开短连接：WAL + 外键约束，成功提交、失败回滚、必关连接。"""
     assert _db_path is not None
     conn = sqlite3.connect(str(_db_path))
     conn.row_factory = sqlite3.Row

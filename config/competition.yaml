@@ -4,10 +4,11 @@ app:
   mode: "competition"
 
 model:
-  provider: "baizhi_anthropic"   # 比赛日可切换 deepseek_official_openai（DeepSeek 官方 API，OpenAI 兼容）；切换须同步平台出口白名单
-  base_url: "https://ai-api-gateway.app.baizhi.cloud/api/anthropic"
+  # 2026-11-20 起主通道为 DeepSeek 官方 API（OpenAI 兼容）；须同步平台出口白名单覆盖 api.deepseek.com。
+  provider: "deepseek_official_openai"
+  base_url: "https://api.deepseek.com"
   model: "deepseek-flash"
-  api_key_env: "BAIZHI_API_KEY"
+  api_key_env: "BAIZHI_API_KEY"   # 值 = DeepSeek 官方 API key
 
 policy:
   web_search: false

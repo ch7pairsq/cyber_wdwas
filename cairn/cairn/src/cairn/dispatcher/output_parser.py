@@ -9,6 +9,7 @@ FENCED_BLOCK_RE = re.compile(r"```(?:json)?\s*\n?(.*?)```", re.IGNORECASE | re.D
 
 
 def extract_json_object(text: str) -> dict[str, Any]:
+    """从模型输出容错提取首个 JSON 对象：先试围栏/候选段，再逐位置 raw_decode。"""
     decoder = json.JSONDecoder()
     seen: set[str] = set()
 

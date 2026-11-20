@@ -15,16 +15,20 @@ FLAG_RE = re.compile(r"flag\{[^}\s]{1,200}\}", re.IGNORECASE)
 
 
 class ContractViolation(Exception):
+    """契约校验失败：errors 为全部错误列表；code 固定 failed_contract。"""
     def __init__(self, errors: List[str]):
+        """errors 为累积的全部契约错误（一次性上报，便于一次修复）。"""
         super().__init__("; ".join(errors))
         self.errors = list(errors)
 
     @property
     def code(self) -> str:
+        """失败码：编排层按 failed_contract 记账并触发重写。"""
         return "failed_contract"
 
 
 def _error(errors: List[str], cond: bool, message: str) -> None:
+    """条件不成立时追加错误信息（累积全部错误后一次性抛出）。"""
     if not cond:
         errors.append(message)
 
@@ -110,5 +114,6 @@ def validate_worker_output(payload: Dict[str, Any], evidence_check=None) -> Dict
 
 
 def extract_flag(text: str) -> Optional[str]:
+    """从文本中提取第一个 flag{...}（无则返回 None）。"""
     match = FLAG_RE.search(text or "")
     return match.group(0) if match else None

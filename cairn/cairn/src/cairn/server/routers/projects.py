@@ -43,6 +43,7 @@ router = APIRouter(tags=["projects"])
 
 @router.get("/projects", response_model=list[ProjectSummary])
 def list_projects():
+    """列出全部项目及事实/意图/提示计数（先清理过期租约）。"""
     with get_conn() as conn:
         expire_workers(conn)
         expire_reason_leases(conn)
@@ -76,6 +77,7 @@ def list_projects():
 
 @router.post("/projects", response_model=ProjectDetail, status_code=201)
 def create_project(body: CreateProjectRequest):
+    """创建项目：写入 origin/goal 两粒种子事实与可选初始提示。"""
     with get_conn() as conn:
         pid = next_project_id(conn)
         now = utcnow()
@@ -123,6 +125,7 @@ def create_project(body: CreateProjectRequest):
 
 @router.get("/projects/{project_id}", response_model=ProjectDetail)
 def get_project(project_id: str):
+    """取项目全量详情（事实/意图/提示）。"""
     with get_conn() as conn:
         expire_workers(conn, project_id)
         expire_reason_leases(conn, project_id)
@@ -146,6 +149,7 @@ def get_project(project_id: str):
 
 @router.delete("/projects/{project_id}", status_code=204)
 def delete_project(project_id: str):
+    """删除项目（级联由外键保证）。"""
     with get_conn() as conn:
         get_project_or_404(conn, project_id)
         conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
@@ -153,6 +157,7 @@ def delete_project(project_id: str):
 
 @router.put("/projects/{project_id}/title", response_model=ProjectMeta)
 def update_project_title(project_id: str, body: UpdateProjectTitleRequest):
+    """修改项目标题。"""
     with get_conn() as conn:
         get_project_or_404(conn, project_id)
         conn.execute(
@@ -165,6 +170,7 @@ def update_project_title(project_id: str, body: UpdateProjectTitleRequest):
 
 @router.put("/projects/{project_id}/status", response_model=ProjectMeta)
 def update_project_status(project_id: str, body: UpdateProjectStatusRequest):
+    """切换项目状态：停用时释放全部 Intent 租约与 reason 锁。"""
     with get_conn() as conn:
         expire_reason_leases(conn, project_id)
         row = get_project_or_404(conn, project_id)
@@ -190,6 +196,7 @@ def update_project_status(project_id: str, body: UpdateProjectStatusRequest):
 
 @router.post("/projects/{project_id}/reason/claim", response_model=ProjectMeta)
 def claim_project_reason(project_id: str, body: ReasonClaimRequest):
+    """领取项目 reason 锁（单持有者；同 worker 幂等）。"""
     with get_conn() as conn:
         check_project_active(conn, project_id)
         expire_reason_leases(conn, project_id)
@@ -218,6 +225,7 @@ def claim_project_reason(project_id: str, body: ReasonClaimRequest):
 
 @router.post("/projects/{project_id}/reason/heartbeat", response_model=ProjectMeta)
 def heartbeat_project_reason(project_id: str, body: HeartbeatRequest):
+    """reason 锁续期（校验持有者）。"""
     with get_conn() as conn:
         check_project_active(conn, project_id)
         expire_reason_leases(conn, project_id)
@@ -239,6 +247,7 @@ def heartbeat_project_reason(project_id: str, body: HeartbeatRequest):
 
 @router.post("/projects/{project_id}/reason/release", response_model=ProjectMeta)
 def release_project_reason(project_id: str, body: HeartbeatRequest):
+    """释放项目 reason 锁。"""
     with get_conn() as conn:
         check_project_active(conn, project_id)
         expire_reason_leases(conn, project_id)
@@ -256,6 +265,7 @@ def release_project_reason(project_id: str, body: HeartbeatRequest):
 
 @router.post("/projects/{project_id}/complete", response_model=Intent)
 def complete_project(project_id: str, body: CompleteRequest):
+    """宣告项目完成：写指向 goal 的完成 Intent 并置状态 completed。"""
     with get_conn() as conn:
         check_project_active(conn, project_id)
         expire_reason_leases(conn, project_id)
@@ -302,6 +312,7 @@ def complete_project(project_id: str, body: CompleteRequest):
 
 @router.post("/projects/{project_id}/reopen", response_model=ReopenResponse)
 def reopen_project(project_id: str, body: ReopenRequest):
+    """重开已完成项目：删除完成 Intent，写入反馈事实与新 Intent，状态回 active。"""
     with get_conn() as conn:
         expire_reason_leases(conn, project_id)
         check_project_completed(conn, project_id)

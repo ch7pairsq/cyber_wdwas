@@ -13,7 +13,9 @@ from typing import Dict, List, Tuple, Union
 
 
 class ArchiveRejected(Exception):
+    """压缩包任一防护项不达标即拒绝；reason_code 标识具体项。"""
     def __init__(self, reason_code: str, detail: str = ""):
+        """reason_code 为稳定错误码（ZIP_TRAVERSAL/ZIP_RATIO 等）。"""
         super().__init__(detail or reason_code)
         self.reason_code = reason_code
         self.detail = detail
@@ -21,6 +23,7 @@ class ArchiveRejected(Exception):
 
 @dataclass(frozen=True)
 class ArchiveLimits:
+    """解压防护上限：条目数/单条/总量/深度/压缩比/路径长/算法与符号链接禁令。"""
     max_entries: int = 256
     max_entry_bytes: int = 8 * 1024 * 1024
     max_total_bytes: int = 32 * 1024 * 1024
@@ -51,6 +54,7 @@ def _parts(name: str) -> List[str]:
 
 
 def _check_member(info: zipfile.ZipInfo, limits: ArchiveLimits) -> List[str]:
+    """单条目静态检查：路径穿越/深度/加密/算法/符号链接/单条大小。"""
     name = info.filename
     if len(name) > limits.max_path_length:
         raise ArchiveRejected("ZIP_PATH", "path too long: {} chars".format(len(name)))

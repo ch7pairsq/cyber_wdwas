@@ -33,6 +33,7 @@ class LocalProcess:
         timeout_seconds: int | None = None,
         term_grace_seconds: int = 5,
     ):
+        """command 为 argv；独立进程组 + SIGTERM→宽限→SIGKILL 关停策略。"""
         self.command = command
         self.env = env
         self._cwd = cwd
@@ -48,6 +49,7 @@ class LocalProcess:
         self._kill_lock = threading.Lock()
 
     def start(self) -> None:
+        """启动宿主子进程（独立会话）并开启双输出流采集线程。"""
         self._process = subprocess.Popen(
             self.command,
             cwd=self._cwd,
@@ -69,6 +71,7 @@ class LocalProcess:
         self._stderr_thread.start()
 
     def communicate(self, timeout: float | None) -> ProcessResult:
+        """等待结束（超时走 SIGTERM→SIGKILL），回收输出流并返回结果。"""
         assert self._process is not None
         wait_for = float(self._timeout_seconds) if self._timeout_seconds is not None else timeout
         try:
@@ -95,9 +98,11 @@ class LocalProcess:
         )
 
     def kill(self) -> None:
+        """强杀进程组。"""
         self._terminate()
 
     def cancel(self, reason: str) -> None:
+        """外部取消：记录原因并终止进程组（幂等）。"""
         if self._cancel_reason is None:
             self._cancel_reason = reason
         self._terminate()

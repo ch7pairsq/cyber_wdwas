@@ -98,17 +98,19 @@ policy:
   - 10.201.0.0/16
 
 model:
-  provider: baizhi_anthropic
-  base_url: https://ai-api-gateway.app.baizhi.cloud/api/anthropic
+  # 2026-11-20 切换 DeepSeek 官方 API（OpenAI Chat Completions 兼容，api.deepseek.com）。
+  provider: deepseek_official_openai
+  base_url: https://api.deepseek.com
   model: deepseek-flash
-  api_key_env: BAIZHI_API_KEY
+  api_key_env: BAIZHI_API_KEY   # 注入名不变；值为 DeepSeek 官方 API key
   max_tokens: 4096
   tools_enabled: true
-  # 双模型换挡：pro_model 非空时，stage>=pro_from_stage 的换路径回合与提交
-  # 前评审路由到 Pro（同一网关同一凭据）；调用失败/每题次数超限自动回退。
-  pro_model: ""
+  # 双模型换挡：stage>=pro_from_stage 的换路径回合与提交前评审路由到 Pro
+  # （同一官方端点同一凭据）；调用失败/每题次数超限自动回退主模型（fail-open）。
+  pro_model: deepseek-v4-pro
   pro_from_stage: 2
-  # 思考模式按步数路线阶段分配预算（token），0=关：侦察不开思考、攻坚多想。
+  # 思考模式按步数路线阶段分配预算（token），0=关：侦察不开思考、攻坚多想；
+  # 官方通道映射为 thinking: {"type": "enabled"}（攻坚档 reasoning_effort=high）。
   thinking_by_stage: [0, 4000, 8000, 0, 0]
 
 storage:

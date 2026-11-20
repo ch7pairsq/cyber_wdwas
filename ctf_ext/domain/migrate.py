@@ -1,4 +1,4 @@
-"""扩展表 migration：不改 Cairn 原生 8 张表，追加独立 schema（§6、§17、附录 F-3）。
+"""扩展表 migration：不改内嵌调度框架原生 8 张表，追加独立 schema（§6、§17、附录 F-3）。
 
 扩展表：challenges / intents_ext / attempts / evidence / lessons / submissions
 / results_ext / schema_migrations。所有表幂等创建，WAL 开启。

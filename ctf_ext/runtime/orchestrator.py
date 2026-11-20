@@ -29,6 +29,7 @@ from .watchdog import ClaimTimeout, DeadlineGuard, recover_expired_leases
 
 
 class Orchestrator:
+    """编排主循环：领取→执行→门控→落库→提交的全流程状态机与资源守护。"""
     # deadline 后收尾宽限（秒）：真实平台提交回执往返可达 client_timeout=40s，
     # 只给 1s 会把在途回执关在门外——该题永远停在 SENDING，分数丢失且
     # 正式赛一次性窗口无重赛机会。排空即返回，happy path 无额外墙钟。
@@ -49,6 +50,11 @@ class Orchestrator:
                  planner=None, max_intents_per_challenge: int = 4,
                  parallel_agents: int = 1, endgame_token_bonus: float = 0.0,
                  endgame_min_seconds: float = 300.0):
+        """编排器装配：持有黑板/调度器/Worker/Harness 及门控与提交网关。
+
+        parallel_agents 决定 step() 循环线程数（题内互斥由调度器保证）；
+        reviewer_factory 为提交前三门评审提供模型审阅者（llm 模式才有）。
+        """
         self._harness = harness
         self._board = board
         self._scheduler = scheduler
@@ -121,6 +127,7 @@ class Orchestrator:
             self._policy.update_limits(dl.get("max_single_bytes", 0), dl.get("max_total_bytes", 0))
 
     def reload_config_if_changed(self) -> bool:
+        """热配置文件变化且通过校验时应用新值；变化写入事件与快照（审计）。"""
         if self._hot is None or not self._hot.reload_if_changed():
             return False
         self.apply_config(self._hot.config)
@@ -170,6 +177,7 @@ class Orchestrator:
             _os.replace(tmp, dest)
 
     def bootstrap(self) -> List[Dict]:
+        """启动 Harness、读题并登记题目与种子 Intent；返回本轮题目清单。"""
         self._harness.startup()
         tasks = self._harness.read_tasks()
         for task in tasks:
@@ -210,6 +218,7 @@ class Orchestrator:
 
     # -------------------------------------------------------------- one claim
     def _payload(self, result) -> Dict:
+        """WorkerResult → B.2 契约校验的标准 dict（validate_worker_output 输入）。"""
         return {
             "task_id": result.intent_id,
             "status": result.status,
@@ -257,6 +266,7 @@ class Orchestrator:
         return challenge
 
     def _timeout_result(self, claim, started: float) -> WorkerResult:
+        """单题硬超时的标准化失败结果：只释放该题，不拖死整场。"""
         return WorkerResult(
             claim.intent_id, self._worker_name, claim.attempt_no, claim.challenge_id,
             claim.strategy_key, "failed", summary=["单题执行超时，已释放该题供后续重试"],
@@ -325,6 +335,7 @@ class Orchestrator:
                 "gate": {"status": decision.status, "level": decision.level} if decision else None}
 
     def _run_worker(self, claim, challenge, started):
+        """调 Worker 执行：硬超时用 DeadlineGuard（SIGALRM）可中断；异常转可重试失败。"""
         try:
             if self._claim_timeout:
                 with DeadlineGuard(self._claim_timeout):
@@ -350,6 +361,7 @@ class Orchestrator:
         return result
 
     def _validate_contract(self, claim, result) -> None:
+        """B.2 契约校验：不合格输出降级为可重试失败，清空候选答案与事实。"""
         check = self._evidence.verify if self._evidence is not None else None
         try:
             validate_worker_output(self._payload(result), evidence_check=check)
@@ -365,6 +377,7 @@ class Orchestrator:
             # 不能因为一次格式错误就把整题永久 stopped。
 
     def _record_usage(self, result) -> None:
+        """累计资源用量到进程内指标（token/工具调用/耗时）。"""
         usage = result.resource_usage or {}
         tokens = int(usage.get("model_tokens") or 0)
         if tokens:
@@ -377,6 +390,7 @@ class Orchestrator:
             self._metrics.observe("attempt.wall_seconds", wall)
 
     def _evaluate_candidate(self, claim, result, started):
+        """候选答案过三门 FlagGate：confirmed 才会进入提交队列；超时按失败处理。"""
         decision = None
         if not result.candidate_answer:
             return decision
@@ -409,10 +423,12 @@ class Orchestrator:
         return decision
 
     def _persist_result(self, claim, result, decision):
+        """结果幂等落库；Gate 决策与提交入队在同一事务内原子提交。"""
         key = "{}-{}".format(claim.intent_id, claim.attempt_no)
         submission_keys = []
 
         def persist_gate(db):
+            """事务钩子：Gate 决策落库；确认态题同步入提交 Outbox（同事务原子）。"""
             if decision is not None:
                 self._gate.record(db, decision)
                 if decision.status == "confirmed":
@@ -430,12 +446,14 @@ class Orchestrator:
 
     @staticmethod
     def _write_failure_response(claim, result, write_error):
+        """结果写库失败时的标准化响应（write_failed 状态）。"""
         return {"intent_id": claim.intent_id, "challenge_id": claim.challenge_id,
                 "status": "write_failed", "outcome": result.outcome,
                 "candidate_answer": None, "submission": None, "gate": None,
                 "write_error": write_error}
 
     def _record_side_effects(self, claim, challenge, result, decision, receipt) -> None:
+        """结果落库后的副作用：教训蒸馏、Gate 事件、事实写入与指标更新。"""
         if receipt.first and receipt.attempt_id:
             try:
                 with self._board.transaction() as db:
@@ -470,6 +488,7 @@ class Orchestrator:
                                          {"error": type(exc).__name__})
 
     def _maybe_plan(self, claim, challenge, result, decision, receipt) -> None:
+        """按结果规划后续 Intent（no_signal/被拒时扩展）；失败不影响已落库结果。"""
         if self._planner is None or not receipt.first:
             return
         try:
@@ -491,9 +510,11 @@ class Orchestrator:
                                      {"error": type(exc).__name__})
 
     def _solved(self):
+        """查询已被受理的题目集合（读视图，主循环用于判停）。"""
         return self._board.accepted_challenge_ids()
 
     def _collect_submissions(self, events):
+        """把提交网关回执转成指标/延迟观测。"""
         for event in events:
             status = event.get("status", "unknown")
             self._metrics.incr("submissions." + str(status).lower())
@@ -594,6 +615,11 @@ class Orchestrator:
 
     # ---------------------------------------------------------------- run loop
     def run(self, max_seconds: float = 120.0) -> Dict:
+        """主编排循环：引导 → 回收租约 → 串行或并行执行 → 排空提交 → 汇总报告。
+
+        退出条件：墙钟到 deadline、全部题目受理、或全局预算耗尽；返回
+        RunSummary 数据（任务/结果/指标/质量复盘/执行模式）。
+        """
         deadline = self._clock() + max_seconds
         factory = getattr(self._worker, "_control_factory", None)
         if factory is not None:
@@ -809,5 +835,6 @@ class Orchestrator:
         return granted
 
     def _touch_heartbeat(self) -> None:
+        """刷新进程心跳文件（供外部 supervisor 判活；未配置时为 no-op）。"""
         if self._heartbeat is not None:
             self._heartbeat.touch()

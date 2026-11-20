@@ -8,20 +8,28 @@ from .schema import ChallengeInput, HarnessContext, RunSummary, Submission, Subm
 
 
 class HarnessUnavailable(Exception):
+    """适配器能力不可用（无附件/无凭证/平台不可达）时的统一异常。"""
     pass
 
 
 class HarnessAdapter(ABC):
+    """唯一平台协议边界：题目读取、附件、提交与回执全部经此抽象。"""
     @abstractmethod
-    def startup(self) -> HarnessContext: ...
+    def startup(self) -> HarnessContext:
+        """建立协议上下文（必须先于 read_tasks）。"""
+        ...
 
     @abstractmethod
-    def read_tasks(self) -> List[ChallengeInput]: ...
+    def read_tasks(self) -> List[ChallengeInput]:
+        """拉取并标准化全部题目输入。"""
+        ...
 
     def read_attachment(self, ref: str, *, max_bytes: int):
+        """按引用读取附件；不支持附件的平台默认拒绝。"""
         raise HarnessUnavailable("attachments not supported by this adapter")
 
     def emit_progress(self, event: dict) -> None:
+        """进度上报钩子（可选实现；默认丢弃）。"""
         pass
 
     def ensure_environment(self, challenge_id: str):
@@ -37,14 +45,19 @@ class HarnessAdapter(ABC):
         return None
 
     @abstractmethod
-    def submit_answer(self, submission: Submission) -> SubmitReceipt: ...
+    def submit_answer(self, submission: Submission) -> SubmitReceipt:
+        """提交候选答案并返回回执（实现方自行保证幂等）。"""
+        ...
 
     def get_receipt(self, idempotency_key: str) -> Optional[SubmitReceipt]:
         """UNKNOWN 时只查询回执，不重发（附录 E）。"""
         return None
 
     @abstractmethod
-    def finalize(self, summary: RunSummary) -> dict: ...
+    def finalize(self, summary: RunSummary) -> dict:
+        """上报整轮汇总并结束本次参赛。"""
+        ...
 
     def shutdown(self) -> None:
+        """释放平台资源（默认无操作）。"""
         pass

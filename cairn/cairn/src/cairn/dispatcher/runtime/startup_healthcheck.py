@@ -14,6 +14,7 @@ DETAIL_PREVIEW_LIMIT = 60
 
 @dataclass(slots=True)
 class StartupHealthcheckResult:
+    """单个 worker 的启动探活结果：状态码/耗时/详情与探测端点。"""
     worker_name: str
     ok: bool
     status: int | None
@@ -27,6 +28,7 @@ def run_startup_healthchecks(
     *,
     show_commands: bool = False,
 ) -> list[StartupHealthcheckResult]:
+    """并行探测全部 worker 健康端点，输出报告并返回结果列表。"""
     workers = list(config.workers)
     parallelism = max(1, min(len(workers), config.runtime.max_workers, 8))
     LOG.info("[*] Startup healthcheck: workers=%s parallelism=%s", len(workers), parallelism)
@@ -49,6 +51,7 @@ def run_startup_healthchecks(
 
 
 def format_failure_summary(results: list[StartupHealthcheckResult]) -> str:
+    """汇总失败项为一行错误文本（启动期快速失败用）。"""
     failed = [result for result in results if not result.ok]
     if not failed:
         return "startup healthchecks failed for all workers"

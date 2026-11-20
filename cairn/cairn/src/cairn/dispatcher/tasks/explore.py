@@ -37,6 +37,7 @@ def run_explore_task(
     worker: WorkerConfig,
     cancellation: TaskCancellation,
 ) -> str:
+    """explore 任务：执行单个 Intent 并把结论写回事实，返回任务终态串。"""
     driver = get_driver(worker.type, config.runtime.execution)
     task_started = time.perf_counter()
     healthcheck_timeout = config.runtime.healthcheck_timeout

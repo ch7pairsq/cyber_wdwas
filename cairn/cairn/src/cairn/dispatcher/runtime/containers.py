@@ -17,22 +17,27 @@ LOG = logging.getLogger(__name__)
 
 
 class ContainerManager:
+    """容器执行后端：每项目一容器，负责生命周期/清理/文件注入与 exec 进程。"""
     _PREFIX = "cairn-dispatch-"
 
     def __init__(self, config: ContainerConfig):
+        """连接本机 Docker daemon；按容器名建并发锁。"""
         self._config = config
         self._client = docker.from_env()
         self._ensure_running_locks: dict[str, threading.Lock] = {}
         self._ensure_running_locks_guard = threading.Lock()
 
     def close(self) -> None:
+        """关闭 Docker 客户端。"""
         self._client.close()
 
     def container_name(self, project_id: str) -> str:
+        """项目 id → 规范化容器名（统一前缀）。"""
         sanitized = project_id.replace("/", "-")
         return f"{self._PREFIX}{sanitized}"
 
     def ensure_running(self, project_id: str) -> str:
+        """确保项目容器运行中（不存在则创建，同名冲突则复用），返回容器名。"""
         name = self.container_name(project_id)
         with self._ensure_running_lock(name):
             return self._ensure_running_locked(project_id, name)
@@ -80,6 +85,7 @@ class ContainerManager:
             return lock
 
     def inspect_state(self, name: str) -> str | None:
+        """查询容器状态（running/exited/...）；不存在返回 None。"""
         container = self._get_container(name)
         if container is None:
             return None
@@ -91,6 +97,7 @@ class ContainerManager:
         return str(state) if state else None
 
     def cleanup_completed(self, project_id: str) -> bool:
+        """项目完成后处置：remove 模式删容器，否则停容器。"""
         name = self.container_name(project_id)
         state = self.inspect_state(name)
         if state is None:
@@ -119,6 +126,7 @@ class ContainerManager:
         return True
 
     def cleanup_stopped(self, project_id: str) -> bool:
+        """项目停止后处置：仍在运行则停掉。"""
         name = self.container_name(project_id)
         state = self.inspect_state(name)
         if state != "running":
@@ -135,6 +143,7 @@ class ContainerManager:
         return self.inspect_state(name) != "running"
 
     def cleanup_orphan(self, name: str) -> bool:
+        """清理孤儿容器（有名字但不在管理清单）：强制删除。"""
         state = self.inspect_state(name)
         if state is None:
             return True
@@ -150,6 +159,7 @@ class ContainerManager:
         return self.inspect_state(name) is None
 
     def managed_container_names(self) -> list[str]:
+        """列出全部带管理前缀的容器名（孤儿检测用）。"""
         try:
             containers = self._client.containers.list(all=True)
         except DockerException as exc:
@@ -158,6 +168,7 @@ class ContainerManager:
         return sorted(container.name for container in containers if container.name.startswith(self._PREFIX))
 
     def needs_completed_cleanup(self, project_id: str) -> bool:
+        """完成后是否仍有清理动作要做。"""
         name = self.container_name(project_id)
         state = self.inspect_state(name)
         if state is None:
@@ -167,9 +178,11 @@ class ContainerManager:
         return state == "running"
 
     def needs_orphan_cleanup(self, name: str) -> bool:
+        """该名字容器仍存在则视为孤儿需要清理。"""
         return self.inspect_state(name) is not None
 
     def needs_stopped_cleanup(self, project_id: str) -> bool:
+        """停止后容器若仍运行则需清理。"""
         return self.inspect_state(self.container_name(project_id)) == "running"
 
     def build_exec_process(
@@ -180,6 +193,7 @@ class ContainerManager:
         timeout_seconds: int | None = None,
         kill_after_seconds: int = 5,
     ) -> ManagedProcess:
+        """构造容器内 exec 进程：可选在命令前包 timeout 保底强杀。"""
         container = self._require_container(container_name)
         argv: list[str] = []
         if timeout_seconds is not None:
@@ -195,6 +209,7 @@ class ContainerManager:
         return ManagedProcess(container, argv, env)
 
     def write_text_file(self, container_name: str, path: str, content: str) -> None:
+        """经 tar 归档向容器内写文本文件。"""
         archive_path, archive = self._text_file_archive(path, content)
         container = self._require_container(container_name)
         try:

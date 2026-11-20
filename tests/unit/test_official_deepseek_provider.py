@@ -1,7 +1,8 @@
 """DeepSeek 官方 API 通道（OpenAI 兼容）的离线回归；不访问网络、不调用真实模型。
 
-2026-11-18 用户决定：比赛日可切换 DeepSeek 官方 API，Provider 层预留该接口。
-本文件验证：线上格式翻译、响应解析、白名单、传输安全姿态与配置校验。
+2026-11-18 用户决定预留官方通道接口；2026-11-20 用户确认切换为默认主通道
+（模型 ID：deepseek-flash / deepseek-v4-pro，密钥改用官方 key）。
+本文件验证：线上格式翻译、响应解析、白名单、思考参数映射、传输安全姿态与配置校验。
 """
 import json
 import os
@@ -101,8 +102,27 @@ def test_chat_completions_payload_headers_and_usage():
 def test_rejects_other_endpoints_and_models():
     for url in (DEFAULT_BASE_URL + ".evil", DEFAULT_BASE_URL + "/v1", "http://api.deepseek.com/"):
         expect(ProviderConfigError, lambda url=url: DeepSeekOfficialProvider(api_key="x", base_url=url))
-    for model in ("deepseek-flash", "gpt-4o", "other"):
+    for model in ("deepseek-chat", "deepseek-reasoner", "gpt-4o", "other"):
         expect(ProviderConfigError, lambda model=model: DeepSeekOfficialProvider(api_key="x", model=model))
+    # 官方双模型均应可构造（默认 flash；换挡 pro 走 model_override）。
+    assert DeepSeekOfficialProvider(api_key="x", model="deepseek-v4-pro")._model == "deepseek-v4-pro"
+
+
+def test_thinking_budget_maps_to_official_fields():
+    # 攻坚档（>=8000）：thinking enabled + reasoning_effort=high（官方示例口径）。
+    _, session = invoke(thinking_budget=8000)
+    payload = session.calls[0][1]["json"]
+    assert payload["thinking"] == {"type": "enabled"}
+    assert payload["reasoning_effort"] == "high"
+    # 轻思考档：只开 thinking，不指定 effort（由官方默认）。
+    _, session = invoke(thinking_budget=4000)
+    payload = session.calls[0][1]["json"]
+    assert payload["thinking"] == {"type": "enabled"}
+    assert "reasoning_effort" not in payload
+    # 侦察档（0/未传）：不下发思考字段。
+    _, session = invoke()
+    assert "thinking" not in session.calls[0][1]["json"]
+    assert "reasoning_effort" not in session.calls[0][1]["json"]
 
 
 def test_missing_key_fails_before_transport():
@@ -184,7 +204,7 @@ def test_unpermitted_and_foreign_responses_are_rejected():
                                     "choices": [{"message": {"role": "assistant", "content": "x"},
                                                  "finish_reason": "stop"}]})
     expect(ProviderError, lambda: invoke(foreign))
-    empty = FakeResponse(payload={"model": "deepseek-reasoner",
+    empty = FakeResponse(payload={"model": DEFAULT_MODEL,
                                   "choices": [{"message": {"role": "assistant", "content": None,
                                                            "reasoning_content": "思考"},
                                                "finish_reason": "stop"}]})
@@ -209,9 +229,19 @@ def test_repr_never_contains_key():
 def test_config_validation_accepts_official_channel_and_rejects_mismatch():
     official = dict(config(), model={"provider": PROVIDER_NAME})
     assert not validate_config(official)
+    # 官方双模型均可作为主模型/换挡模型。
+    assert not validate_config(dict(config(), model={"provider": PROVIDER_NAME, "model": "deepseek-v4-pro"}))
+    assert not validate_config(dict(config(), model={"provider": PROVIDER_NAME, "pro_model": "deepseek-v4-pro"}))
+    assert not validate_config(dict(config(), model={"provider": PROVIDER_NAME,
+                                                     "pro_model": "deepseek-v4-pro", "pro_from_stage": 2}))
     for override in ({"model": {"provider": PROVIDER_NAME, "base_url": "https://api.deepseek.com.evil"}},
-                     {"model": {"provider": PROVIDER_NAME, "model": "deepseek-flash"}},
+                     {"model": {"provider": PROVIDER_NAME, "model": "deepseek-chat"}},
                      {"model": {"provider": PROVIDER_NAME, "model": "other"}},
+                     {"model": {"provider": PROVIDER_NAME, "pro_model": "deepseek-chat"}},
+                     {"model": {"provider": PROVIDER_NAME, "pro_model": "gpt-4o"}},
+                     {"model": {"provider": PROVIDER_NAME, "pro_from_stage": -1}},
+                     {"model": {"provider": PROVIDER_NAME, "pro_from_stage": "2"}},
+                     {"model": {"provider": PROVIDER_NAME, "pro_from_stage": True}},
                      {"model": {"provider": "external"}}):
         assert validate_config(dict(config(), **override))
     # 公司网关通道口径不变：官方端点/模型仍按错配拒绝。
@@ -229,4 +259,10 @@ def test_cli_make_provider_selects_official_channel():
         assert isinstance(provider, DeepSeekOfficialProvider)
         assert provider._api_key == "injected-test-key"
         assert provider._model == DEFAULT_MODEL
+        # 双模型换挡：model_override 构造同端点同凭据的 Pro 实例，仅模型 ID 不同。
+        pro = _make_provider({"model": {"provider": PROVIDER_NAME, "model": DEFAULT_MODEL}},
+                             model_override="deepseek-v4-pro")
+        assert isinstance(pro, DeepSeekOfficialProvider)
+        assert pro._model == "deepseek-v4-pro" and pro._api_key == provider._api_key
+        assert pro is not provider
     expect(SystemExit, lambda: _make_provider({"model": {"provider": "external"}}))

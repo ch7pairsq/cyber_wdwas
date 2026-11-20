@@ -11,10 +11,10 @@
 
 ## 已确认的模型配置
 
-- 主通道：公司百智云网关，Base URL https://ai-api-gateway.app.baizhi.cloud/api/anthropic ，Anthropic Messages 兼容协议（POST /v1/messages、x-api-key、anthropic-version），唯一 model ID deepseek-flash。
-- 备选通道（2026-11-18 用户新增）：DeepSeek 官方 API，OpenAI Chat Completions 兼容协议（POST /chat/completions、Bearer 鉴权），Base URL 固定 https://api.deepseek.com ，model ID 仅允许 deepseek-chat／deepseek-reasoner。切换只改配置 `model.provider`（`baizhi_anthropic` ↔ `deepseek_official_openai`），业务代码零改动；切换前须确认平台出口白名单覆盖 api.deepseek.com，真实调用另行明确授权。本条修订此前"不直连厂商"的限制。
+- 主通道（2026-11-20 用户确认切换）：DeepSeek 官方 API，OpenAI Chat Completions 兼容协议（POST /chat/completions、Bearer 鉴权），Base URL 固定 https://api.deepseek.com ，model ID 仅允许 deepseek-flash／deepseek-v4-pro（已真实调用验收）。双模型换挡：`model.pro_model=deepseek-v4-pro` 启用，stage≥pro_from_stage 的换路径回合与提交前评审路由 Pro，调用失败/每题次数超限回退 flash（fail-open）。切换只改配置 `model.provider`（`deepseek_official_openai` ↔ `baizhi_anthropic`），业务代码零改动；出口白名单须覆盖 api.deepseek.com。
+- 备选通道（保留）：公司百智云网关，Base URL https://ai-api-gateway.app.baizhi.cloud/api/anthropic ，Anthropic Messages 兼容协议（POST /v1/messages、x-api-key、anthropic-version），唯一 model ID deepseek-flash。
 - 两条通道互斥，参赛候选当前默认仍走公司网关。两通道执行同样的传输纪律：不继承任意 HTTP_PROXY、不跟随重定向、校验 TLS、不发送 tools/web_search 定义、响应大小上限，对非文本工具响应和模型 ID 不一致的响应拒绝处理。网关服务端实际模型路由仍须公司侧确认；两条通道的真实联调均未执行，本轮没有读取、使用或提交真实 Key，也没有付费调用。
-- 凭据环境变量固定为 BAIZHI_API_KEY（2026-11-18 用户确认，两条通道共用；切换通道时变量名不变，值对应所选通道的 Key）。Key 只能运行时注入，不打入镜像，不写配置文件与数据库快照。
+- 凭据环境变量固定为 BAIZHI_API_KEY（2026-11-18 用户确认，两条通道共用；切换通道时变量名不变，值对应所选通道的 Key；2026-11-20 起默认值为 DeepSeek 官方 API key，本机来源 ~/chaitin_agent/chaitin_ds_key）。Key 只能运行时注入，不打入镜像，不写配置文件与数据库快照。
 - 可选 Key 落盘缓存（2026-11-18 新增，默认关闭）：环境变量在进程重启与容器重启时都会保留，只有"平台重建容器且不重注入、并挂载持久卷"的场景才需要落盘兜底。启用后缓存文件 0600 原子写入，不进 SQLite／证据／报告／日志，本轮运行正常结束时清理；是否启用待平台确认挂载与重启语义后再定。
 
 接口路径名称中的 anthropic 代表兼容协议，不代表调用 Claude；两条通道请求中的模型都是用户指定的 DeepSeek 系列。Provider 不发送 tools/web_search 定义，对非文本工具响应和模型 ID 不一致的响应拒绝处理。
@@ -43,11 +43,13 @@
 - **应用检查不等于不可绕过的网络隔离。** 允许执行 Python/题目代码时仍可能绕过命令名检查。正式环境必须由平台在网络出口层限制为公司模型网关，以及官方协议明确要求的任务／附件／提交端点；这些平台端点不属于公共网页搜索，但必须有官方授权。
 - 不能只写环境变量或提示词就宣称已经封禁全部出站访问。现阶段未配置平台出口白名单，也未开放开发容器的模型网络出口。
 
-## 当前启动门禁
+## 当前启动门禁（2026-11-20 更新）
 
-competition 目标的默认入口为 python -m ctf_ext.competition，当前明确退出 78，说明官方 Harness 规范与入口尚未接通。它不会偷偷回退 Mock、安装包、联网或触发比赛提交。即使人为设置 official_sdk_ready=true，现有 CLI 官方接线也仍然未完成。
+competition 目标的默认入口已从旧的退出 78 占位改为 `scripts/run_official.sh`：supervisor（心跳判活 + ≤3 次重启 + 总墙钟）包裹 `python -m ctf_ext run --mode llm --config config/official-arena.yaml`，对接实际平台的 Arena 协议（Harness 托管拉起镜像）。旧模块 `python -m ctf_ext.competition`（退出 78）保留为手动门禁，不再是容器入口。
 
-这是候选镜像的误提交保护，不是生产可用的参赛入口。禁止把它作为成功运行的参赛镜像发布。
+无凭据注入时的预期行为：缺 `ARENA_SOLVER_TOKEN` 即 SystemExit 快速失败，supervisor 重启 ≤3 次后以非零码退出；不回退 Mock、不安装包、不触发提交。正式运行依赖平台托管注入 `BAIZHI_API_KEY`、`ARENA_SOLVER_TOKEN`、`ARENA_BASE_URL`（可选 `ARENA_PROXY` / `ARENA_NETWORK_CIDR`）。注意 `app.mode` 保持 `practice`：`app.mode=competition` 会触发遗留校验（强制 `protocol=official`）导致无法启动。
+
+无凭据快速失败已在宿主机冒烟验证（短窗口单次失败、300s 窗口重启 3 次后退出 1）；镜像重建与断网复验见下文验收记录。
 
 ## 等待用户／官方提供
 
@@ -69,7 +71,7 @@ docker build --target competition \
 docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges:true \
   --entrypoint python cyber-wdwas:competition-candidate /app/docker/check_competition.py
 
-# 当前预期退出 78；不是运行成功，也不能作为参赛通过依据。
+# 2026-11-20 起默认入口为 run_official.sh；无凭据时预期有限重启后非零退出。
 docker run --rm --network none --read-only --cap-drop ALL \
   cyber-wdwas:competition-candidate
 ~~~
@@ -86,3 +88,40 @@ docker run --rm --network none --read-only --cap-drop ALL \
 - 候选默认启动实测退出 **78**，只报告官方 Harness 未接通；这是拒绝启动验证通过，不是参赛验收通过。未注入 Key、未调用模型、未推送镜像或提交比赛。
 - 日志位于 `/root/cyber-wdwas-docker/logs/build-competition-final.log`、`container-competition-check-final.log`、`container-competition-entry-final.log`、`container-competition-exit-final.log`；实际容器限制与镜像 ID 另见 `container-security-final.json`。
 - 主机提示不支持 swap 限额；内存限额不能被描述为已同时验证 swap 限额。平台资源和网络约束仍待正式验收。
+
+## 2026-11-20 入口接线与冒烟记录
+
+### 改动
+
+- Dockerfile competition 阶段：`ENTRYPOINT` 由 `python -m ctf_ext.competition`（退出 78 占位）改为 `bash /app/scripts/run_official.sh`；release-status 标签更新为 `official-arena-entry-wired`。旧门禁模块保留，手动执行 `python -m ctf_ext.competition` 仍退出 78（已复验）。
+- `scripts/run_official.sh` 增加 `cd "$ROOT"`：`-m ctf_ext` 的模块解析不再依赖平台继承的 workdir 或 PYTHONPATH。
+- README 与本文件"当前启动门禁"描述同步更新。
+
+### 远程构建主机源码重同步
+
+- 旧源码目录整体 `mv` 备份至 `/root/cyber-wdwas-docker/backup-source-20261120`（保留 inode，未中断运行中的 ctf-debug 容器挂载），并清理了此前误同步到根目录的散落文件。
+- 按 `git ls-files` 同步 322 个跟踪文件；**此前远程 `config/` 缺少 `official-arena.yaml`**（正式赛入口依赖它），本次已补齐。
+
+### 验证结果（dev 镜像挂载新源码；--network none、只读根文件系统、cap-drop ALL、非 root）
+
+| 场景 | 结果 |
+| --- | --- |
+| 30s 窗口、无凭据 | banner → `arena harness requires ARENA_BASE_URL and ARENA_SOLVER_TOKEN` → 退出 1，无重启循环 |
+| 300s 窗口、无凭据 | 同上失败信息，supervisor 重启 3/3 后退出 1 |
+| 假凭据（fake token/key）、断网 | 配置解析 → Provider 构造 → Arena `startup()` GET `/openapi/v1/challenges/help` → `Network is unreachable` → `ArenaProtocolError` → 退出 1；无提交、无 Mock 回退、无挂起 |
+| 手动门禁模块 | `python -m ctf_ext.competition` → 退出 78（语义保留） |
+
+假凭据仅为占位字符串，断网环境下未触达任何真实服务。
+
+### 镜像重建与离线验收（2026-11-20，代理恢复后完成）
+
+- 出站恢复方式：用户提供公司代理 `http://proxy.in.chaitin.net:8123`。宿主机与默认网桥容器内均实测 `deb.debian.org`=200、`pypi.org`=200 后，仅以 **build-arg** 方式传入构建（`HTTP_PROXY/HTTPS_PROXY/http_proxy/https_proxy`）；代理地址不进镜像层与 history（已核对成品镜像 env 无代理变量）。
+- 重建成功：`cyber-wdwas:competition-candidate`，本地镜像 ID `sha256:ebffa5e49fe4484f087018258b9a6a2ad0782cdbac67f9948906b663a0afb96d`（短 ID `ebffa5e49fe4`），linux/amd64，Python 3.12.16，工具链 ctf 层 33 个工具。构建日志：`/root/cyber-wdwas-docker/logs/build-competition-arena-20261120-proxy.log`。
+- 断网加固复验（`--network none --read-only --cap-drop ALL --security-opt no-new-privileges:true`）：`check_competition.py` 通过（offline_check=passed、cairn 0.2.1、无 pip/uv/ensurepip/apt 入口、无 docker socket、无 /app/.env）。
+- 成品镜像入口核对：`ENTRYPOINT=["bash","/app/scripts/run_official.sh"]`、USER 10001:10001、标签 `official-arena-entry-wired`。
+- 成品镜像入口冒烟（均 `--network none`）：30s 无凭据 → banner + ARENA_SOLVER_TOKEN 缺失 → 退出 1；300s 无凭据 → supervisor 重启 3/3 后退出 1；假凭据 → Arena `startup()` GET `/openapi/v1/challenges/help` → `Network is unreachable` → `ArenaProtocolError` → 退出 1。假凭据为占位字符串，未触达真实服务。
+
+### 仍未验收
+
+- 真实凭据与平台的端到端联调（BAIZHI_API_KEY 真实调用、Arena 任务/附件/提交回执）未执行，需要明确授权后在正式平台进行。
+- 镜像交付方式未定：仓库推送（`portus.in.chaitin.net`，需确认命名空间/凭据与推送授权）或 `docker save` 文件上传（需平台通道与大小限制）。当前未推送、未上传。

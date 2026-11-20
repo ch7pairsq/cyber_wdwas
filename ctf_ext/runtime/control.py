@@ -7,20 +7,25 @@ import time
 
 
 class BudgetExceeded(Exception):
+    """会话/全局预算耗尽；调用方应停止模型调用并按可重试失败处理。"""
     pass
 
 
 class LoopDetected(Exception):
+    """循环检测命中：同一签名重复超过 repeat_limit 或长期无新证据。"""
     pass
 
 
 class StepPolicy:
+    """按步数窗口分 5 级路线策略：模型/策略名/槽位/优先级系数/提示语。"""
     def __init__(self, thresholds=(30, 50, 70, 100)):
+        """thresholds 为 4 个递增正整数，划分 stage 0..4。"""
         if len(thresholds) != 4 or any(type(x) is not int or x <= 0 for x in thresholds) or sorted(set(thresholds)) != list(thresholds):
             raise ValueError('four increasing positive thresholds required')
         self.thresholds = tuple(thresholds)
 
     def route(self, steps):
+        """步数 → 路线决策：阶段越高越保守，stage4（heartbeat）禁新增调用。"""
         stage = sum(steps >= t for t in self.thresholds)
         return {'stage': stage, 'model': 'deepseek-flash',
                 'strategy': ('initial', 'hinted', 'alternate', 'deep_water', 'heartbeat')[stage],
@@ -41,6 +46,7 @@ class GlobalBudget:
     KEY = "global_budget"
 
     def __init__(self, store, max_total_tokens=0, clock=time.time):
+        """max_total_tokens=0 表示不设上限；store 为 StateStore（账本落 controller_settings）。"""
         self.store = store
         if type(max_total_tokens) is not int or max_total_tokens < 0:
             raise ValueError("invalid global token limit")
@@ -68,19 +74,23 @@ class GlobalBudget:
 
     @property
     def spent(self):
+        """全局已耗 token 数（每次读取从持久化账本刷新）。"""
         self._spent = self._load()
         return self._spent
 
     @property
     def exhausted(self):
+        """全局账本是否已耗尽（max_total_tokens<=0 表示不限）。"""
         return self.max_total_tokens > 0 and self.spent >= self.max_total_tokens
 
     def remaining(self):
+        """全局剩余 token；未配置上限时返回 inf。"""
         if self.max_total_tokens <= 0:
             return float("inf")
         return max(0, self.max_total_tokens - self.spent)
 
     def charge(self, tokens):
+        """实耗记账：事务内读改写累加；超限先落账再抛 BudgetExceeded。"""
         if type(tokens) is not int or tokens < 0:
             raise ValueError("invalid measured token usage")
         # 同一事务读取并累加，多个控制器/连接不能用旧内存快照覆盖账本。
@@ -98,9 +108,11 @@ class GlobalBudget:
 
 
 class SessionControl:
+    """单题会话控制器：预算/步数/停滞/循环四重止损，全部持久化到会话状态。"""
     def __init__(self, store, challenge_id, *, max_steps=100, max_tokens=50_000,
                  max_tools=100, seconds=900, absolute_deadline=None, repeat_limit=3,
                  stall_steps=20, policy=None, clock=time.time, global_budget=None):
+        """首调时初始化会话状态（revision=0 创建）；absolute_deadline 为运行级截止。"""
         self.store, self.challenge_id = store, challenge_id
         self.max_steps, self.max_tokens, self.max_tools = max_steps, max_tokens, max_tools
         self.seconds, self.absolute_deadline = seconds, absolute_deadline
@@ -114,6 +126,7 @@ class SessionControl:
             self.store.save(challenge_id, revision, state)
 
     def remaining(self):
+        """剩余预算三元组 (seconds/tokens/tools)；tokens 受全局账本下限约束。"""
         _, state = self.store.load(self.challenge_id)
         deadline = state['budget']['started_at'] + self.seconds
         if self.absolute_deadline is not None:
@@ -126,6 +139,10 @@ class SessionControl:
                 'tools': max(0, self.max_tools - state['budget']['tool_calls'])}
 
     def reserve(self, tool, version, argv, input_hash, *, is_tool=True):
+        """调用前预留：步数+1、预算检查、循环检测；超限把会话置 stopped 并抛异常。
+
+        返回调用签名（供后续审计）；重复签名/停滞触发 LoopDetected。
+        """
         left = self.remaining()
         _, state = self.store.load(self.challenge_id)
         if state['status'] in ('confirmed', 'stopped'):
@@ -136,6 +153,7 @@ class SessionControl:
         signature = hashlib.sha256(json.dumps([tool, version, list(argv), input_hash], sort_keys=True).encode()).hexdigest()
         old_stage = state['route']['stage']
         def count(s):
+            """预留事务体：步数/工具数累加、签名计数、换挡路由与停滞判定。"""
             s['steps'] += 1
             s['budget']['tool_calls'] += int(is_tool)
             s['call_signatures'][signature] = s['call_signatures'].get(signature, 0) + 1
@@ -155,6 +173,7 @@ class SessionControl:
         return signature
 
     def charge_tokens(self, tokens):
+        """模型实耗记账：先扣全局账本再扣单题；80% 触发上下文压缩，超限停会话。"""
         if type(tokens) is not int or tokens < 0:
             raise ValueError('invalid measured token usage')
         if self.global_budget is not None:
@@ -169,7 +188,9 @@ class SessionControl:
             raise BudgetExceeded('provider usage exceeded reserved output; no more calls allowed')
 
     def progress(self, evidence_id, path):
+        """记录新证据并推进停滞基线（last_progress_step），否则停滞检测会误伤。"""
         def update(s):
+            """patch 事务体：登记证据 id 与线索路径，刷新进度步数。"""
             if evidence_id not in s['evidence_ids']:
                 s['evidence_ids'].append(evidence_id)
                 s['last_progress_step'] = s['steps']

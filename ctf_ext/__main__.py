@@ -1,7 +1,8 @@
 """命令行入口：python3 -m ctf_ext run [--mode mock|llm] [--config FILE] ...
 
 无模型凭证时用 Mock Harness + RuleBasedWorker 跑通完整链路（附录 F-4）；
---mode llm 仅使用公司代理与 DeepSeek；缺少 BAIZHI_API_KEY 时拒绝调用。
+--mode llm 默认走 DeepSeek 官方 API（deepseek_official_openai 通道）；
+缺少 BAIZHI_API_KEY（值 = DeepSeek 官方 API key）时拒绝调用。
 """
 from __future__ import annotations
 
@@ -21,6 +22,7 @@ from .harness.flag_gate import FlagGate, ProviderReviewer
 from .harness.gateway import SubmitGateway
 from .store.session import StateStore
 from .runtime.control import GlobalBudget, SessionControl, StepPolicy, reset_intent_window
+from .llm.provider import ProviderConfigError
 from .llm.deepseek import DEFAULT_BASE_URL, DEFAULT_MODEL, PROVIDER_NAME, DeepSeekProvider
 from .llm.openai_compat import (DEFAULT_BASE_URL as OFFICIAL_BASE_URL,
                                 DEFAULT_MODEL as OFFICIAL_MODEL,
@@ -45,6 +47,11 @@ DEFAULT_CONFIG_PATHS = (
 
 
 def _make_provider(cfg, model_override: str = None):
+    """按配置构造模型 Provider（公司网关或官方备选通道）。
+
+    负责 Key 解析与缓存同步；model_override 仅替换模型 ID（双模型换挡的
+    Pro 实例与主模型共用同一网关与凭据）。provider 不在白名单时直接退出。
+    """
     model = cfg.get("model") or {}
     provider_name = model.get("provider", PROVIDER_NAME)
     if provider_name == OFFICIAL_PROVIDER_NAME:
@@ -69,6 +76,13 @@ def _make_provider(cfg, model_override: str = None):
 def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
                   config_path: str = None, data_root: str = ".",
                   heartbeat_path: str = None, claim_timeout_seconds: float = None):
+    """装配一轮完整运行时，返回编排器 Orchestrator。
+
+    装配顺序：SQLite(WAL) → 迁移 → 热配置快照 → 证据库 → 策略引擎 → 黑板 →
+    Harness（mock/arena，official 保持 fail-closed）→ 状态仓 + 工具注册表 →
+    预算/控制器 → FlagGate/提交网关 → 调度器 → Worker（mock 规则式或 llm）→
+    Orchestrator（含双模型换挡与审阅者工厂）。所有组件共享同一 sqlite 连接。
+    """
     os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
     # 显式事务模式：黑板用 BEGIN IMMEDIATE 控制边界，证据登记不能留下隐式事务。
     conn = sqlite3.connect(db_path, isolation_level=None, check_same_thread=False)
@@ -153,6 +167,10 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
     # 运行级全局 token 账本（0/未配置 = 不设上限）；编排层据此停止领取新意图。
     global_budget = GlobalBudget(state, int(budget.get("max_model_tokens_total") or 0))
     def control_factory(challenge_id):
+        """为单个题目构造会话控制器：意图边界重置步数窗口，终局加时提升预算。
+
+        预算真正耗尽（tokens/tools/时间任一为 0）时不复活，保持硬限制。
+        """
         # 意图边界 = 新步数窗口：route 阶段/停滞/重复判定按意图独立，
         # 跨意图保留累计预算与证据教训（详见 reset_intent_window）。
         # 预算真正耗尽（tokens/tools/时间 任意为 0）时不复活，保持硬限制。
@@ -212,7 +230,7 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
     if mode == "llm":
         provider = _make_provider(cfg)
         # 双模型换挡（借鉴 Tsecbench 冠军方案）：pro_model 非空时构造 Pro 实例
-        # （同一网关同一凭据），stage>=pro_from_stage 的换路径回合与提交前评审
+        # （同一端点同一凭据），stage>=pro_from_stage 的换路径回合与提交前评审
         # 用 Pro；构造失败或未配置一律回退单模型，不影响可用性。
         model_cfg = cfg.get("model") or {}
         pro_model_id = str(model_cfg.get("pro_model") or "").strip()
@@ -220,8 +238,8 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
         if pro_model_id and pro_model_id != model_cfg.get("model"):
             try:
                 pro_provider = _make_provider(cfg, model_override=pro_model_id)
-            except SystemExit:
-                pro_provider = None  # 凭据缺失等：回退单模型，不阻断
+            except (SystemExit, ProviderConfigError):
+                pro_provider = None  # 凭据缺失/模型白名单拒绝等：回退单模型，不阻断
         try:
             skill_loader = SkillLoader()
         except (OSError, ValueError):
@@ -277,6 +295,7 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
 
 
 def _emit(out, report):
+    """把运行结果 JSON 写到 --report 指定路径；未指定时不写文件。"""
     if report:
         os.makedirs(os.path.dirname(report) or ".", exist_ok=True)
         with open(report, "w", encoding="utf-8") as fh:
@@ -284,6 +303,10 @@ def _emit(out, report):
 
 
 def main(argv=None) -> int:
+    """CLI 主入口：解析参数 → build_runtime → 编排一轮 → 报告/看板/退出码。
+
+    退出码约定：0=有提交被受理；3=未解决；2=用法错误。正常结束清理 Key 缓存。
+    """
     parser = argparse.ArgumentParser(prog="python3 -m ctf_ext")
     sub = parser.add_subparsers(dest="command")
     run = sub.add_parser("run", help="跑一轮端到端（默认 mock）")

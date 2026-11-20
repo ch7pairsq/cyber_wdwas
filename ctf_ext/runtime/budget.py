@@ -13,6 +13,7 @@ LEVEL_GRACE = "grace"
 
 @dataclass
 class Budget:
+    """五级 deadline 预算；expired() 按优先级返回最先越过的层级。"""
     absolute_deadline: float
     challenge_deadline: float
     strategy_deadline: float
@@ -21,6 +22,7 @@ class Budget:
     grace: float = 2.0
 
     def remaining(self, now: float) -> float:
+        """单题剩余秒数（负数表示已超时）。"""
         return self.challenge_deadline - now
 
     def expired(self, now: float) -> Optional[str]:
@@ -40,6 +42,7 @@ class Budget:
     @classmethod
     def from_config(cls, now: float, run_deadline_epoch: float, per_challenge_seconds: float,
                     per_strategy_seconds: float, tool_timeout: float, grace: float = 2.0) -> "Budget":
+        """由各层配置构造预算：每级取 min 后逐级封顶，保证层级不倒挂。"""
         challenge_end = min(now + per_challenge_seconds, run_deadline_epoch)
         return cls(
             absolute_deadline=run_deadline_epoch,

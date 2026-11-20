@@ -13,6 +13,7 @@ router = APIRouter(tags=["hints"])
     status_code=201,
 )
 def create_hint(project_id: str, body: CreateHintRequest):
+    """追加人工提示（任意项目状态均可写）。"""
     with get_conn() as conn:
         check_project_hint_writable(conn, project_id)
 

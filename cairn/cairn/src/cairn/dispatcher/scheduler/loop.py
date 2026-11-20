@@ -33,6 +33,7 @@ BOOTSTRAP_INTENT_CREATOR = "dispatcher.bootstrap"
 
 @dataclass(slots=True)
 class WorkerSelection:
+    """一轮 worker 选举结果：可用 worker 与四类被阻断名单（忙/不健康/拒绝冷却/任务类型不配）。"""
     worker: WorkerConfig | None
     blocked_busy: list[str]
     blocked_unhealthy: list[str]
@@ -41,7 +42,9 @@ class WorkerSelection:
 
 
 class DispatcherLoop:
+    """调度主循环：拉取项目 → 领取/派发任务 → 线程池执行 → 回写服务端 → 容器清理。"""
     def __init__(self, config_path: Path):
+        """加载配置并装配 API 客户端、执行后端与双线程池（任务/清理）。"""
         self.config_path = config_path
         self.config = DispatchConfig.load(config_path)
         self.client = CairnClient(self.config.server)
@@ -66,6 +69,7 @@ class DispatcherLoop:
         self._startup_healthchecks_checked = False
 
     def close(self) -> None:
+        """停机：等待在途任务与清理完成，再关闭后端与 API 连接。"""
         if self.futures:
             LOG.info(
                 "dispatcher shutting down waiting_for_tasks=%s running_projects=%s",
@@ -78,6 +82,7 @@ class DispatcherLoop:
         self.client.close()
 
     def run(self, once: bool = False) -> None:
+        """主循环入口：启动预检 → 每拍拉项目、回收 Future、派发与清理；once 只跑一拍。"""
         try:
             self.run_startup_healthchecks()
             while True:
@@ -110,12 +115,14 @@ class DispatcherLoop:
             self.close()
 
     def run_startup_healthchecks_only(self) -> None:
+        """仅执行启动预检后退出（运维自检模式）。"""
         try:
             self.run_startup_healthchecks(show_commands=True, force=True)
         finally:
             self.close()
 
     def run_startup_healthchecks(self, *, show_commands: bool = False, force: bool = False) -> None:
+        """启动预检：local 模式查二进制；容器模式按配置探活 worker 适配器。"""
         if self._startup_healthchecks_checked:
             return
         if self.config.runtime.execution == "local":

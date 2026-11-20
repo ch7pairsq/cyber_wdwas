@@ -1,15 +1,21 @@
-"""DeepSeek 官方 API 备选通道（OpenAI Chat Completions 兼容），按配置切换。
+"""DeepSeek 官方 API 通道（OpenAI Chat Completions 兼容），当前默认主通道。
 
-2026-11-18 用户决定：比赛日可能切换到 DeepSeek 官方 API，须预留接口。
+2026-11-18 用户决定：比赛日可切换到 DeepSeek 官方 API，预留接口；
+2026-11-20 用户确认：官方通道转为默认主通道，密钥改用 DeepSeek 官方 API key
+（本机来源 ~/chaitin_agent/chaitin_ds_key，注入环境变量名仍为 BAIZHI_API_KEY）。
 约束：
-- base_url 固定 https://api.deepseek.com，model 仅允许官方 ID（deepseek-chat/deepseek-reasoner）；
-- 密钥沿用 BAIZHI_API_KEY 注入名（与公司网关通道共用，切换通道变量名不变）；
+- base_url 固定 https://api.deepseek.com，model 仅允许官方 ID
+  （deepseek-flash / deepseek-v4-pro，双模型换挡见 config model.pro_model）；
+- 密钥沿用 BAIZHI_API_KEY 注入名（与公司网关通道共用变量名，值对应所选通道）；
 - 与公司网关通道互斥，由 config model.provider 选择，业务代码零改动；
 - 与网关通道同样的安全姿态：不继承 HTTP_PROXY、不跟随重定向、校验 TLS、
   不发送搜索/浏览器工具定义、响应大小上限、密钥不进日志与异常文本；
 - 消息层继续使用内部 Anthropic 风格块（tool_use/tool_result），由本模块翻译为
-  OpenAI 线上格式，工具循环不需要感知协议差异。
-真实调用尚未授权与验收；切换属于显式配置变更，须同步平台出口白名单。
+  OpenAI 线上格式，工具循环不需要感知协议差异；
+- 思考预算：公司网关通道用 Anthropic 风格 thinking.budget_tokens；本通道按
+  官方 OpenAI 格式映射为 thinking: {"type": "enabled"}（官方示例口径），
+  攻坚档预算（>=8000）额外带 reasoning_effort=high；0/未传不下发。
+切换属于显式配置变更，须同步平台出口白名单覆盖 api.deepseek.com。
 """
 from __future__ import annotations
 
@@ -22,8 +28,8 @@ from .provider import (ModelProvider, ProviderConfigError, ProviderError,
                        ProviderResponse, ProviderTimeout, RateLimited, RateLimiter)
 
 DEFAULT_BASE_URL = "https://api.deepseek.com"
-DEFAULT_MODEL = "deepseek-chat"
-ALLOWED_MODELS = ("deepseek-chat", "deepseek-reasoner")
+DEFAULT_MODEL = "deepseek-flash"
+ALLOWED_MODELS = ("deepseek-flash", "deepseek-v4-pro")
 DEFAULT_KEY_ENV = "BAIZHI_API_KEY"
 PROVIDER_NAME = "deepseek_official_openai"
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
@@ -120,7 +126,7 @@ def _parse_response(data, declared):
     if not isinstance(message, dict):
         raise ProviderError("invalid official api response")
     text = message.get("content")
-    # deepseek-reasoner 的 reasoning_content 是推理字段，跳过，不参与文本拼接。
+    # reasoning_content 是推理字段（thinking 开启时可能出现），跳过，不参与文本拼接。
     if not isinstance(text, str):
         text = ""
     tool_calls = []
@@ -157,9 +163,11 @@ def _parse_response(data, declared):
 
 
 class DeepSeekOfficialProvider(ModelProvider):
+    """官方 API 模型通道：OpenAI 兼容协议，仅允许官方端点与白名单模型。"""
     def __init__(self, api_key: Optional[str] = None, base_url: str = DEFAULT_BASE_URL,
                  model: str = DEFAULT_MODEL, timeout: float = 120.0,
                  limiter: Optional[RateLimiter] = None):
+        """base_url/model 白名单校验；api_key 缺省读环境变量。"""
         if not isinstance(base_url, str) or base_url.rstrip("/") != DEFAULT_BASE_URL:
             raise ProviderConfigError("only the official DeepSeek API endpoint is allowed")
         if model not in ALLOWED_MODELS:
@@ -171,10 +179,17 @@ class DeepSeekOfficialProvider(ModelProvider):
         self._limiter = limiter or RateLimiter(max_inflight=3)
 
     def __repr__(self):
+        """脱敏 repr：不泄露 api_key。"""
         return "DeepSeekOfficialProvider(official_api=True, model={}, key=***)".format(self._model)
 
     def complete(self, messages, *, system=None, json_mode=False, timeout=None,
-                 max_tokens=4096, tools=None):
+                 max_tokens=4096, tools=None, thinking_budget=0):
+        """同步补全：限流 → 官方端点 → OpenAI 消息翻译 → 解析为 ProviderResponse。
+
+        thinking_budget 沿用 Worker 的阶段预算入参（公司网关通道为
+        Anthropic 风格 budget_tokens）；本通道按官方 OpenAI 格式映射：
+        >0 → thinking enabled；攻坚档（>=8000）追加 reasoning_effort=high。
+        """
         if not self._api_key:
             raise ProviderConfigError("official DeepSeek API key is not configured")
         if max_tokens <= 0:
@@ -183,6 +198,11 @@ class DeepSeekOfficialProvider(ModelProvider):
         openai_messages = _translate_messages(messages)
         payload = {"model": self._model, "messages": openai_messages,
                    "max_tokens": max_tokens, "stream": False}
+        # 官方示例口径：thinking: {"type": "enabled"}；攻坚档映射 reasoning_effort。
+        if int(thinking_budget or 0) > 0:
+            payload["thinking"] = {"type": "enabled"}
+            if int(thinking_budget) >= 8000:
+                payload["reasoning_effort"] = "high"
         if safe_tools:
             payload["tools"] = [_to_openai_tool(tool) for tool in safe_tools]
         instruction = system or ""

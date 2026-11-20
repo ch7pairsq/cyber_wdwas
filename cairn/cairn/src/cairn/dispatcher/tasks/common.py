@@ -20,11 +20,13 @@ LOG = logging.getLogger(__name__)
 
 @dataclass(slots=True)
 class ConcludeWriteResult:
+    """Intent 收尾写入结果：状态与产出的事实 id（可空）。"""
     status: str
     fact_id: str | None = None
 
 
 def preview(text: str, limit: int = LOG_PREVIEW_LIMIT) -> str:
+    """压缩空白并限长，用于日志输出模型/进程文本。"""
     compact = " ".join(text.split())
     if len(compact) <= limit:
         return compact
@@ -32,10 +34,12 @@ def preview(text: str, limit: int = LOG_PREVIEW_LIMIT) -> str:
 
 
 def did_timeout(result: ProcessResult) -> bool:
+    """判定进程是否超时（标志位或超时退出码 124/137）。"""
     return not result.cancelled and (result.timed_out or result.returncode in (124, 137))
 
 
 def cancel_reason(result: ProcessResult, cancellation: TaskCancellation | None = None) -> str | None:
+    """归一取消原因：优先进程记录，其次取消控制柄。"""
     if result.cancelled:
         return result.cancel_reason or "cancelled"
     if cancellation is not None:
@@ -44,10 +48,12 @@ def cancel_reason(result: ProcessResult, cancellation: TaskCancellation | None =
 
 
 def communicate_timeout(timeout_seconds: int, grace_seconds: int = PROCESS_COMMUNICATE_GRACE_SECONDS) -> int:
+    """任务超时 + 宽限秒 = communicate 实际等待上限。"""
     return timeout_seconds + grace_seconds
 
 
 def task_healthcheck_enabled(config: DispatchConfig) -> bool:
+    """是否对每个任务前做 worker 健康探活（仅容器 startup_and_task 模式）。"""
     if config.runtime.execution == "local":
         return False
     return config.runtime.worker_healthcheck == "startup_and_task"
@@ -60,6 +66,7 @@ def write_graph_snapshot_reference(
     *,
     phase: str,
 ) -> str:
+    """把图 YAML 快照写入容器临时目录，返回给 worker 的引用说明文本。"""
     path = f"{GRAPH_SNAPSHOT_ROOT}/{phase}-{uuid.uuid4().hex[:12]}/graph.yaml"
     container_manager.write_text_file(container_name, path, graph_yaml)
     return (
@@ -81,6 +88,7 @@ def run_worker_process(
     lease: HeartbeatLease | None = None,
     cancellation: TaskCancellation | None = None,
 ) -> ProcessResult:
+    """任务执行核心：在容器/本地起 worker 进程，挂接租约续期与取消控制，同步等待结果。"""
     LOG.info(
         "starting container exec container=%s worker=%s phase=%s timeout=%ss",
         container_name,
@@ -109,6 +117,7 @@ def run_worker_process(
 
 
 def project_allows_conclude_fallback(client: CairnClient, project_id: str, *, worker_name: str, intent_id: str) -> bool:
+    """项目仍 active 时才允许收尾兜底写入。"""
     project = client.get_project(project_id)
     if project.project.status == "active":
         return True
@@ -123,6 +132,7 @@ def project_allows_conclude_fallback(client: CairnClient, project_id: str, *, wo
 
 
 def best_effort_release_reason(client: CairnClient, project_id: str, worker_name: str) -> None:
+    """尽力释放项目 reason 锁：失败只告警不抛（清理路径）。"""
     response = client.release_reason(project_id, worker_name)
     if not response.ok and response.status_code not in (403, 409):
         LOG.warning(
@@ -153,6 +163,7 @@ def write_conclude_result(
     phase_ms: int,
     total_ms: int | None = None,
 ) -> str:
+    """conclude 写入并只返回状态串。"""
     return write_conclude_result_with_fact_id(
         client,
         project_id,
@@ -176,6 +187,7 @@ def write_conclude_result_with_fact_id(
     phase_ms: int,
     total_ms: int | None = None,
 ) -> ConcludeWriteResult:
+    """调用 conclude 接口写结论事实；失败时尽力释放租约并返回 failed。"""
     response = client.conclude(project_id, intent_id, worker_name, description)
     if response.ok:
         fact_id: str | None = None
@@ -226,6 +238,7 @@ def write_conclude_result_with_fact_id(
 
 
 def best_effort_release(client: CairnClient, project_id: str, intent_id: str, worker_name: str) -> None:
+    """尽力释放 Intent 租约：失败只告警不抛（清理路径）。"""
     response = client.release(project_id, intent_id, worker_name)
     if not response.ok and response.status_code not in (403, 409):
         LOG.warning(

@@ -76,11 +76,13 @@ def capture(argv, *, cwd, timeout, limit=200_000, input_data=b'', discard_stderr
 
 @dataclass(frozen=True)
 class SandboxSpec:
+    """docker 只读沙箱规格：pin 死镜像、禁网络、非特权用户与工作区挂载。"""
     image: str
     workspace: str
     name: str
 
     def argv(self, command):
+        """构造 docker 只读沙箱 argv：镜像必须 pin sha256，禁网络/能力/写根文件系统。"""
         from pathlib import Path
         import re
         if not re.fullmatch(r'[a-z0-9][a-z0-9_.-]{0,80}', self.name):
@@ -102,12 +104,14 @@ class SandboxSpec:
 
 
 class CommandExecutor:
-    """仅供受信任引擎适配器调用；LLM 文本不能伪造 command_log。"""
+    """可信命令执行器：仅供受信适配器调用；只允许固定离线解码器，不执行模型代码。"""
     def __init__(self, store, control, environment, *, allow_local_mock=False):
+        """allow_local_mock=True 仅在 Mock 协议下启用本地解码器。"""
         self.store, self.control, self.environment = store, control, environment
         self.allow_local_mock = allow_local_mock
 
     def execute_mock_decoder(self, data, *, decode=True, target_revision='mock-attachment-v1'):
+        """固定 base64 解码器（经 stdin）：带缓存、预算预留与命令日志。"""
         # 只允许固定离线解码程序；不执行模型提供的 Python 或 shell。
         import sys
         if not self.allow_local_mock:

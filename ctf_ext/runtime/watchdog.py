@@ -24,6 +24,7 @@ class DeadlineGuard:
     """主线程 SIGALRM 超时；非主线程或平台不支持时自动降级为不拦截。"""
 
     def __init__(self, seconds: float):
+        """seconds<=0 表示已到期，进入即抛 ClaimTimeout。"""
         self.seconds = max(0.0, float(seconds))
         self.active = False
         self._old_handler = None
@@ -32,10 +33,12 @@ class DeadlineGuard:
 
     @staticmethod
     def supported() -> bool:
+        """仅主线程且平台支持 SIGALRM/setitimer 时可用。"""
         return (threading.current_thread() is threading.main_thread()
                 and hasattr(signal, "SIGALRM") and hasattr(signal, "setitimer"))
 
     def __enter__(self):
+        """安装 SIGALRM 定时器；不支持的平台降级为不设闹钟（软超时兑底）。"""
         if self.seconds <= 0:
             raise ClaimTimeout("deadline already expired")
         if not self.supported():
@@ -53,6 +56,7 @@ class DeadlineGuard:
         raise ClaimTimeout("claim deadline exceeded")
 
     def __exit__(self, *args):
+        """恢复旧定时器与旧信号处理器（剩余时间重新折算）。"""
         if not self.active:
             return False
         signal.setitimer(signal.ITIMER_REAL, 0)
@@ -66,6 +70,10 @@ class DeadlineGuard:
 
 
 def recover_expired_leases(board, now: float = None, hard_limit_seconds: float = 600.0) -> Dict[str, int]:
+    """租约看门狗：过期租约回 READY 重派；超硬限制仍无更新的标记为孤儿。
+
+    返回 {"requeued": 回收数, "orphaned": 孤儿标记数}。
+    """
     now = now if now is not None else time.time()
     requeued = orphaned = 0
     with board.transaction() as db:

@@ -74,17 +74,17 @@ policy:
     - zbarimg
 
 model:
-  provider: "baizhi_anthropic"
-  base_url: "https://ai-api-gateway.app.baizhi.cloud/api/anthropic"
-  model: "deepseek-flash"
-  api_key_env: "BAIZHI_API_KEY"  # 仅运行时注入，不写进镜像或配置快照；两条通道共用此变量名
+  # 2026-11-20 起主通道为 DeepSeek 官方 API（OpenAI Chat Completions 兼容）。
+  provider: "deepseek_official_openai"
+  base_url: "https://api.deepseek.com"
+  model: "deepseek-flash"    # 官方模型 ID：deepseek-flash（探索）/ deepseek-v4-pro（换挡攻坚）
+  api_key_env: "BAIZHI_API_KEY"  # 注入名不变；值为 DeepSeek 官方 API key（本机：~/chaitin_agent/chaitin_ds_key），仅运行时注入
   max_tokens: 4096
-  tools_enabled: true        # 网关不支持 Anthropic tools 时可显式关闭；关闭后不发送工具定义
-  # 比赛日备选通道（2026-11-18）：DeepSeek 官方 API，OpenAI Chat Completions 兼容。切换示例：
-  #   provider: "deepseek_official_openai"
-  #   base_url: "https://api.deepseek.com"
-  #   model: "deepseek-chat"   # 仅允许 deepseek-chat / deepseek-reasoner
-  # 切换须同步平台出口白名单覆盖 api.deepseek.com；真实调用另行授权。
+  tools_enabled: true        # 关闭后不发送工具定义
+  # 双模型换挡（预留逻辑）：pro_model 非空时 stage>=pro_from_stage 的换路径回合
+  # 与提交前评审路由到 Pro；本默认配置不启用（空 = 单模型），arena 配置启用
+  # （pro_model: deepseek-v4-pro，pro_max_calls_per_challenge 兼底每题次数）。
+  # 公司网关备选通道（baizhi_anthropic）保留：改回 provider/base_url 即可，注入名不变。
   # key_cache_file: ""        # 可选 Key 落盘缓存（默认关闭）；仅当平台挂载持久卷且重建容器不重注入时启用
 
 storage:

@@ -26,6 +26,7 @@ ALLOWED_METHODS = ("GET", "POST", "PUT", "HEAD", "OPTIONS")
 
 
 def parse_proxy(proxy: str):
+    """解析 SOCKS5 代理地址（可带鉴权）；格式不符或未配置直接拒绝。"""
     if not proxy:
         sys.exit("DENY: ARENA_PROXY is required for arena http tool")
     rest = proxy
@@ -45,6 +46,7 @@ def parse_proxy(proxy: str):
 
 
 def socks5_connect(proxy, host, port, timeout):
+    """建立 SOCKS5 隧道（支持用户名/密码鉴权）；握手失败即拒绝。"""
     phost, pport, user, password = proxy
     sock = socket.create_connection((phost, pport), timeout=timeout)
     sock.settimeout(timeout)
@@ -69,6 +71,7 @@ def socks5_connect(proxy, host, port, timeout):
 
 
 def main():
+    """受限 HTTP 请求：网段校验 → SOCKS5 隧道 → 响应文本限量输出（JSON）。"""
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", required=True)
     ap.add_argument("--port", type=int, required=True)

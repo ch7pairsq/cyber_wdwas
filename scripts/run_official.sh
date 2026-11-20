@@ -17,6 +17,8 @@ TOTAL_SECONDS="${1:-13800}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RUN_DIR="${RUN_DIR:-/tmp/ctf-official}"
 mkdir -p "$RUN_DIR"
+# -m ctf_ext 依赖 cwd 或 PYTHONPATH；显式 cd 仓库根，不依赖平台继承的 workdir。
+cd "$ROOT"
 
 echo "[run_official] total_wall=${TOTAL_SECONDS}s run_dir=${RUN_DIR}"
 

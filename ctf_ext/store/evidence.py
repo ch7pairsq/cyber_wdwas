@@ -19,6 +19,7 @@ from typing import Optional
 
 
 class EvidenceTooLarge(Exception):
+    """登记内容超出单条字节上限（默认 64MB），拒绝登记。"""
     pass
 
 
@@ -26,6 +27,7 @@ class EvidenceStore:
     """put() 返回 sha256，作为 evidence_id。"""
 
     def __init__(self, root, db: sqlite3.Connection, max_bytes: int = 64 * 1024 * 1024):
+        """root 为内容寻址存储目录（0700），db 为证据登记表所在的 sqlite 连接。"""
         self._root = Path(root)
         self._ensure_private_dir(self._root)
         self._db = db
@@ -41,6 +43,7 @@ class EvidenceStore:
             pass
 
     def put_bytes(self, data: bytes, kind: str = "raw") -> str:
+        """登记字节数据：内容寻址落盘（已存在则复用）并注册，返回 sha256。"""
         if len(data) > self._max_bytes:
             raise EvidenceTooLarge("evidence {} bytes > cap {}".format(len(data), self._max_bytes))
         sha = hashlib.sha256(data).hexdigest()
@@ -64,6 +67,7 @@ class EvidenceStore:
 
     @classmethod
     def _atomic_write(cls, path: Path, data: bytes) -> None:
+        """临时文件写入 + fsync + os.replace 原子落盘，异常时清理临时文件。"""
         temporary = path.with_name(path.name + ".tmp-" + uuid.uuid4().hex)
         try:
             with temporary.open("wb") as handle:
@@ -135,10 +139,12 @@ class EvidenceStore:
         return h.hexdigest() == sha
 
     def exists(self, sha: str) -> bool:
+        """只查登记是否存在，不校验文件（快速路径）。"""
         row = self._db.execute("SELECT 1 FROM evidence WHERE sha256=?", (sha,)).fetchone()
         return row is not None
 
     def _register(self, sha: str, kind: str, path: str, size: int) -> None:
+        """向 evidence 表登记（幂等）；调用方已开事务时由其统一提交。"""
         self._db.execute(
             "INSERT OR IGNORE INTO evidence(sha256, kind, path, bytes, created_at) VALUES (?,?,?,?,?)",
             (sha, kind, path, size, time.time()),

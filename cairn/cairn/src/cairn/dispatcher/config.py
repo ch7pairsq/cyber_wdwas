@@ -130,27 +130,32 @@ MOCK_ALLOWED_ENV_KEYS = frozenset(
 
 
 class ReasonTaskConfig(BaseModel):
+    """reason 任务配置：超时与单轮最多新建 Intent 数。"""
     timeout: int = Field(gt=0)
     max_intents: int = Field(gt=0, default=3)
 
 
 class ExploreTaskConfig(BaseModel):
+    """explore 任务配置：执行与收尾双超时。"""
     timeout: int = Field(gt=0)
     conclude_timeout: int = Field(gt=0)
 
 
 class BootstrapTaskConfig(BaseModel):
+    """bootstrap 任务配置：执行与收尾双超时。"""
     timeout: int = Field(gt=0)
     conclude_timeout: int = Field(gt=0)
 
 
 class TasksConfig(BaseModel):
+    """三类任务的配置聚合。"""
     bootstrap: BootstrapTaskConfig
     reason: ReasonTaskConfig
     explore: ExploreTaskConfig
 
 
 class ContainerConfig(BaseModel):
+    """容器执行模式配置：镜像/网络/结束后处置与额外能力。"""
     image: str
     network_mode: str
     completed_action: CompletedAction
@@ -158,11 +163,13 @@ class ContainerConfig(BaseModel):
 
 
 class LocalConfig(BaseModel):
+    """本地执行模式配置：工作区根目录与结束后处置。"""
     workspace_root: str | None = None
     completed_action: LocalCompletedAction = "keep"
 
 
 class RuntimeConfig(BaseModel):
+    """运行时配置：并发/节拍/探活与执行模式（container|local）及提示词组。"""
     max_workers: int = Field(gt=0)
     max_running_projects: int = Field(gt=0)
     max_project_workers: int = Field(gt=0)
@@ -174,6 +181,7 @@ class RuntimeConfig(BaseModel):
 
 
 class WorkerConfig(BaseModel):
+    """worker 配置：类型/支持任务类型/并发上限/优先级与环境变量。"""
     model_config = ConfigDict(extra="forbid")
 
     name: str
@@ -186,6 +194,7 @@ class WorkerConfig(BaseModel):
     @field_validator("task_types")
     @classmethod
     def validate_task_types(cls, value: list[TaskType]) -> list[TaskType]:
+        """任务类型不得为空且不得重复。"""
         if not value:
             raise ValueError("task_types must not be empty")
         if len(set(value)) != len(value):
@@ -194,6 +203,7 @@ class WorkerConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_env(self) -> "WorkerConfig":
+        """类型相关环境校验：pi 上下文窗口与 mock 行为键。"""
         # Required LLM env keys (base_url / key / model) are enforced per execution mode by
         # DispatchConfig: container mode needs them, local mode reuses the host CLI config.
         # The checks below are mode-independent and always apply.
@@ -205,6 +215,7 @@ class WorkerConfig(BaseModel):
 
 
 class DispatchConfig(BaseModel):
+    """调度器总配置：server 地址 + 运行时/任务/执行后端 + worker 列表。"""
     model_config = ConfigDict(extra="forbid")
 
     server: str
@@ -218,6 +229,7 @@ class DispatchConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def merge_common_env(cls, data: Any) -> Any:
+        """校验前把 common_env 合并进每个 worker 的 env（worker 覆盖公共值）。"""
         if not isinstance(data, dict):
             return data
         common_env = data.get("common_env")
@@ -247,6 +259,7 @@ class DispatchConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_workers(self) -> "DispatchConfig":
+        """worker 名唯一、非空，且单项目并发不超过总并发。"""
         names = [worker.name for worker in self.workers]
         if len(set(names)) != len(names):
             raise ValueError("worker names must be unique")
@@ -258,6 +271,7 @@ class DispatchConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_execution_mode(self) -> "DispatchConfig":
+        """执行模式一致性：container 必须有容器配置与 LLM 环境键；local 补默认配置。"""
         if self.runtime.execution == "container":
             if self.container is None:
                 raise ValueError("container config is required when runtime.execution is container")
@@ -273,6 +287,7 @@ class DispatchConfig(BaseModel):
 
     @classmethod
     def load(cls, path: Path) -> "DispatchConfig":
+        """从 YAML 加载并整体校验，再校验提示词组资源完整性。"""
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         config = cls.model_validate(data)
         validate_prompt_resources(config.runtime.prompt_group)
@@ -292,6 +307,7 @@ def _validate_optional_positive_int_env(worker_name: str, env: dict[str, str], k
 
 
 def validate_prompt_resources(prompt_group: str) -> None:
+    """校验提示词组存在且必填占位符齐全（启动期快速失败）。"""
     prompts_dir = resources.files("cairn.dispatcher.prompts")
     group_dir = prompts_dir.joinpath(prompt_group)
     if not group_dir.is_dir():
@@ -308,6 +324,7 @@ def validate_prompt_resources(prompt_group: str) -> None:
 
 
 def resolve_mock_behavior(worker_name: str, env: dict[str, str]) -> dict[str, dict[str, Any]]:
+    """解析 mock worker 的 MOCK_* 环境变量为各阶段行为（延迟/结果分布），非法即抛。"""
     unknown = sorted(key for key in env if key.startswith("MOCK_") and key not in MOCK_ALLOWED_ENV_KEYS)
     if unknown:
         raise ValueError(f"worker {worker_name} has unsupported mock env keys: {', '.join(unknown)}")

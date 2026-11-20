@@ -18,15 +18,18 @@ EXIT_SUBMIT_ERROR = 5
 
 
 class UnsupportedProtocol(Exception):
+    """协议版本不在 SUPPORTED_PROTOCOLS 内：直接失败，不静默降级。"""
     pass
 
 
 class SchemaError(Exception):
+    """题目数据不符合必需字段/类型契约。"""
     pass
 
 
 @dataclass
 class HarnessContext:
+    """运行上下文：协议版本、竞赛标识与截止时间。"""
     protocol: str
     competition_id: str
     deadline_epoch: float = 0.0
@@ -34,6 +37,7 @@ class HarnessContext:
 
 @dataclass
 class ChallengeInput:
+    """标准化题目输入：id/名称/分类/描述/附件/难度（由 parse_challenge 构造）。"""
     challenge_id: str
     name: str
     category: str = "unknown"
@@ -46,6 +50,7 @@ class ChallengeInput:
 
 @dataclass
 class Submission:
+    """提交载荷：幂等键 + 答案 + 支撑证据 id 列表。"""
     challenge_id: str
     answer: str
     idempotency_key: str
@@ -54,6 +59,7 @@ class Submission:
 
 @dataclass
 class SubmitReceipt:
+    """提交回执三态：ACCEPTED/REJECTED/UNKNOWN；corrected_answer 仅限平台显式修正。"""
     status: str  # ACCEPTED | REJECTED | UNKNOWN
     receipt_id: str = ""
     detail: str = ""
@@ -62,11 +68,13 @@ class SubmitReceipt:
 
 @dataclass
 class RunSummary:
+    """一轮运行汇总：逐题结果列表与备注（finalize 入参）。"""
     results: List[Dict[str, Any]] = field(default_factory=list)
     notes: str = ""
 
 
 def parse_challenge(raw: Dict[str, Any], protocol: str = "v1-mock") -> ChallengeInput:
+    """原始 dict → ChallengeInput：校验协议与必需字段，缺失即抛 SchemaError。"""
     if protocol not in SUPPORTED_PROTOCOLS:
         raise UnsupportedProtocol("protocol {!r} not supported; supported={}".format(
             protocol, sorted(SUPPORTED_PROTOCOLS)))

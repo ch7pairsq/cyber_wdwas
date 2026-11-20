@@ -10,6 +10,7 @@ router = APIRouter(tags=["export"])
 
 
 def format_export_timestamp(value: str | None) -> str | None:
+    """ISO 时间戳转本地可读格式（解析失败原样返回）。"""
     if not value:
         return value
     try:
@@ -153,6 +154,7 @@ def _export_timeline(conn, project_id: str) -> str:
 
 @router.get("/projects/{project_id}/export")
 def export_project(project_id: str, format: str = "yaml"):
+    """导出项目：yaml 全量快照或 timeline 事件流文本。"""
     if format not in ("yaml", "timeline"):
         raise HTTPException(400, "Supported formats: yaml, timeline")
 

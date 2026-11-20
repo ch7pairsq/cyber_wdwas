@@ -14,7 +14,9 @@ from urllib.parse import urlparse
 
 
 class PolicyDenied(Exception):
+    """硬规则拒绝；reason_code 标识命中的规则（SCOPE/QUOTA/SANDBOX 等）。"""
     def __init__(self, reason_code: str, message: str = ""):
+        """reason_code 为稳定错误码（供审计/指标聚合）。"""
         super().__init__(message or reason_code)
         self.reason_code = reason_code
 
@@ -26,6 +28,7 @@ REQUIRE_APPROVAL = "require_approval"
 
 @dataclass
 class PolicyConfig:
+    """策略配置：授权范围、命令白名单、下载限额与沙箱/提交锁开关（默认全收紧）。"""
     authorized_scope: Tuple[str, ...] = ()
     command_allowlist: Tuple[str, ...] = ()
     # 下载限额：0 表示未配置 → 全部拒绝（Fail Closed）
@@ -42,12 +45,15 @@ class PolicyConfig:
 
 @dataclass
 class Decision:
+    """判定结果：action ∈ {allow, deny, require_approval}。"""
     action: str
     reason_code: str = ""
 
 
 class PolicyEngine:
+    """硬规则引擎：网络/下载/命令/工具风险/沙箱/提交锁七类判定，全部 Fail Closed。"""
     def __init__(self, config: PolicyConfig, total_used_ref=None, resolver=None):
+        """total_used_ref 提供已用下载字节；resolver 可注入假 DNS 供测试。"""
         self._cfg = config
         # total_used_ref: 返回已用下载字节的 callable（配额共享，§15.1）
         self._total_used_ref = total_used_ref or (lambda: 0)
@@ -74,6 +80,7 @@ class PolicyEngine:
 
     # ------------------------------------------------------------------ scope
     def decide_scope(self, target: str) -> Decision:
+        """目标必须在授权白名单内，且解析不到私网/回环地址（SSRF 防护）。"""
         parsed = urlparse(target)
         host = parsed.hostname or target
         if host not in self._cfg.authorized_scope:
@@ -87,6 +94,7 @@ class PolicyEngine:
         return socket.gethostbyname_ex(host)[2]
 
     def _is_private(self, host: str) -> bool:
+        """域名解析结果任一命中私网/回环/保留段即判定私有；解析失败也算私有。"""
         if host in self._dns_cache:
             ips = self._dns_cache[host]
         else:
@@ -109,6 +117,7 @@ class PolicyEngine:
 
     # ---------------------------------------------------------------- download
     def decide_download(self, url: str, content_length: Optional[int] = None) -> Decision:
+        """下载预检：HTTPS → 授权域 → 非私网 → 限额（未配置即拒）。"""
         parsed = urlparse(url)
         if parsed.scheme != "https":
             return Decision(DENY, "QUOTA_SCHEME")
@@ -137,10 +146,12 @@ class PolicyEngine:
         return Decision(ALLOW)
 
     def remaining_budget(self) -> int:
+        """剩余下载配额字节。"""
         return max(0, self._cfg.max_total_bytes - self._total_used_ref())
 
     # ----------------------------------------------------------------- command
     def decide_command(self, argv: Sequence[str]) -> Decision:
+        """命令白名单判定：安装器/运行时安装命令一律拒绝。"""
         if not argv:
             return Decision(DENY, "COMMAND_EMPTY")
         program = argv[0].rsplit("/", 1)[-1]
@@ -158,6 +169,7 @@ class PolicyEngine:
         return Decision(ALLOW)
 
     def decide_tool_name(self, name: str) -> Decision:
+        """工具名黑名单：web 搜索/浏览器类工具一律拒绝。"""
         normalized = name.lower().replace("-", "_").replace(".", "_")
         if "search" in normalized or normalized.startswith(("browser", "browse", "web_")):
             return Decision(DENY, "WEB_SEARCH_FORBIDDEN")
@@ -180,12 +192,14 @@ class PolicyEngine:
 
     # --------------------------------------------------------------- submission
     def decide_submission(self) -> Decision:
+        """提交锁：competition_locked=true 时禁止工具直接提交（提交只能走 SubmitGateway）。"""
         if self._cfg.competition_locked:
             return Decision(DENY, "SUBMIT_LOCK")
         return Decision(ALLOW)
 
     # ------------------------------------------------------------------ sandbox
     def decide_sandbox(self, available: bool) -> Decision:
+        """沙箱开关：sandbox_required=true 而沙箱不可用时拒绝执行。"""
         if self._cfg.sandbox_required and not available:
             return Decision(DENY, "SANDBOX")
         return Decision(ALLOW)

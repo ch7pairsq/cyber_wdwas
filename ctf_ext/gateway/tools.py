@@ -19,6 +19,7 @@ from ..runtime.control import BudgetExceeded, LoopDetected
 
 @dataclass
 class ToolSpec:
+    """工具描述：模型可见的 schema + 服务端强制约束（风险/超时/并发/证据策略）。"""
     name: str
     version: str = "0.1.0"
     description: str = ""
@@ -43,6 +44,7 @@ class ToolSpec:
 
 @dataclass
 class ToolResult:
+    """工具执行结果：状态、预览与全文、证据 id 与命令归档 id。"""
     status: str  # ok | partial | timeout | denied | error
     summary: str = ""
     output: str = ""
@@ -57,9 +59,11 @@ class ToolResult:
 
 
 class ToolRegistry:
+    """结构化工具注册表与执行护栏：模型只给 JSON 参数，不直接提供 shell 命令。"""
     def __init__(self, policy: PolicyEngine, evidence_store=None, work_root: Optional[str] = None,
                  state_store=None, environment: str = "offline-image",
                  target_revision: str = "runtime"):
+        """policy 为硬规则引擎；evidence_store/state_store 提供证据与缓存。"""
         self._policy = policy
         self._evidence = evidence_store
         self._work_root = Path(work_root).resolve() if work_root else None
@@ -71,11 +75,13 @@ class ToolRegistry:
         self._lock = threading.Lock()
 
     def register(self, spec: ToolSpec) -> None:
+        """注册工具并建并发信号量；同名覆盖（启动期行为，不做热更）。"""
         with self._lock:
             self._specs[spec.name] = spec
             self._semaphores[spec.name] = threading.BoundedSemaphore(max(1, spec.concurrency_limit))
 
     def specs(self):
+        """全部已注册 ToolSpec 列表（运维/审计用）。"""
         return list(self._specs.values())
 
     def tool_definitions(self):
@@ -84,6 +90,7 @@ class ToolRegistry:
                  "input_schema": dict(spec.input_schema)} for spec in self._specs.values()]
 
     def _check_cwd(self, cwd: Optional[str]):
+        """工作目录约束：必须位于 work_root 内，防路径逃逸。"""
         if not cwd or self._work_root is None:
             return
         target = Path(cwd).resolve()
@@ -134,6 +141,9 @@ class ToolRegistry:
 
     def execute(self, name: str, argv: Sequence[str], cwd: Optional[str] = None, *,
                 control=None, stdin_data: bytes = b"", args_json: str = "") -> ToolResult:
+        """执行护栏链：名称黑名单 → 注册 → 风险 → 工作目录 → 并发 → 预算/缓存 →
+        沙箱执行 → 证据归档 → 命令日志。任何一环不过都返回 denied。
+        """
         name_decision = self._policy.decide_tool_name(name)
         if name_decision.action != "allow":
             return ToolResult(status="denied", error_code=name_decision.reason_code)
@@ -225,6 +235,7 @@ class ToolRegistry:
         return command_id
 
     def _store_evidence(self, spec: ToolSpec, output: str) -> Optional[str]:
+        """按证据策略归档工具输出；归档永不截断（尾部线索可回读/过 Gate）。"""
         if self._evidence is None or not output:
             return None
         data = output.encode("utf-8")

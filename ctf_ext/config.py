@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 
 class ConfigError(Exception):
+    """配置加载/校验失败；携带人类可读的错误信息，启动期直接失败。"""
     pass
 
 
@@ -49,6 +50,7 @@ _ENV_RE = re.compile(r"[$][{]([A-Z0-9_]+)[}]")
 
 
 def deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    """递归合并两个配置字典：override 优先，嵌套 dict 深度合并而非整体覆盖。"""
     out = dict(base)
     for k, v in (override or {}).items():
         if isinstance(v, dict) and isinstance(out.get(k), dict):
@@ -102,6 +104,7 @@ def _num(cfg: Dict[str, Any], section: str, key: str, default=0) -> float:
 
 
 def validate_config(cfg: Dict[str, Any]) -> List[str]:
+    """返回全部校验错误列表（空列表 = 通过）；永不抛异常，便于热更新降级。"""
     if not isinstance(cfg, dict):
         return ["config must be an object"]
     sections = ("concurrency", "runtime", "budget", "download", "harness", "storage", "model", "policy", "app", "controller")
@@ -186,6 +189,18 @@ def _validate_config(cfg):
             errors.append("only official DeepSeek model ids are allowed")
     else:
         errors.append("unknown model.provider; use baizhi_anthropic or deepseek_official_openai")
+    # 双模型换挡（预留逻辑）：pro_model 必须在所选通道白名单内，pro_from_stage
+    # 必须为非负整数；配置期拦截，避免启动后 Provider 构造异常或路由错误。
+    pro_model = model.get("pro_model")
+    if pro_model:
+        if provider_name == OFFICIAL_PROVIDER_NAME and pro_model not in ALLOWED_MODELS:
+            errors.append("model.pro_model must be an official DeepSeek model id")
+        if provider_name == PROVIDER_NAME and pro_model != DEFAULT_MODEL:
+            errors.append("model.pro_model must be deepseek-flash on the company gateway")
+    if "pro_from_stage" in model:
+        stage_value = model["pro_from_stage"]
+        if not isinstance(stage_value, int) or isinstance(stage_value, bool) or stage_value < 0:
+            errors.append("model.pro_from_stage must be a non-negative integer")
     if any(key in model for key in ("api_key", "token", "secret")):
         errors.append("model credentials must be injected at runtime, not stored in config")
     if "key_cache_file" in model and not isinstance(model["key_cache_file"], str):
@@ -217,6 +232,7 @@ def _validate_config(cfg):
 
 
 def load_yaml(path) -> Dict[str, Any]:
+    """读取 YAML 配置；缺 PyYAML 或语法错误均抛 ConfigError。"""
     try:
         import yaml  # type: ignore
     except ImportError as exc:
@@ -229,16 +245,19 @@ def load_yaml(path) -> Dict[str, Any]:
 
 
 def load_json(path) -> Dict[str, Any]:
+    """读取 JSON 配置文件。"""
     with open(path, "r", encoding="utf-8") as fh:
         return json.load(fh)
 
 
 def load_file(path) -> Dict[str, Any]:
+    """按扩展名选择 JSON/YAML 解析器读取配置。"""
     path = str(path)
     return load_json(path) if path.endswith(".json") else load_yaml(path)
 
 
 def load_config(*paths) -> Dict[str, Any]:
+    """按顺序加载多个配置文件并深度合并，最后做别名归一；后加载者优先。"""
     merged: Dict[str, Any] = {}
     for path in paths:
         value = load_file(path)
@@ -249,6 +268,7 @@ def load_config(*paths) -> Dict[str, Any]:
 
 
 def config_hash(cfg: Dict[str, Any]) -> str:
+    """配置内容的 sha256（键排序后序列化），用于热更新变化检测与快照比对。"""
     return hashlib.sha256(json.dumps(cfg, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
@@ -256,6 +276,7 @@ class HotConfig:
     """受控配置快照热更新：只接受通过校验的新版本，并写入 config_snapshots。"""
 
     def __init__(self, *paths):
+        """加载并校验初始配置；校验失败抛 ConfigError（启动期 fail-fast）。"""
         self._paths = [str(p) for p in paths]
         self.config = load_config(*self._paths)
         errors = validate_config(self.config)
@@ -269,6 +290,10 @@ class HotConfig:
         return load_config(*self._paths)
 
     def reload_if_changed(self) -> bool:
+        """文件内容变化且新配置通过校验时替换；非法/半写/不可读一律保留旧值。
+
+        model/controller/harness/policy 四节为运行期固定项，变化即拒绝。
+        """
         try:
             candidate = self._read()
         except (ConfigError, OSError, ValueError) as exc:
@@ -292,6 +317,7 @@ class HotConfig:
         return True
 
     def snapshot(self, conn, source: str = "startup") -> int:
+        """把当前配置版本写入 config_snapshots 表，返回快照行号（审计用）。"""
         cur = conn.execute(
             "INSERT INTO config_snapshots(config_hash, source, payload, created_at) VALUES (?,?,?,?)",
             (self.hash, source, json.dumps(self.config, ensure_ascii=False, sort_keys=True), time.time()),

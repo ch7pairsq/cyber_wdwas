@@ -16,11 +16,13 @@ HEARTBEAT_FAILURE_GRACE_MULTIPLIER = 2
 
 @dataclass(slots=True)
 class HeartbeatFailure:
+    """心跳终态失败记录：状态码与响应文本。"""
     status_code: int | None
     text: str
 
 
 class HeartbeatLease:
+    """后台心跳租约线程：周期续期，连续失败或 403/409 时杀 worker 进程止损。"""
     def __init__(
         self,
         heartbeat: Callable[[], ApiResult],
@@ -28,6 +30,7 @@ class HeartbeatLease:
         worker_name: str,
         interval: int,
     ):
+        """heartbeat 为续期回调；interval 为发送周期（秒）。"""
         self._heartbeat = heartbeat
         self._scope = scope
         self._worker_name = worker_name
@@ -48,6 +51,7 @@ class HeartbeatLease:
         worker_name: str,
         interval: int,
     ) -> "HeartbeatLease":
+        """构造 Intent 租约心跳。"""
         return cls(
             heartbeat=lambda: client.heartbeat(project_id, intent_id, worker_name),
             scope=f"project={project_id} intent={intent_id}",
@@ -63,6 +67,7 @@ class HeartbeatLease:
         worker_name: str,
         interval: int,
     ) -> "HeartbeatLease":
+        """构造项目级 reason 锁心跳。"""
         return cls(
             heartbeat=lambda: client.reason_heartbeat(project_id, worker_name),
             scope=f"project={project_id} reason",
@@ -71,18 +76,22 @@ class HeartbeatLease:
         )
 
     def start(self) -> None:
+        """启动心跳线程。"""
         self._thread.start()
 
     def stop(self) -> None:
+        """停止心跳线程（任务结束时调用）。"""
         self._stop.set()
         self._thread.join(timeout=1)
 
     def attach_process(self, process: ExecProcess | None) -> None:
+        """挂接/解绑当前进程；若已判失败立即补杀。"""
         with self._lock:
             self._process = process
 
     @property
     def failure(self) -> HeartbeatFailure | None:
+        """心跳失败详情（未失败为 None）。"""
         return self._failure
 
     def _run(self) -> None:

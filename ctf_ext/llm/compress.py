@@ -57,6 +57,7 @@ def tool_output_preview(text: str, max_bytes: int) -> str:
 
 @dataclass
 class ContextItem:
+    """上下文条目：key 可追溯、priority 决定预算内的去留。"""
     key: str          # 如 evidence_id 或 fact id
     text: str
     priority: float   # 高者优先保留
@@ -65,6 +66,7 @@ class ContextItem:
 
 @dataclass
 class ContextPack:
+    """压缩结果：装入文本 + 已含条目 + 指针清单与估算 token 数。"""
     text: str
     included: List[str] = field(default_factory=list)
     pointers: List[str] = field(default_factory=list)

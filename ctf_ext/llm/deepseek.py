@@ -95,9 +95,11 @@ def _normalize_message(message):
 
 
 class DeepSeekProvider(ModelProvider):
+    """公司网关模型通道：仅允许固定 base_url 与 deepseek-flash，支持思考预算与工具。"""
     def __init__(self, api_key: Optional[str] = None, base_url: str = DEFAULT_BASE_URL,
                  model: str = DEFAULT_MODEL, timeout: float = 120.0,
                  limiter: Optional[RateLimiter] = None):
+        """base_url/model 白名单校验；api_key 缺省读环境变量。"""
         if not isinstance(base_url, str) or base_url.rstrip("/") != DEFAULT_BASE_URL:
             raise ProviderConfigError("only the configured company model gateway is allowed")
         if model != DEFAULT_MODEL:
@@ -109,10 +111,12 @@ class DeepSeekProvider(ModelProvider):
         self._limiter = limiter or RateLimiter(max_inflight=3)
 
     def __repr__(self):
+        """脱敏 repr：不泄露 api_key。"""
         return "DeepSeekProvider(company_gateway=True, model=deepseek-flash, key=***)"
 
     def complete(self, messages, *, system=None, json_mode=False, timeout=None,
                  max_tokens=4096, tools=None, thinking_budget=0):
+        """同步补全：限流 → 白名单网关 → 消息/工具规范化 → 解析为 ProviderResponse。"""
         if not self._api_key:
             raise ProviderConfigError("company model API key is not configured")
         if max_tokens <= 0:

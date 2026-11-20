@@ -10,15 +10,19 @@ from cairn.dispatcher.workers.health import HealthResult, http_ping, proxies_fro
 
 
 class PiDriver(WorkerDriver):
+    """pi CLI 适配器：多协议探活 + JSON 模式执行，从事件流提取会话与响应。"""
     type_name = "pi"
 
     def __init__(self, local: bool = False):
+        """local=True 使用宿主 pi 原生配置（不注入 models.json）。"""
         self.local = local
 
     def local_binary(self) -> str | None:
+        """本地模式依赖宿主 pi 二进制。"""
         return "pi"
 
     def check_health(self, worker: WorkerConfig, *, timeout: float) -> HealthResult:
+        """按 provider API 类型选端点做进程内探活。"""
         env = worker.env
         base = env["PI_BASE_URL"].rstrip("/")
         model = env["PI_MODEL"]
@@ -51,10 +55,12 @@ class PiDriver(WorkerDriver):
         )
 
     def describe_health(self, worker: WorkerConfig) -> str:
+        """健康检查方式描述。"""
         env = worker.env
         return f"POST {env['PI_BASE_URL']} (api={env['PI_PROVIDER_API']}, model={env['PI_MODEL']})"
 
     def build_execute(self, worker: WorkerConfig, prompt: str, session: str | None) -> DriverResult:
+        """构造 pi 执行命令（容器模式注入模型配置包装）。"""
         if self.local:
             return DriverResult(argv=self._local_argv(worker, prompt, session), session=session)
         env = worker.env
@@ -74,6 +80,7 @@ class PiDriver(WorkerDriver):
         return DriverResult(argv=self._wrap_with_models(worker, argv), session=session)
 
     def build_conclude(self, worker: WorkerConfig, prompt: str, session: str) -> list[str]:
+        """构造 pi 收尾命令（显式续接会话）。"""
         if self.local:
             return self._local_argv(worker, prompt, session)
         env = worker.env
@@ -117,6 +124,7 @@ class PiDriver(WorkerDriver):
         return ["/bin/sh", "-lc", script, "--", session_dir, *pi_argv]
 
     def extract_session(self, session: str | None, stdout: str, stderr: str) -> str | None:
+        """从 pi 事件流中提取 session 事件 id。"""
         if session:
             return session
         for event in self._iter_events(stdout):
@@ -128,6 +136,7 @@ class PiDriver(WorkerDriver):
         return None
 
     def extract_response_text(self, stdout: str, stderr: str) -> str:
+        """从 pi 事件流提取最后一条 assistant 消息文本。"""
         assistant_message: dict[str, Any] | None = None
         for event in self._iter_events(stdout):
             event_type = event.get("type")

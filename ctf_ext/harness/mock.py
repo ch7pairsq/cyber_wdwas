@@ -40,7 +40,9 @@ def default_practice_challenges():
 
 
 class MockHarnessAdapter(HarnessAdapter):
+    """内置练习题适配器：固定 flag 判定 + 提交幂等，用于端到端链路验证。"""
     def __init__(self, challenges: List[Dict[str, object]], competition_id: str = "practice-mock"):
+        """challenges 为原始题目 dict（含 metadata.files 附件与 flag 判定键）。"""
         self._raw = challenges
         self._competition_id = competition_id
         self._ctx: Optional[HarnessContext] = None
@@ -48,16 +50,19 @@ class MockHarnessAdapter(HarnessAdapter):
         self._receipts: Dict[str, SubmitReceipt] = {}
 
     def startup(self) -> HarnessContext:
+        """建立 v1-mock 上下文（必须先于 read_tasks）。"""
         self._ctx = HarnessContext(protocol="v1-mock", competition_id=self._competition_id)
         return self._ctx
 
     def read_tasks(self) -> List[ChallengeInput]:
+        """原始题目 dict → 标准化 ChallengeInput 列表。"""
         if not self._ctx:
             raise RuntimeError("startup() must be called before read_tasks()")
         self._tasks = [parse_challenge(raw, protocol="v1-mock") for raw in self._raw]
         return list(self._tasks)
 
     def submit_answer(self, submission: Submission) -> SubmitReceipt:
+        """幂等判定：同 key 返回首次回执；答案精确匹配内置 flag 才 ACCEPTED。"""
         key = submission.idempotency_key
         if key in self._receipts:  # 幂等：不重复判定（附录 E）
             return self._receipts[key]
@@ -85,9 +90,11 @@ class MockHarnessAdapter(HarnessAdapter):
         raise FileNotFoundError(ref)
 
     def get_receipt(self, idempotency_key: str) -> Optional[SubmitReceipt]:
+        """按幂等键查询已记录回执。"""
         return self._receipts.get(idempotency_key)
 
     def finalize(self, summary: RunSummary) -> dict:
+        """汇总为 finalize 报告（协议/竞赛/结果/备注/时间戳）。"""
         return {
             "protocol": "v1-mock",
             "competition_id": self._competition_id,

@@ -11,20 +11,26 @@ from .policy import PolicyDenied, PolicyEngine
 
 
 class QuotaExceeded(Exception):
+    """流式下载超出单文件/总配额（Content-Length 不可信时的实时护栏）。"""
     def __init__(self, used: int, limit: int):
+        """used/limit 供上层日志与指标记录。"""
         super().__init__("download exceeded: used {} > limit {}".format(used, limit))
         self.used = used
         self.limit = limit
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """重定向阻断器：任何 3xx 都抛 PolicyDenied（逐跳需重新过策略）。"""
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102
+        """阻断任何重定向；新目标 URL 必须重新过策略。"""
         raise PolicyDenied("REDIRECT_BLOCKED", "redirect blocked: " + str(newurl))
 
 
 class DownloadController:
+    """下载控制器：URL 预检 → 头部复检 → 流式计数 → 总配额复核。"""
     def __init__(self, policy: PolicyEngine, opener: Optional[Callable] = None,
                  chunk_size: int = 65536):
+        """opener 可注入 fake（测试）；默认带重定向阻断。"""
         self._policy = policy
         self._chunk = chunk_size
         self.total_used = 0
@@ -36,6 +42,7 @@ class DownloadController:
             self._opener = opener  # 测试可注入 fake opener
 
     def fetch_bytes(self, url: str, timeout: int = 30) -> bytes:
+        """受控下载：拒绝时不建立连接；超出限额即中断并抛 QuotaExceeded。"""
         # 先按 URL 做策略判定：拒绝时绝不连接
         self._policy.enforce(self._policy.decide_download(url))
         req = urllib.request.Request(url, headers={"User-Agent": "ctf-agent/0.1"})

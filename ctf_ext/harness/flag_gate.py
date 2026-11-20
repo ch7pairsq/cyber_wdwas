@@ -14,6 +14,7 @@ FLAG_PATTERN = re.compile(r'(?<![\w{])flag\{[^{}\s]{1,200}\}(?![\w}])', re.IGNOR
 EVIDENCE_PATTERN = re.compile(r'(?<![\w{\[])flag(?:\{[^{}\s]{1,200}\}|\[[^\[\]\s]{1,200}\])(?![\w}\]])', re.IGNORECASE)
 
 def normalized_flag(value):
+    """FLAG 归一化：校验格式并 casefold 花括号内内容；非法格式直接拒绝。"""
     if not EVIDENCE_PATTERN.fullmatch(value):
         raise ValueError('unsupported flag format')
     return 'flag{' + value[5:-1].casefold() + '}'
@@ -22,6 +23,7 @@ DECOY = re.compile(r'session[-_ ]?id|request[-_ ]?id|decoy|example|dummy|fake|�
 
 @dataclass
 class GateDecision:
+    """三门评审决策：状态/级别/原因/命中的证据与命令及各门通过情况。"""
     challenge_id: str
     answer: str
     status: str
@@ -35,13 +37,20 @@ class GateDecision:
 
 
 class FlagGate:
+    """FLAG 三门门控：grounding（证据落地）→ negation（三票反驳）→ interrogation（追问）。
+
+    L1 逐字命中走确定性快路径（不消耗 LLM）；L2 必须完成模型审阅；
+    诱饵/低熵/多匹配一律降级拒绝。
+    """
     def __init__(self, store, reviewer=None, *, case_mode='preserve'):
+        """reviewer 为 L2 审阅者；case_mode 决定提交时的大小写归一。"""
         if case_mode not in ('preserve', 'upper', 'lower'):
             raise ValueError('explicit format rule required')
         self.store, self.reviewer, self.case_mode = store, reviewer, case_mode
 
     @staticmethod
     def declaration(workspace):
+        """安全读取工作区 FLAG 声明：限 4096B 单行普通文件，拒符号链接。"""
         path = workspace / 'FLAG'
         fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         try:
@@ -59,6 +68,7 @@ class FlagGate:
             os.close(fd)
 
     def evaluate(self, challenge_id, candidate, evidence_ids, *, timeout=30):
+        """评审入口：声明比对 → 诱饵检测 → 证据检索 → L1/L2 分流 → 三门判定。"""
         started = time.monotonic()
         decision = GateDecision(challenge_id, candidate or '', 'rejected', 'L4', 'missing declaration or grounding')
         try:
@@ -162,6 +172,7 @@ class FlagGate:
             return decision
 
     def record(self, db, decision):
+        """把决策幂等写入 gate_decisions 表（审计/指标用）。"""
         db.execute('INSERT OR IGNORE INTO gate_decisions VALUES(?,?,?,?,?,?,?)',
                    (decision.id, decision.challenge_id, decision.answer, decision.status, decision.level,
                     json.dumps(asdict(decision), ensure_ascii=False), time.time()))
@@ -170,19 +181,24 @@ class FlagGate:
 class MockReviewer:
     """仅用于 mock 的可解释校验，不能冒充真实模型审阅。"""
     def negate(self, focus, index, timeout):
+        """mock 审阅票：输出窗口含诱饵词则投反驳。"""
         return bool(DECOY.search(focus['output_window']))
 
     def interrogate(self, focus, timeout):
+        """mock 追问：来源/唯一性/格式三项布尔自检。"""
         return {'source': bool(focus['argv']),
                 'unique': len(FLAG_PATTERN.findall(focus['output_window'])) == 1,
                 'format': bool(FLAG_PATTERN.fullmatch(focus['candidate']))}
 
 
 class ProviderReviewer:
+    """模型审阅者：经会话控制器预留/扣减预算后调用 JSON 模式评审。"""
     def __init__(self, provider, control):
+        """provider 为模型通道；control 为该题 SessionControl（预算纪律）。"""
         self.provider, self.control = provider, control
 
     def _ask(self, focus, instruction, timeout):
+        """单次审阅调用：预留 → 剩余预算封顶 → JSON 解析；异常向上传播。"""
         self.control.reserve('gate-review', 'v1', [instruction], hashlib.sha256(json.dumps(focus, sort_keys=True).encode()).hexdigest(), is_tool=False)
         remaining = self.control.remaining()
         if remaining['tokens'] < 512:
@@ -194,10 +210,12 @@ class ProviderReviewer:
         return json.loads(response.text)
 
     def negate(self, focus, index, timeout):
+        """独立反驳票：只接受 {"refute": bool}。"""
         data = self._ask(focus, '独立审阅票' + str(index) + '：尝试反驳候选来源；只返回 {"refute":true或false}。', timeout)
         if set(data) != {'refute'} or type(data['refute']) is not bool:
             raise ValueError('invalid reviewer output')
         return data['refute']
 
     def interrogate(self, focus, timeout):
+        """追问三项：source/unique/format 全部为 true 才通过。"""
         return self._ask(focus, '逐项追问：来源命令可靠、输出唯一可解释、格式匹配。只返回 source/unique/format 三个布尔值。', timeout)

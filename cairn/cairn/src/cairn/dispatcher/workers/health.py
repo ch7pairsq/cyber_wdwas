@@ -9,6 +9,7 @@ DETAIL_LIMIT = 200
 
 @dataclass(slots=True)
 class HealthResult:
+    """健康探活结果：是否可用、HTTP 状态码与截断详情。"""
     ok: bool
     status: int | None
     detail: str
