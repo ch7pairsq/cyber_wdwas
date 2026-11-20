@@ -127,18 +127,33 @@ class SkillLoader:
                 return s
         raise SkillNotFound(name)
 
+    @staticmethod
+    def _word_pattern(term: str) -> str:
+        """词边界匹配：term 必须整词出现，不是更长词的子串。"""
+        return r"(?<![a-z0-9])" + re.escape(term) + r"(?![a-z0-9])"
+
     def select(self, domain: Optional[str] = None, query: str = "",
                limit: int = 2) -> List[Dict[str, object]]:
         """按题目领域和关键词打分，只返回最相关的少量技能。
 
-        领域不匹配且名称无关键词命中时返回空，避免把无关技巧塞进 prompt。
+        打分规则（2026-11-20 收紧，正式赛 static_file_server 配 php 技能的
+        教训）：
+        - 词边界匹配：term 必须整词出现（"file" 不命中 zip**file**、
+          "app.py" 的碎片 "py" 不命中含 py 的关键词）；
+        - 查询词去重：同一词多次出现只计一次分（词频不等于相关性）；
+        - 最短 term 长度 3：排除扩展名类碎片词（py、md、io）；
+        - 入围门槛 5.0：domain 精确命中（+6）直接入围；泛分类（如 ctf）
+          需要两个不同实词命中（3+3）或 name+keyword 同词命中（2+3=5）。
+          单关键词弱命中不入围——宁可不出技能，也不塞无关技巧占 prompt。
         """
         limit = max(0, int(limit))
         if not limit:
             return []
         domain_text = (domain or "").strip().casefold()
         domain_text = _DOMAIN_ALIASES.get(domain_text, domain_text)
-        terms = [t for t in re.findall(r"[a-z0-9]+", (query or "").casefold()) if len(t) >= 2]
+        terms = list(dict.fromkeys(
+            t for t in re.findall(r"[a-z0-9]+", (query or "").casefold())
+            if len(t) >= 3))
         scored: List[Tuple[float, int, Dict[str, object]]] = []
         for meta in self._index:
             name = str(meta["name"]).casefold()
@@ -147,14 +162,15 @@ class SkillLoader:
             score = 0.0
             if domain_text and skill_domain == domain_text:
                 score += 6.0
-            elif domain_text and domain_text in name:
+            elif domain_text and re.search(self._word_pattern(domain_text), name):
                 score += 2.0
             for term in terms:
-                if term in name or term in skill_domain:
+                if re.search(self._word_pattern(term), name) or \
+                        re.search(self._word_pattern(term), skill_domain):
                     score += 2.0
-                elif keywords and term in keywords:
+                elif keywords and re.search(self._word_pattern(term), keywords):
                     score += 3.0
-            if score <= 0:
+            if score < 5.0:
                 continue
             # 同等匹配优先更小、更低风险的章节，减少上下文占用。
             hint = int(meta.get("tokens_hint") or 0)
