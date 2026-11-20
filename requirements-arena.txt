@@ -1,0 +1,15 @@
+# 算法题计算库（竞赛镜像离线叠加层）
+# devbox 无外网：Mac 预下载 cp312/manylinux wheel → rsync → 镜像内
+# `pip install --no-index --find-links=/tmp/wheels` 离线安装。
+# 构建方法与层结构见 docs/COMPETITION.md「v7 镜像」一节。
+# 运行身份 10001:10001 与 requests==2.32.3 锁版均不受本清单影响。
+z3-solver==4.15.4.0
+sympy==1.14.0
+pycryptodome==4.5.0
+gmpy2==2.3.2
+numpy==2.5.5
+scipy==1.18.1
+pwntools==4.15.1
+pillow==13.0.0
+# 镜像内置 pytest，便于赛场上容器内自检（与 requirements-lock 的 CI 锁版一致）
+pytest==8.3.3

@@ -227,7 +227,37 @@ docker run --rm --network none --read-only --cap-drop ALL \
   digest `sha256:d194b5e5eae5892acf5c584c8f9f18e3b076af474fe3a6c137d6e1ff52c57522`
   （重跑需平台重新拉取新 digest，避免再调度到旧镜像实例）。
 
+### v7 镜像：算法题计算库离线叠加（2026-11-20）
+
+- **目标**：正式赛算法题所需的 Python 计算库：z3-solver 4.15.4.0 / sympy 1.14.0 /
+  pycryptodome 4.5.0 / gmpy2 2.3.2 / numpy 2.5.5 / scipy 1.18.1 / pwntools 4.15.1 /
+  pillow 13.0.0，另含 pytest 8.3.3 便于容器内自检。清单见 `requirements-arena.txt`；
+  requests 保持锁版 2.32.3 不变。
+- **离线构建法**（devbox 无外网）：Mac 用阿里云镜像 `pip download --platform
+  manylinux2014_x86_64 --python-version 312 --only-binary=:all:` 预下载 44 个 wheel
+  （含全部依赖与 pip-26.0.1 自身）→ rsync 至 `/root/cyber-wdwas-docker/wheels/` →
+  overlay 层安装。base 镜像 venv 无 pip，用
+  `python3 /tmp/wheels/pip-26.0.1-py3-none-any.whl/pip install` 直接从 wheel 运行。
+- **overlay.Dockerfile 关键点**（上下文 `/root/cyber-wdwas-docker`）：
+  1. `COPY source/ /app/` **全量同步当前源码**（配 `.dockerignore` 排除
+     `source/.git`、`source/.monkeyai`、`source/.pytest_cache`、`source/data`、
+     `__pycache__`；源码真实体积 19MB，`source/data` 运行期工作区垃圾 1.3G）。
+     逐文件 COPY 会漏新增文件并造成新旧版本倾斜——v7 前的候选镜像因旧
+     `provider.py` 缺 `TRANSPORT_RETRY_DELAYS`、缺新增 `store/solutions.py`
+     在无凭据冒烟中 ImportError，全量 COPY 后消除。
+  2. base 镜像默认 USER 为运行身份 10001:10001 且 venv 归 root：pip 安装层
+     前后必须 `USER root` / `USER 10001:10001`，否则 `Permission denied` 且
+     运行身份漂移。
+- **验证**：候选镜像内全量 pytest 364 passed / 1 skipped / 0 failed；算法冒烟
+  （z3 约束求解、sympy 素数、AES 加解密）通过；13 个库全部导入成功；无凭据
+  冒烟 rc=1 且尾行为预期 fail-closed 提示；运行身份 10001:10001、entrypoint
+  `bash /app/scripts/run_official.sh` 不变；22 层。
+- **推送**：`docker save` 626MB tar → `scripts/push_tar.py` 推
+  `portus.in.chaitin.net/yuqiao.zhang/cyber-wdwas:dev`（manifest PUT → 201，
+  base 层全部 exists 复用，仅上传源码/wheels/pip 三层）；registry config digest
+  `sha256:beb875094a076e4bd…` 与本地 tar 一致（用户/entrypoint 已比对）。
+
 ### 仍未验收
 
 - 真实凭据与平台的端到端联调（BAIZHI_API_KEY 真实调用、Arena 任务/附件/提交回执）未执行，需要明确授权后在正式平台进行。
-- 镜像交付方式未定：仓库推送（`portus.in.chaitin.net`，需确认命名空间/凭据与推送授权）或 `docker save` 文件上传（需平台通道与大小限制）。当前未推送、未上传。
+- 镜像交付方式未定：仓库推送（`portus.in.chaitin.net`，v7 已验证可用：命名空间 `yuqiao.zhang/cyber-wdwas`、`scripts/push_tar.py` 推送、`:dev` tag）或 `docker save` 文件上传（需平台通道与大小限制）。最终比赛交付 tag 待平台确认后推送。
