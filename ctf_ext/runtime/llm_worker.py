@@ -33,6 +33,30 @@ REPAIR_SUFFIX = "上一次输出不合格，原因如下：\n- {errors}\n只输�
 FENCE = chr(96) * 3
 
 
+def _last_message_head(messages, limit: int = 200) -> str:
+    """空响应诊断：末条消息的脱敏单行摘要；只取头部，防日志灌爆。
+
+    正式赛实测（2026-11-21）：empty model response 几乎都发生在 strings/
+    file_info 等工具输出进入上下文后的下一轮，需要末条消息内容定位触发源。
+    """
+    try:
+        last = messages[-1]
+        content = last.get("content")
+        if isinstance(content, list):
+            parts = []
+            for block in content:
+                if isinstance(block, dict):
+                    text = block.get("text")
+                    parts.append(str(text) if isinstance(text, str)
+                                 else str(block.get("type") or "?"))
+            content = " | ".join(parts)
+        from ..store.lessons import sanitize_lesson_text
+        return "{} {}".format(last.get("role", "?"),
+                              sanitize_lesson_text(str(content), limit))
+    except Exception:
+        return "?"
+
+
 def _parse_json(text: str) -> Optional[Dict[str, Any]]:
     """从模型输出中提取 JSON 对象：剥 ```json 围栏，取首尾大括号解析；失败返回 None。"""
     body = (text or "").strip()
@@ -263,6 +287,10 @@ class LlmWorker:
                 return self._failure(claim, "failed", OUTCOME_ERROR, "rate_limited", started, tokens, skills_loaded, tool_calls, skills_indexed)
             except (ProviderError, ProviderConfigError) as exc:
                 print("[llm] error: {}".format(exc), file=sys.stderr, flush=True)
+                if "empty model response" in str(exc):
+                    # 空响应诊断：末条消息脱敏摘要，定位触发上游空回的内容。
+                    print("[llm] empty-response context: {}".format(
+                        _last_message_head(messages)), file=sys.stderr, flush=True)
                 if thinking_used > 0 and not self._thinking_down:
                     self._thinking_down = True
                     continue

@@ -216,7 +216,10 @@ class DeepSeekProvider(ModelProvider):
                         raise ProviderError("non-text/tool response is not permitted")
                 text = "".join(text_parts)
                 if not text and not tool_calls:
-                    raise ProviderError("empty model response")
+                    # 诊断信息（枚举/数字，不含内容）：同 openai_compat，区分截断与真空响应。
+                    raise ProviderError("empty model response (stop_reason={}, output_tokens={})".format(
+                        data.get("stop_reason") or "-",
+                        int((data.get("usage") or {}).get("output_tokens") or 0)))
                 usage = data.get("usage") or {}
                 prompt = sum(int(usage.get(k, 0)) for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
                 completion = int(usage.get("output_tokens", 0))

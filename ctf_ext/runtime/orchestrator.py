@@ -31,6 +31,11 @@ from .watchdog import ClaimTimeout, DeadlineGuard, recover_expired_leases
 
 class Orchestrator:
     """编排主循环：领取→执行→门控→落库→提交的全流程状态机与资源守护。"""
+    # ProviderError 熔断阈值：同一 intent 第 N 次领取（attempt_no 每次 claim 自增）
+    # 仍以 Provider/配置类错误失败时，置为 blocked 不再重试。正式赛实测
+    # empty model response 在同一 intent 上循环 20+ 次烧穿 endgame 预算，
+    # 唯一挡板是单 intent 预算墙（远水救不了近火）。
+    provider_error_max_attempts = 3
     # deadline 后收尾宽限（秒）：真实平台提交回执往返可达 client_timeout=40s，
     # 只给 1s 会把在途回执关在门外——该题永远停在 SENDING，分数丢失且
     # 正式赛一次性窗口无重赛机会。排空即返回，happy path 无额外墙钟。
@@ -314,6 +319,15 @@ class Orchestrator:
         challenge = self._challenge_context(claim)
         started = self._clock()
         result = self._run_worker(claim, challenge, started)
+        if self._should_break_provider_errors(claim, result):
+            self._board.append_event("provider_error_exhausted", claim.intent_id, {
+                "challenge_id": claim.challenge_id,
+                "attempts": int(getattr(claim, "attempt_no", 0) or 0),
+                "failure_reason": result.failure_reason,
+            })
+            result.status = "blocked"
+            result.failure_reason = "provider_error_exhausted ({} attempts): {}".format(
+                getattr(claim, "attempt_no", 0), result.failure_reason)
         print("[orch] result ch={} status={} outcome={} reason={}".format(
             claim.challenge_id, result.status, result.outcome,
             result.failure_reason or "-"), file=sys.stderr, flush=True)
@@ -366,6 +380,18 @@ class Orchestrator:
             self._board.append_event("worker_failed", claim.intent_id, {"error": type(exc).__name__})
         result.owner = self._worker_name
         return result
+
+    def _should_break_provider_errors(self, claim, result) -> bool:
+        """连续 Provider/配置类失败熔断：同一 intent 第 3 次领取仍失败即 blocked。
+
+        只熔断 ProviderError/ProviderConfigError（模型端点性失败，重试同参
+        大概率重演）；timeout/rate_limited 等瞬态失败保持原重试语义。
+        """
+        if result.status != "failed" or result.outcome != "error":
+            return False
+        if str(result.failure_reason or "") not in ("ProviderError", "ProviderConfigError"):
+            return False
+        return int(getattr(claim, "attempt_no", 0) or 0) >= self.provider_error_max_attempts
 
     def _validate_contract(self, claim, result) -> None:
         """B.2 契约校验：不合格输出降级为可重试失败，清空候选答案与事实。"""

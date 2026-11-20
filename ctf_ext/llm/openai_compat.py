@@ -154,7 +154,11 @@ def _parse_response(data, declared):
             raise ProviderError("invalid official api response")
         tool_calls.append({"id": call_id, "name": name, "input": args})
     if not text and not tool_calls:
-        raise ProviderError("empty model response")
+        # 诊断信息（枚举/数字，不含内容）：区分截断（finish_reason=length 且
+        # completion>0，通常是 max_tokens 被推理耗尽）与真空响应（疑似上游拦截）。
+        raise ProviderError("empty model response (finish_reason={}, completion_tokens={})".format(
+            choice.get("finish_reason") or "-",
+            int((data.get("usage") or {}).get("completion_tokens") or 0)))
     usage = data.get("usage") or {}
     if not isinstance(usage, dict):
         raise ProviderError("invalid official api response")
