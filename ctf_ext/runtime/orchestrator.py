@@ -306,10 +306,16 @@ class Orchestrator:
 
     def _execute_claim(self, claim):
         """执行一个已领取 Intent；拆成执行/契约/校验/落库/后处理五段。"""
+        print("[orch] claim ch={} intent={} strategy={}".format(
+            claim.challenge_id, claim.intent_id, claim.strategy_key),
+            file=sys.stderr, flush=True)
         self._ensure_environment(claim.challenge_id)
         challenge = self._challenge_context(claim)
         started = self._clock()
         result = self._run_worker(claim, challenge, started)
+        print("[orch] result ch={} status={} outcome={} reason={}".format(
+            claim.challenge_id, result.status, result.outcome,
+            result.failure_reason or "-"), file=sys.stderr, flush=True)
         self._validate_contract(claim, result)
         self._record_usage(result)
         decision = self._evaluate_candidate(claim, result, started)
@@ -626,6 +632,9 @@ class Orchestrator:
             factory.deadline = deadline
         global_budget = getattr(self._worker, "_global_budget", None)
         self._touch_heartbeat()
+        print("[orch] run start worker={} deadline={}s parallel={}".format(
+            self._worker_name, max_seconds, self._parallel_agents),
+            file=sys.stderr, flush=True)
         tasks = self.bootstrap()
         try:
             recover_expired_leases(self._board)  # 启动即恢复未完成租约（§17.4）
@@ -646,6 +655,8 @@ class Orchestrator:
             self._drain_gateway()
         self._housekeeping(force=True)  # 运行收尾：回收全部终态工作区
         solved = self._solved()
+        print("[orch] run loop finished: tasks={} solved={} results={}".format(
+            len(tasks), sorted(solved), len(results)), file=sys.stderr, flush=True)
         for result in results:
             if result["submission"]:
                 row = self._board.latest_submission(result["challenge_id"])

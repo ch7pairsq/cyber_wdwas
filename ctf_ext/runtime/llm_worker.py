@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import time
 from typing import Any, Dict, List, Optional
 
@@ -211,8 +212,23 @@ class LlmWorker:
                 if thinking_used > 0:
                     request["thinking_budget"] = thinking_used
                 provider = self._select_provider(claim)
+                prompt_chars = sum(len(str(m.get("content") or "")) for m in messages)
+                print("[llm] call model={} thinking={} mt={} t={} round={} msgs={} "
+                      "tools={} chars={}".format(
+                          getattr(provider, "_model", "?"), thinking_used,
+                          request.get("max_tokens"), request.get("timeout"),
+                          tool_rounds, len(messages), len(request.get("tools") or ()),
+                          prompt_chars), file=sys.stderr, flush=True)
                 response = provider.complete(messages, **request)
+                usage = getattr(response, "usage", None) or {}
+                print("[llm] ok p={} c={} stop={} tool_calls={} text_chars={}".format(
+                    usage.get("prompt_tokens"), usage.get("completion_tokens"),
+                    getattr(response, "stop_reason", "") or "-",
+                    len(response.tool_calls or ()), len(response.text or "")),
+                    file=sys.stderr, flush=True)
             except ProviderTimeout:
+                print("[llm] timeout (thinking={})".format(thinking_used),
+                      file=sys.stderr, flush=True)
                 if thinking_used > 0 and not self._thinking_down:
                     self._thinking_down = True  # 思考参数不被网关支持：退回无思考重试
                     continue
@@ -221,6 +237,7 @@ class LlmWorker:
                     continue
                 return self._failure(claim, "failed", OUTCOME_TIMEOUT, "timeout", started, tokens, skills_loaded, tool_calls, skills_indexed)
             except RateLimited:
+                print("[llm] rate limited", file=sys.stderr, flush=True)
                 if thinking_used > 0 and not self._thinking_down:
                     self._thinking_down = True
                     continue
@@ -229,6 +246,7 @@ class LlmWorker:
                     continue
                 return self._failure(claim, "failed", OUTCOME_ERROR, "rate_limited", started, tokens, skills_loaded, tool_calls, skills_indexed)
             except (ProviderError, ProviderConfigError) as exc:
+                print("[llm] error: {}".format(exc), file=sys.stderr, flush=True)
                 if thinking_used > 0 and not self._thinking_down:
                     self._thinking_down = True
                     continue
@@ -262,6 +280,10 @@ class LlmWorker:
                 if tool_rounds >= self._max_tool_rounds:
                     return self._failure(claim, "failed", OUTCOME_ERROR, "tool_round_limit", started, tokens, skills_loaded, tool_calls, skills_indexed)
                 messages.append({"role": "assistant", "content": self._assistant_content(response)})
+                print("[llm] tools round={} names={}".format(
+                    tool_rounds + 1,
+                    ",".join(str(c.get("name") or "?") for c in response.tool_calls)),
+                    file=sys.stderr, flush=True)
                 result_blocks = []
                 for call in response.tool_calls:
                     tool_calls += 1
@@ -279,13 +301,21 @@ class LlmWorker:
             payload = _parse_json(response.text)
             if payload is None:
                 errors = ["response is not a JSON object"]
+                print("[llm] contract: not json (attempt {} text_chars={})".format(
+                    contract_attempts + 1, len(response.text or "")),
+                    file=sys.stderr, flush=True)
             else:
                 payload.setdefault("task_id", claim.intent_id)
                 try:
                     validate_worker_output(payload, evidence_check=self._check)
                 except ContractViolation as exc:
                     errors = exc.errors
+                    print("[llm] contract violations (attempt {}): {}".format(
+                        contract_attempts + 1, "; ".join(errors[:4])),
+                        file=sys.stderr, flush=True)
                 else:
+                    print("[llm] contract ok (attempt {}), finishing claim".format(
+                        contract_attempts + 1), file=sys.stderr, flush=True)
                     return self._result(claim, payload, started, tokens, skills_loaded, tool_calls, skills_indexed)
             contract_attempts += 1
             if contract_attempts >= self._max_attempts:

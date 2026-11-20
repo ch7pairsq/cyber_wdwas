@@ -61,7 +61,8 @@ class FakeSession:
 
 def invoke(result=None, **kwargs):
     session = FakeSession(result if result is not None else FakeResponse())
-    fake = SimpleNamespace(Session=lambda: session, Timeout=TransportTimeout, RequestException=TransportError)
+    fake = SimpleNamespace(Session=lambda: session, Timeout=TransportTimeout,
+                           RequestException=TransportError, ConnectionError=TransportError)
     with patch.dict(sys.modules, {"requests": fake}):
         response = DeepSeekOfficialProvider(api_key="test-key-not-a-real-secret").complete(
             [{"role": "user", "content": "离线测试"}], system="只用提供的题目", json_mode=True, **kwargs)
@@ -180,7 +181,8 @@ def test_internal_anthropic_style_messages_are_translated():
                                      {"type": "text", "text": "继续"}]},
     ]
     session = FakeSession(FakeResponse())
-    fake = SimpleNamespace(Session=lambda: session, Timeout=TransportTimeout, RequestException=TransportError)
+    fake = SimpleNamespace(Session=lambda: session, Timeout=TransportTimeout,
+                           RequestException=TransportError, ConnectionError=TransportError)
     with patch.dict(sys.modules, {"requests": fake}):
         DeepSeekOfficialProvider(api_key="k").complete(messages, json_mode=True)
     sent = session.calls[0][1]["json"]["messages"]
@@ -266,3 +268,74 @@ def test_cli_make_provider_selects_official_channel():
         assert pro._model == "deepseek-v4-pro" and pro._api_key == provider._api_key
         assert pro is not provider
     expect(SystemExit, lambda: _make_provider({"model": {"provider": "external"}}))
+
+
+class SeqSession:
+    """按序返回结果/异常的会话桩：验证路由阶梯的尝试顺序。"""
+    def __init__(self, results):
+        self.results = list(results)
+        self.calls = []
+
+    def post(self, url, **kwargs):
+        self.calls.append(kwargs)
+        result = self.results.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    def close(self):
+        pass
+
+
+def _invoke_seq(results, provider=None):
+    session = SeqSession(results)
+    fake = SimpleNamespace(Session=lambda: session, Timeout=TransportTimeout,
+                           RequestException=TransportError, ConnectionError=TransportError)
+    provider = provider or DeepSeekOfficialProvider(api_key="test-key-not-a-real-secret", timeout=5)
+    with patch.dict(sys.modules, {"requests": fake}):
+        response = provider.complete([{"role": "user", "content": "离线测试"}],
+                                     system="只用提供的题目", json_mode=True)
+    return response, session, provider
+
+
+def test_model_route_falls_back_to_platform_tunnel_proxy():
+    # 直连被墙 → 经平台隧道代理（HTTPS_PROXY 显式地址）重试成功并固定路由
+    with patch.dict(os.environ, {"HTTPS_PROXY": "http://10.55.0.9:18082"}):
+        response, session, provider = _invoke_seq([TransportError("direct blocked"), FakeResponse()])
+    assert response.text == '{"ok":true}'
+    assert provider._proxy_route == "proxy"
+    proxies = [kw.get("proxies") for kw in session.calls]
+    assert proxies[0] is None
+    assert proxies[1] == {"http": "http://10.55.0.9:18082", "https": "http://10.55.0.9:18082"}
+    # 路由已固定：后续调用直接走代理，不再先撞直连（env 代理仍在时）
+    session.results = [FakeResponse()]
+    with patch.dict(os.environ, {"HTTPS_PROXY": "http://10.55.0.9:18082"}), \
+            patch.dict(sys.modules, {"requests": SimpleNamespace(
+                Session=lambda: session, Timeout=TransportTimeout,
+                RequestException=TransportError, ConnectionError=TransportError)}):
+        provider.complete([{"role": "user", "content": "离线测试"}], json_mode=True)
+    assert session.calls[-1].get("proxies") == {
+        "http": "http://10.55.0.9:18082", "https": "http://10.55.0.9:18082"}
+
+
+def test_model_route_direct_ok_never_touches_proxy():
+    # 直连成功：代理候选零流量（凭据只发官方端点的姿态不变）
+    with patch.dict(os.environ, {"HTTPS_PROXY": "http://10.55.0.9:18082"}):
+        response, session, provider = _invoke_seq([FakeResponse()])
+    assert provider._proxy_route == "direct"
+    assert len(session.calls) == 1 and session.calls[0].get("proxies") is None
+
+
+def test_model_route_all_routes_timeout_maps_to_provider_timeout():
+    # 双路由都黑洞超时 → 上层仍按 ProviderTimeout 语义处理（有界重试/失败）
+    with patch.dict(os.environ, {"HTTPS_PROXY": "http://10.55.0.9:18082"}):
+        session = SeqSession([TransportTimeout("t1"), TransportTimeout("t2")])
+        fake = SimpleNamespace(Session=lambda: session, Timeout=TransportTimeout,
+                               RequestException=TransportError, ConnectionError=TransportError)
+        provider = DeepSeekOfficialProvider(api_key="test-key-not-a-real-secret", timeout=5)
+        with patch.dict(sys.modules, {"requests": fake}):
+            try:
+                provider.complete([{"role": "user", "content": "离线测试"}], json_mode=True)
+                raise AssertionError("expected ProviderTimeout")
+            except ProviderTimeout:
+                pass

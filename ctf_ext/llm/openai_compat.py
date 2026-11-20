@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from typing import Optional
 
 from .deepseek import _validate_tools
@@ -177,10 +178,54 @@ class DeepSeekOfficialProvider(ModelProvider):
         self._model = model
         self._timeout = timeout
         self._limiter = limiter or RateLimiter(max_inflight=3)
+        self._proxy_route = None  # None 未定 / "direct" / "proxy"（成功后固定）
 
     def __repr__(self):
         """脱敏 repr：不泄露 api_key。"""
         return "DeepSeekOfficialProvider(official_api=True, model={}, key=***)".format(self._model)
+
+    def _send(self, session, payload, timeout):
+        """直连优先；传输层失败且平台隧道代理可用时经代理重试，成功即记住路由。
+
+        trust_env=False：凭据只发往固定官方端点，不继承任意环境代理；
+        备选代理取平台隧道的显式地址（HTTPS_PROXY，TLS 端到端不变）。
+        连接类失败（含黑洞路由超时）触发回退；HTTP 状态码不触发。
+        """
+        import requests
+        routes = [("direct", None)]
+        env_proxy = (os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+                     or os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
+                     or "").strip()
+        if env_proxy:
+            routes.append(("proxy", {"http": env_proxy, "https": env_proxy}))
+        if self._proxy_route == "proxy":
+            routes.reverse()
+        elif self._proxy_route == "direct":
+            routes = routes[:1]
+        failures = []
+        timed_out = False
+        for label, proxies in routes:
+            try:
+                resp = session.post(self._base_url + "/chat/completions", json=payload,
+                                    headers={"Authorization": "Bearer " + self._api_key,
+                                             "Content-Type": "application/json"},
+                                    timeout=timeout, allow_redirects=False, stream=True,
+                                    verify=True, proxies=proxies)
+            except (requests.ConnectionError, requests.Timeout) as exc:
+                timed_out = timed_out or isinstance(exc, requests.Timeout)
+                failures.append("{}:{}".format(label, type(exc).__name__))
+                print("[llm] transport failed on {} route ({}: {})".format(
+                    label, type(exc).__name__, type(exc).__doc__ or ""),
+                    file=sys.stderr, flush=True)
+                continue
+            if label != self._proxy_route:
+                self._proxy_route = label
+                print("[llm] pinned model route: {} ({} attempt{})".format(
+                    label, len(failures), "" if len(failures) == 1 else "s"),
+                    file=sys.stderr, flush=True)
+            return resp
+        raise (requests.Timeout if timed_out else requests.ConnectionError)(
+            "model transport failed on all routes: " + "; ".join(failures))
 
     def complete(self, messages, *, system=None, json_mode=False, timeout=None,
                  max_tokens=4096, tools=None, thinking_budget=0):
@@ -221,13 +266,10 @@ class DeepSeekOfficialProvider(ModelProvider):
         session = None
         try:
             session = requests.Session()
-            # 官方 API 同样不继承任意 HTTP_PROXY，凭据只发往固定端点。
+            # 官方 API 同样不继承任意 HTTP_PROXY，凭据只发往固定端点；
+            # 平台隧道路由见 _send（显式地址，非环境继承）。
             session.trust_env = False
-            response = session.post(self._base_url + "/chat/completions", json=payload,
-                                    headers={"Authorization": "Bearer " + self._api_key,
-                                             "Content-Type": "application/json"},
-                                    timeout=timeout or self._timeout,
-                                    allow_redirects=False, stream=True, verify=True)
+            response = self._send(session, payload, timeout or self._timeout)
             if response.status_code == 429:
                 self._limiter.on_rate_limited()
                 raise RateLimited("429 from official deepseek api")

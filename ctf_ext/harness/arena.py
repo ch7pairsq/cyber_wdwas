@@ -429,6 +429,7 @@ class ArenaClient:
         """
         failures = []
         last_http = None
+        started_at = time.monotonic()
         for index, route in enumerate(self._route_plan()):
             timeout = self._timeout if index == 0 else min(self._timeout, 10.0)
             for label, token in self._tokens:
@@ -457,6 +458,9 @@ class ArenaClient:
                           file=sys.stderr, flush=True)
                     self._token = token
                 self._pin_route(route)
+                print("[arena] {} {} -> {} ({}B, {:.2f}s, {})".format(
+                    method, path, code, len(body), time.monotonic() - started_at,
+                    self._route_name(route)), file=sys.stderr, flush=True)
                 return code, body
         if last_http is not None:
             return last_http
@@ -622,6 +626,15 @@ class ArenaHarnessAdapter(HarnessAdapter):
             raw_tasks.append(raw)
         self._raw = raw_tasks
         self._tasks = [parse_challenge(raw, protocol="v1-arena") for raw in raw_tasks]
+        print("[arena] tasks={}: {}".format(
+            len(self._tasks),
+            ", ".join("{}({})".format(t.challenge_id, t.name) for t in self._tasks)
+            or "EMPTY"), file=sys.stderr, flush=True)
+        if not self._tasks and items:
+            sample = items[0] if isinstance(items[0], dict) else None
+            print("[arena] listing had {} items but none parsed; sample keys={}".format(
+                len(items), sorted(sample) if sample else type(items[0]).__name__),
+                file=sys.stderr, flush=True)
         if self._auto_start and self._env_policy == "prewarm":
             # 平台限制最多 3 个并发环境（409 environment_limit）；超限即停止，
             # 未启动的挑战在提交触发 challenge_not_started 时按需重试。
