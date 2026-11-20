@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import threading
 import time
 import urllib.error
@@ -48,10 +49,52 @@ class ArenaProtocolError(RuntimeError):
 def _redact(text: str) -> str:
     """去掉可能混入错误文本的 token；防御性处理，正常路径 token 不进任何字符串。"""
     token = os.environ.get("ARENA_SOLVER_TOKEN", "")
-    if token and token in text:
+    # 真实 token 足够长；过短的字符串只可能是测试值，替换会误伤 "timed out" 之类的词。
+    if len(token) >= 8 and token in text:
         text = text.replace(token, "<redacted>")
     return text
 
+
+TRANSPORT_ENV_NAMES = ("ARENA_BASE_URL", "ARENA_SOLVER_TOKEN", "ARENA_PROXY",
+                       "ARENA_NETWORK_CIDR", "ALL_PROXY", "all_proxy",
+                       "HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy",
+                       "NO_PROXY", "no_proxy")
+MODEL_ENV_NAMES = ("OPENAI_BASE_URL", "OPENAI_API_BASE", "MODEL_BASE_URL",
+                   "MODEL_PROXY_URL", "BAIZHI_BASE_URL", "BAIZHI_API_KEY")
+
+
+def _env_safe_value(name: str, value: str) -> str:
+    """脱敏展示环境变量：凭据只报长度，URL 只报 scheme://host:port。"""
+    if not value:
+        return "<unset>"
+    if any(k in name.upper() for k in
+           ("TOKEN", "KEY", "SECRET", "PASSWORD", "PASSWD", "AUTH", "COOKIE")):
+        return "<set len={}>".format(len(value))
+    parsed = urllib.parse.urlsplit(value)
+    if parsed.scheme and parsed.hostname:
+        port = ":{}".format(parsed.port) if parsed.port else ""
+        return "{}://{}{}".format(parsed.scheme, parsed.hostname, port)
+    return value if len(value) <= 64 else value[:61] + "..."
+
+
+def describe_transport(base_url: str, fallbacks=()) -> str:
+    """启动横幅：Arena 地址、回退代理候选、关键环境变量（全部脱敏）。
+
+    平台 harness 的注入契约不完全可知（见 HARNESS-CHECKLIST §12.5），
+    启动即打印这些信息，出问题时无需再重建镜像就能判断网络路径。
+    """
+    lines = ["[arena] base={} fallbacks=[{}]".format(
+        _env_safe_value("ARENA_BASE_URL", base_url),
+        ", ".join(_env_safe_value("PROXY", v) for v in fallbacks) or "none")]
+    lines.append("[env] " + " ".join(
+        "{}={}".format(n, _env_safe_value(n, os.environ.get(n, "")))
+        for n in TRANSPORT_ENV_NAMES))
+    model = ["{}={}".format(n, _env_safe_value(n, os.environ.get(n, "")))
+             for n in MODEL_ENV_NAMES if os.environ.get(n)]
+    if model:
+        lines.append("[env-model] " + " ".join(model))
+    lines.append("[env-all] " + " ".join(sorted(os.environ)))
+    return "\n".join(lines)
 
 class ArenaClient:
     """只做 HTTP 收发与错误归一化；持有 token，不打印它。"""
@@ -67,30 +110,78 @@ class ArenaClient:
         self._token = token
         self._timeout = timeout
         self._proxy = self._parse_proxy(proxy)
+        # 路由状态：显式 ARENA_PROXY（参数或环境）固定走 SOCKS5；否则直连优先，
+        # 失败时按环境代理回退，成功后记住可用路由（见 _send）。
+        self._route = None
+        self._resolved = False
 
     @staticmethod
     def _parse_proxy(proxy):
         if not proxy:
             return None
         rest = proxy
+        # 先剥 scheme 再切用户信息：socks5://user:pass@host:port 的 @ 在 scheme 之后。
+        if not rest.startswith("socks5://"):
+            raise ArenaProtocolError("arena proxy must be socks5://[user:pass@]host:port")
+        rest = rest[len("socks5://"):]
         user = b""
         password = b""
         if "@" in rest:
             cred, _, rest = rest.rpartition("@")
             u, _, pw = cred.partition(":")
             user, password = u.encode(), pw.encode()
-        if not rest.startswith("socks5://"):
-            raise ArenaProtocolError("arena proxy must be socks5://[user:pass@]host:port")
-        rest = rest[len("socks5://"):]
         host, _, port_s = rest.partition(":")
         if not host or not port_s.isdigit():
             raise ArenaProtocolError("arena proxy must be socks5://[user:pass@]host:port")
         return (host, int(port_s), user, password)
 
-    def _socks5_connect(self, host, port):
+    @staticmethod
+    def _route_from_env_value(value: str):
+        """把环境里的代理值转成路由类别；不支持的 scheme 一律忽略。"""
+        scheme = urllib.parse.urlsplit(value).scheme.lower()
+        if scheme == "socks5":
+            return "socks"
+        if scheme in ("http", "https"):
+            return "http"
+        return None
+
+    def fallback_values(self):
+        """直连失败时可回退的代理（常见环境变量，去重保序，不含 ARENA_PROXY）。"""
+        out = []
+        for name in ("ALL_PROXY", "all_proxy", "HTTPS_PROXY", "https_proxy",
+                     "HTTP_PROXY", "http_proxy"):
+            value = (os.environ.get(name) or "").strip()
+            if value and value not in out and self._route_from_env_value(value):
+                out.append(value)
+        return out
+
+    def _fallback_routes(self):
+        routes = []
+        for value in self.fallback_values():
+            kind = self._route_from_env_value(value)
+            if kind == "socks":
+                try:
+                    route = ("socks", self._parse_proxy(value))
+                except ArenaProtocolError:
+                    continue
+            else:
+                route = ("http", value)
+            if route not in routes:
+                routes.append(route)
+        return routes
+
+    @staticmethod
+    def _route_name(route):
+        if not route:
+            return "direct"
+        if route[0] == "socks":
+            return "socks5://{}:{}".format(route[1][0], route[1][1])
+        return _env_safe_value("PROXY", str(route[1]))
+
+    def _socks5_connect(self, host, port, proxy=None):
         import socket as _socket
         import struct as _struct
-        phost, pport, user, password = self._proxy
+        phost, pport, user, password = proxy or self._proxy
         sock = _socket.create_connection((phost, pport), timeout=self._timeout)
         sock.settimeout(self._timeout)
         try:
@@ -115,8 +206,8 @@ class ArenaClient:
             sock.close()
             raise
 
-    def _http_over_socks(self, method, host, port, path, headers, body):
-        sock = self._socks5_connect(host, port)
+    def _http_over_socks(self, method, host, port, path, headers, body, proxy=None):
+        sock = self._socks5_connect(host, port, proxy)
         try:
             lines = ["{} {} HTTP/1.1".format(method, path),
                      "Host: {}:{}".format(host, port), "Connection: close"]
@@ -156,64 +247,81 @@ class ArenaClient:
         return code, payload
 
 
+    def _do_request(self, route, method, path, query, data, headers, timeout=None):
+        """按指定路由发一次请求；连接层失败向上抛，HTTP 错误码原样返回。"""
+        timeout = float(timeout or self._timeout)
+        parsed = urllib.parse.urlsplit(self.base_url)
+        req_path = path + ("?" + urllib.parse.urlencode(query) if query else "")
+        if route and route[0] == "socks":
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            return self._http_over_socks(method, parsed.hostname, port,
+                                         req_path, headers, data, proxy=route[1])
+        if route and route[0] == "http":
+            proxy = route[1]
+            opener = urllib.request.build_opener(
+                urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+        else:
+            # 显式空 ProxyHandler：direct 就是真直连，不被环境里的坏代理拖累。
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        req = urllib.request.Request(parsed.scheme + "://" + parsed.netloc + req_path,
+                                     data=data, headers=headers, method=method)
+        try:
+            with opener.open(req, timeout=timeout) as resp:
+                return resp.status, resp.read()
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.read()
+
+    def _send(self, method, path, query, data, headers):
+        """发送请求：显式代理只走 SOCKS5；否则直连优先、环境代理回退、记住可用路由。"""
+        if self._proxy:
+            routes = [("socks", self._proxy)]
+        elif self._resolved:
+            routes = [self._route]
+        else:
+            routes = [None] + self._fallback_routes()
+        failures = []
+        for index, route in enumerate(routes):
+            try:
+                code, body = self._do_request(
+                    route, method, path, query, data, headers,
+                    timeout=self._timeout if index == 0 else min(self._timeout, 10.0))
+            except (urllib.error.URLError, OSError, TimeoutError, ArenaProtocolError) as exc:
+                reason = _redact(str(exc))
+                failures.append("{}: {}".format(self._route_name(route), reason))
+                print("[arena] route {} failed ({} {}): {}".format(
+                    self._route_name(route), method, path, reason),
+                    file=sys.stderr, flush=True)
+                continue
+            if not self._proxy and not self._resolved:
+                self._route = route
+                self._resolved = True
+                print("[arena] using route {} ({} {})".format(
+                    self._route_name(route), method, path), file=sys.stderr, flush=True)
+            return code, body
+        raise ArenaProtocolError("arena {} {} failed on all routes [{}]".format(
+            method, path, "; ".join(failures) or "none"))
+
     def request_raw(self, method: str, path: str, query: Dict[str, str] = None) -> bytes:
         """GET 原始字节（附件下载用），不做 JSON/文本解码。"""
-        if self._proxy:
-            parsed = urllib.parse.urlsplit(self.base_url)
-            req_path = path + ("?" + urllib.parse.urlencode(query) if query else "")
-            headers = {"Authorization": "Bearer " + self._token}
-            code, body = self._http_over_socks(method, parsed.hostname,
-                                               parsed.port or 80, req_path,
-                                               headers, None)
-            if code >= 400:
-                raise ArenaProtocolError("arena {} {} -> HTTP {}".format(method, path, code))
-            return body
-        url = self.base_url + path
-        if query:
-            url += "?" + urllib.parse.urlencode(query)
-        req = urllib.request.Request(url, headers={"Authorization": "Bearer " + self._token},
-                                     method=method)
-        try:
-            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
-                return resp.read()
-        except urllib.error.HTTPError as exc:
-            raise ArenaProtocolError("arena {} {} -> HTTP {}".format(
-                method, path, exc.code)) from exc
+        headers = {"Authorization": "Bearer " + self._token}
+        code, body = self._send(method, path, query, None, headers)
+        if code >= 400:
+            raise ArenaProtocolError("arena {} {} -> HTTP {}".format(method, path, code))
+        return body
 
     def request(self, method: str, path: str, query: Dict[str, str] = None,
                 payload: Dict[str, Any] = None) -> Any:
-        """统一请求入口：Bearer 鉴权；配置代理时走 SOCKS5 隧道，否则直连。"""
-        url = self.base_url + path
-        if query:
-            url += "?" + urllib.parse.urlencode(query)
+        """统一请求入口：Bearer 鉴权；路由选择见 _send（直连优先、代理回退）。"""
         data = None
         headers = {"Authorization": "Bearer " + self._token}
         if payload is not None:
             data = json.dumps(payload).encode("utf-8")
             headers["Content-Type"] = "application/json"
-        if self._proxy:
-            parsed = urllib.parse.urlsplit(self.base_url)
-            req_path = path + ("?" + urllib.parse.urlencode(query) if query else "")
-            code, body = self._http_over_socks(method, parsed.hostname,
-                                               parsed.port or 80, req_path,
-                                               headers, data)
-            if code >= 400:
-                detail = _redact(body.decode("utf-8", "replace")[:500])
-                raise ArenaProtocolError("arena {} {} -> HTTP {}: {}".format(
-                    method, path, code, detail))
-            return _decode_body(method, path, body)
-        req = urllib.request.Request(url, data=data, headers=headers, method=method)
-        try:
-            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
-                body = resp.read()
-        except urllib.error.HTTPError as exc:
-            detail = _redact(exc.read().decode("utf-8", "replace")[:500])
+        code, body = self._send(method, path, query, data, headers)
+        if code >= 400:
+            detail = _redact(body.decode("utf-8", "replace")[:500])
             raise ArenaProtocolError(
-                "arena {} {} -> HTTP {}: {}".format(method, path, exc.code, detail)) from exc
-        except (urllib.error.URLError, OSError, TimeoutError) as exc:
-            raise ArenaProtocolError(
-                "arena {} {} failed: {}".format(method, path, _redact(str(exc)))) from exc
-        ctype = ""
+                "arena {} {} -> HTTP {}: {}".format(method, path, code, detail))
         return _decode_body(method, path, body)
 
 
@@ -304,6 +412,9 @@ class ArenaHarnessAdapter(HarnessAdapter):
     # ------------------------------------------------------------------ startup
     def startup(self) -> HarnessContext:
         """拉取 help（权威规则来源）并建立 v1-arena 上下文。"""
+        # 平台注入契约不完全可知：启动即打印脱敏诊断，失败时无需重建镜像定位。
+        print(describe_transport(self._client.base_url, self._client.fallback_values()),
+              file=sys.stderr, flush=True)
         # help 是权威工作流与规则来源；内容只入 metadata，不做协议推断。
         self.help_text = self._client.request("GET", self._paths["help"])
         self._ctx = HarnessContext(protocol="v1-arena", competition_id="cyber-arena")

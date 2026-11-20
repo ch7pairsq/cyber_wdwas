@@ -30,15 +30,16 @@ def parse_proxy(proxy: str):
     if not proxy:
         sys.exit("DENY: ARENA_PROXY is required for arena http tool")
     rest = proxy
+    # 先剥 scheme 再切用户信息：socks5://user:pass@host:port 的 @ 在 scheme 之后。
+    if not rest.startswith("socks5://"):
+        sys.exit("DENY: ARENA_PROXY must be socks5://host:port")
+    rest = rest[len("socks5://"):]
     user = b""
     password = b""
     if "@" in rest:
         cred, _, rest = rest.rpartition("@")
         u, _, p = cred.partition(":")
         user, password = u.encode(), p.encode()
-    if not rest.startswith("socks5://"):
-        sys.exit("DENY: ARENA_PROXY must be socks5://host:port")
-    rest = rest[len("socks5://"):]
     host, _, port_s = rest.partition(":")
     if not host or not port_s.isdigit():
         sys.exit("DENY: ARENA_PROXY must be socks5://host:port")
