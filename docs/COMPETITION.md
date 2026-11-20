@@ -13,7 +13,7 @@
 
 - 主通道（2026-11-20 用户确认切换）：DeepSeek 官方 API，OpenAI Chat Completions 兼容协议（POST /chat/completions、Bearer 鉴权），Base URL 固定 https://api.deepseek.com ，model ID 仅允许 deepseek-flash／deepseek-v4-pro（已真实调用验收）。双模型换挡：`model.pro_model=deepseek-v4-pro` 启用，stage≥pro_from_stage 的换路径回合与提交前评审路由 Pro，调用失败/每题次数超限回退 flash（fail-open）。切换只改配置 `model.provider`（`deepseek_official_openai` ↔ `baizhi_anthropic`），业务代码零改动；出口白名单须覆盖 api.deepseek.com。
 - 备选通道（保留）：公司百智云网关，Base URL https://ai-api-gateway.app.baizhi.cloud/api/anthropic ，Anthropic Messages 兼容协议（POST /v1/messages、x-api-key、anthropic-version），唯一 model ID deepseek-flash。
-- 两条通道互斥，参赛候选当前默认仍走公司网关。两通道执行同样的传输纪律：不继承任意 HTTP_PROXY、不跟随重定向、校验 TLS、不发送 tools/web_search 定义、响应大小上限，对非文本工具响应和模型 ID 不一致的响应拒绝处理。网关服务端实际模型路由仍须公司侧确认；两条通道的真实联调均未执行，本轮没有读取、使用或提交真实 Key，也没有付费调用。
+- 两条通道互斥；`config/base.yaml`、`arena.yaml`、`official-arena.yaml` 当前默认均走官方通道，百智网关保留为备选（切换只改 `model.provider`）。两通道执行同样的传输纪律：不继承任意 HTTP_PROXY、不跟随重定向、校验 TLS、不发送 tools/web_search 定义、响应大小上限，对非文本工具响应和模型 ID 不一致的响应拒绝处理。两条通道均已经过真实调用：百智通道在 2026-11-19 arena 平台演练，官方通道为 2026-11-20 切换后验收。
 - 凭据环境变量固定为 BAIZHI_API_KEY（2026-11-18 用户确认，两条通道共用；切换通道时变量名不变，值对应所选通道的 Key；2026-11-20 起默认值为 DeepSeek 官方 API key，本机来源 ~/chaitin_agent/chaitin_ds_key）。Key 只能运行时注入，不打入镜像，不写配置文件与数据库快照。
 - 可选 Key 落盘缓存（2026-11-18 新增，默认关闭）：环境变量在进程重启与容器重启时都会保留，只有"平台重建容器且不重注入、并挂载持久卷"的场景才需要落盘兜底。启用后缓存文件 0600 原子写入，不进 SQLite／证据／报告／日志，本轮运行正常结束时清理；是否启用待平台确认挂载与重启语义后再定。
 
@@ -26,7 +26,7 @@
 | 目标 | 用途 | 包含内容 | 能否直接参赛 |
 | --- | --- | --- | --- |
 | development | 赛前开发、离线测试、断点调试 | 运行依赖、Cairn、pytest、httpx、debugpy、安装器 | 不能 |
-| competition | 参赛候选镜像 | 应用、提示词、配置、Cairn 全部运行依赖、预装系统工具；移除常见安装器和调试模块 | 当前不能，官方接线待完成 |
+| competition | 参赛候选镜像 | 应用、提示词、配置、Cairn 全部运行依赖、预装系统工具；移除常见安装器和调试模块 | 入口已接线 Arena 协议（2026-11-20 验收）；待真实平台联调与交付 |
 
 依赖清单分别为 docker/requirements-runtime.lock 与 docker/requirements.lock。所有依赖均在 docker build 阶段安装；CMD/ENTRYPOINT 不执行安装操作。固定的基础镜像摘要已下载并校验。
 
@@ -54,11 +54,11 @@ competition 目标的默认入口已从旧的退出 78 占位改为 `scripts/run
 ## 等待用户／官方提供
 
 1. 交付入口二选一（双轨均已支持，用户比对便利性后定）：仓库方案需平台可访问的镜像仓库／命名空间、推送／拉取凭据；文件方案需上传通道、接受格式（docker load）、大小限制、上传截止与重传规则。目前不推送镜像、不上传文件。
-2. 第 2.2 节 Harness 托管全文：平台启动命令、协议／SDK、注入变量、任务／附件／提交方法、结束／重启行为。
-3. 公司网关确认的 Messages 路径、鉴权头和使用额度；如启用 DeepSeek 官方备选通道，其真实联调、出口白名单与额度另行明确授权。
+2. 平台 Harness 托管细节确认：注入环境变量名与系统读取的 `ARENA_BASE_URL / ARENA_SOLVER_TOKEN / BAIZHI_API_KEY`（可选 `ARENA_PROXY / ARENA_NETWORK_CIDR`）是否一致、启动命令是否可覆盖、结束／重启行为。（协议已确认为 Arena REST 并完成适配接线。）
+3. DeepSeek 官方通道（现主通道）的平台出口白名单覆盖 api.deepseek.com 与使用额度确认；如回切百智网关，其 Messages 路径、鉴权头和使用额度另行与公司侧确认。
 4. 平台 CPU 架构、资源／镜像大小限制、网络出口规则，以及最终必须预装的工具集合。
 
-上述信息齐全后再完成官方接线、赛前全链路验证、镜像发布（或文件上传）与摘要固定；不要在比赛过程中安装依赖或修改协议。
+官方协议接线与候选镜像离线验收已完成（2026-11-20，见下文记录）；上述信息确认后完成真实平台联调、镜像发布（或文件上传）与摘要固定；不要在比赛过程中安装依赖或修改协议。
 
 ## 本地构建候选镜像与离线验收
 
