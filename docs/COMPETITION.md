@@ -165,7 +165,12 @@ docker run --rm --network none --read-only --cap-drop ALL \
   通过（37 工具、offline_check=passed）；入口无凭据冒烟 banner → gate 报错 → 重启 3/3 →
   退出 1；镜像内已确认审查修复代码。构建日志：
   `logs/build-competition-arena-20261120-v4-reviewfix.log`。交付镜像
-  `portus.in.chaitin.net/yuqiao.zhang/cyber-wdwas:competition-20261120`。
+  `portus.in.chaitin.net/yuqiao.zhang/cyber-wdwas:competition-20261120`
+  （2026-11-20 已推送成功，registry 返回 digest
+  `sha256:352410f88eeebff09f4037ebc5d019fd5e53a623a3bf26a50d7a022fd88d87cc`；
+  首推因 dockerd 代理配置指向已不存在的本地代理 127.0.0.1:18023 失败，以本地转发器
+  18023→proxy.in.chaitin.net:8123 兜底完成；daemon.json 已把 portus 加入 no-proxy，
+  备份 `.bak-20261120`，下次 daemon 重启后可直连）。
 
 ### 仍未验收
 
