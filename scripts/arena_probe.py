@@ -15,22 +15,27 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 from ctf_ext.harness.arena import (DEFAULT_HELP_PATH, DEFAULT_LIST_PATH,  # noqa: E402
-                                   ArenaClient, ArenaProtocolError, _redact)
+                                   ArenaClient, ArenaProtocolError, _redact,
+                                   resolve_arena_base_url, resolve_arena_token)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(prog="arena_probe")
     parser.add_argument("--full", action="store_true", help="打印完整响应字段")
     args = parser.parse_args()
-    base_url = os.environ.get("ARENA_BASE_URL") or ""
-    token = os.environ.get("ARENA_SOLVER_TOKEN") or ""
+    base_url, base_source = resolve_arena_base_url("")
+    token, token_source = resolve_arena_token()
     if not base_url:
-        print("missing ARENA_BASE_URL (e.g. http://<attempt-address>:8090)", file=sys.stderr)
+        print("missing arena base url (env/gateway/k8s discovery; source={})".format(
+            base_source), file=sys.stderr)
         return 2
     if not token:
-        print("missing ARENA_SOLVER_TOKEN", file=sys.stderr)
+        print("missing arena token (env/token files; source={})".format(token_source),
+              file=sys.stderr)
         return 2
-    client = ArenaClient(base_url, token, proxy=os.environ.get("ARENA_PROXY") or "")
+    print("[probe] base={} (from {}) token from {}".format(base_url, base_source, token_source))
+    client = ArenaClient(base_url, token, proxy=os.environ.get("ARENA_PROXY") or "",
+                         token_source=token_source)
     try:
         help_resp = client.request("GET", DEFAULT_HELP_PATH)
         list_resp = client.request("GET", DEFAULT_LIST_PATH)

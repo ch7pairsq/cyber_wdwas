@@ -7,7 +7,8 @@ from unittest.mock import patch
 import pytest
 
 from ctf_ext.harness.arena import (ArenaClient, ArenaProtocolError,
-                                   _env_safe_value, describe_transport)
+                                   _env_safe_value, describe_transport,
+                                   resolve_arena_base_url, resolve_arena_token)
 
 
 def test_env_safe_value_masks_credentials_but_keeps_host():
@@ -63,3 +64,48 @@ def test_socks_route_uses_route_proxy_when_self_proxy_unset():
     with pytest.raises((OSError, ArenaProtocolError)):
         client._do_request(("socks", ("127.0.0.1", 1, b"", b"")), "GET", "/x",
                            None, None, {"Authorization": "Bearer token"})
+
+
+def test_resolve_base_url_prefers_env_then_gateway_then_k8s():
+    with patch.dict(os.environ, {"ARENA_BASE_URL": "http://a:1"}, clear=True):
+        assert resolve_arena_base_url("http://cfg:9") == ("http://a:1", "ARENA_BASE_URL")
+    with patch.dict(os.environ, {"ARENA_GATEWAY_URL": "http://g:2/"}, clear=True):
+        assert resolve_arena_base_url("http://cfg:9") == ("http://g:2", "ARENA_GATEWAY_URL")
+    # 平台真实形态：ARENA_BASE_URL 不注入，k8s service 变量指向 model-proxy
+    k8s = {"MODEL_PROXY_X_SERVICE_HOST": "1.2.3.4",
+           "MODEL_PROXY_X_SERVICE_PORT_CHALLENGES": "8090",
+           "MODEL_PROXY_X_SERVICE_PORT_SOCKS": "18081",
+           "KUBERNETES_SERVICE_HOST": "10.96.0.1",
+           "KUBERNETES_SERVICE_PORT_HTTPS": "443"}
+    with patch.dict(os.environ, k8s, clear=True):
+        url, source = resolve_arena_base_url("")
+        assert url == "http://1.2.3.4:8090"
+        assert "k8s service" in source and "challenges" in source
+        client = ArenaClient(url, "t", timeout=0.2)
+        # socks 命名端口进入回退候选
+        assert client.fallback_values() == ["socks5://1.2.3.4:18081"]
+    with patch.dict(os.environ, {}, clear=True):
+        assert resolve_arena_base_url("http://cfg:9") == ("http://cfg:9", "config")
+        assert resolve_arena_base_url("") == ("", "none")
+
+
+def test_resolve_token_env_first_then_token_files(tmp_path):
+    gateway = tmp_path / "gateway.token"
+    gateway.write_text("  gw-secret-value \n")
+    with patch.dict(os.environ, {"ARENA_GATEWAY_TOKEN_FILE": str(gateway)}, clear=True):
+        assert resolve_arena_token() == ("gw-secret-value", "ARENA_GATEWAY_TOKEN_FILE")
+    with patch.dict(os.environ, {"ARENA_SOLVER_TOKEN": "env-token-123456"}, clear=True):
+        assert resolve_arena_token() == ("env-token-123456", "env ARENA_SOLVER_TOKEN")
+    with patch.dict(os.environ, {}, clear=True):
+        assert resolve_arena_token() == ("", "none")
+
+
+def test_client_token_candidates_from_files(tmp_path):
+    gateway = tmp_path / "gw.token"
+    gateway.write_text("file-token-value\n")
+    env = {"ARENA_SOLVER_TOKEN": "env-token-123456789",
+           "ARENA_GATEWAY_TOKEN_FILE": str(gateway)}
+    with patch.dict(os.environ, env, clear=True):
+        client = ArenaClient("http://a:1", "env-token-123456789", timeout=0.2)
+    assert [v for _, v in client._tokens] == ["env-token-123456789", "file-token-value"]
+    assert client.token_source() == "env ARENA_SOLVER_TOKEN"

@@ -127,12 +127,17 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
         raise SystemExit("official harness is fail-closed: SDK/samples missing (design §12.5); "
                          "use harness.protocol=mock until the official adapter is provided")
     if protocol == "arena":
-        from .harness.arena import ArenaHarnessAdapter, ArenaProtocolError
+        from .harness.arena import (ArenaHarnessAdapter, ArenaProtocolError,
+                                    resolve_arena_base_url, resolve_arena_token)
         arena_cfg = (cfg.get("harness") or {}).get("arena") or {}
-        base_url = os.environ.get("ARENA_BASE_URL") or arena_cfg.get("base_url") or ""
-        token = os.environ.get("ARENA_SOLVER_TOKEN") or ""
+        base_url, base_source = resolve_arena_base_url(arena_cfg.get("base_url") or "")
+        token, token_source = resolve_arena_token()
         if not base_url or not token:
-            raise SystemExit("arena harness requires ARENA_BASE_URL and ARENA_SOLVER_TOKEN (runtime env only)")
+            raise SystemExit(
+                "arena harness requires a reachable arena address and solver token "
+                "(base from: {}, token from: {}; expected ARENA_BASE_URL/ARENA_SOLVER_TOKEN "
+                "or platform ARENA_GATEWAY_URL / token files / k8s service discovery)".format(
+                    base_source, token_source))
         arena_kwargs = {k: arena_cfg[k] for k in
                         ("help_path", "list_path", "start_path", "files_path",
                          "submit_path", "finish_path", "download_template")
@@ -140,6 +145,8 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
         proxy = os.environ.get("ARENA_PROXY") or arena_cfg.get("proxy") or ""
         try:
             harness = ArenaHarnessAdapter(base_url, token, proxy=proxy,
+                                          base_source=base_source,
+                                          token_source=token_source,
                                           auto_start=bool(arena_cfg.get("auto_start", True)),
                                           auto_finish=bool(arena_cfg.get("auto_finish", False)),
                                           client_timeout=float(arena_cfg.get("client_timeout_seconds") or 30),

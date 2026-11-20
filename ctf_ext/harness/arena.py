@@ -58,7 +58,12 @@ def _redact(text: str) -> str:
 TRANSPORT_ENV_NAMES = ("ARENA_BASE_URL", "ARENA_SOLVER_TOKEN", "ARENA_PROXY",
                        "ARENA_NETWORK_CIDR", "ALL_PROXY", "all_proxy",
                        "HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy",
-                       "NO_PROXY", "no_proxy")
+                       "NO_PROXY", "no_proxy",
+                       "ARENA_GATEWAY_URL", "ARENA_GATEWAY_TOKEN_FILE",
+                       "ARENA_RUNTIME_API_URL", "ARENA_RUNTIME_TOKEN_FILE",
+                       "ARENA_ATTEMPT_ID", "ARENA_PREWARM_RUNTIME",
+                       "ARENA_PROVIDER_COUNT", "BENCHMARK_BASE_URL",
+                       "CYBER_ARENA_HELP_MARKDOWN")
 MODEL_ENV_NAMES = ("OPENAI_BASE_URL", "OPENAI_API_BASE", "MODEL_BASE_URL",
                    "MODEL_PROXY_URL", "BAIZHI_BASE_URL", "BAIZHI_API_KEY")
 
@@ -77,15 +82,17 @@ def _env_safe_value(name: str, value: str) -> str:
     return value if len(value) <= 64 else value[:61] + "..."
 
 
-def describe_transport(base_url: str, fallbacks=()) -> str:
-    """启动横幅：Arena 地址、回退代理候选、关键环境变量（全部脱敏）。
+def describe_transport(base_url: str, fallbacks=(), base_source: str = "",
+                       token_source: str = "") -> str:
+    """启动横幅：Arena 地址（含解析来源）、回退候选、关键环境变量（全部脱敏）。
 
     平台 harness 的注入契约不完全可知（见 HARNESS-CHECKLIST §12.5），
     启动即打印这些信息，出问题时无需再重建镜像就能判断网络路径。
     """
-    lines = ["[arena] base={} fallbacks=[{}]".format(
-        _env_safe_value("ARENA_BASE_URL", base_url),
+    lines = ["[arena] base={} (from {}) fallbacks=[{}]".format(
+        _env_safe_value("ARENA_BASE_URL", base_url), base_source or "unknown",
         ", ".join(_env_safe_value("PROXY", v) for v in fallbacks) or "none")]
+    lines.append("[arena] token from {}".format(token_source or "unknown"))
     lines.append("[env] " + " ".join(
         "{}={}".format(n, _env_safe_value(n, os.environ.get(n, "")))
         for n in TRANSPORT_ENV_NAMES))
@@ -96,11 +103,79 @@ def describe_transport(base_url: str, fallbacks=()) -> str:
     lines.append("[env-all] " + " ".join(sorted(os.environ)))
     return "\n".join(lines)
 
+
+def _read_token_file(path: str):
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return fh.read().strip() or None
+    except OSError:
+        return None
+
+
+_K8S_PORT_SUFFIXES = (("_SERVICE_PORT_CHALLENGES", "challenges"),
+                      ("_PORT_8090_TCP_PORT", "tcp-8090"),
+                      ("_SERVICE_PORT_HTTP", "http"),
+                      ("_SERVICE_PORT_HTTP_PROXY", "http-proxy"),
+                      ("_SERVICE_PORT_SOCKS", "socks"))
+
+
+def _k8s_service_endpoints():
+    """收集 k8s 为同 namespace service 注入的变量：前缀 -> {host, 端口名: 端口}。"""
+    services = {}
+    for name, value in os.environ.items():
+        if not value:
+            continue
+        if name.endswith("_SERVICE_HOST"):
+            services.setdefault(name[:-len("_SERVICE_HOST")], {})["host"] = value
+            continue
+        for suffix, label in _K8S_PORT_SUFFIXES:
+            if name.endswith(suffix) and value.isdigit():
+                services.setdefault(name[:-len(suffix)], {})[label] = value
+                break
+    return {prefix: info for prefix, info in services.items()
+            if "host" in info and len(info) > 1}
+
+
+def resolve_arena_base_url(config_url: str = ""):
+    """按平台真实契约解析 Arena 地址，返回 (base_url, source)。
+
+    优先级：ARENA_BASE_URL -> ARENA_GATEWAY_URL -> k8s service 注入变量
+    （model-proxy 服务的 challenges 端口）-> 配置值。平台实测（2026-11-20
+    harness）不注入 ARENA_BASE_URL；service 命名端口 CHALLENGES 对应题目 API。
+    """
+    for name in ("ARENA_BASE_URL", "ARENA_GATEWAY_URL"):
+        value = (os.environ.get(name) or "").strip()
+        if value:
+            return value.rstrip("/"), name
+    for _prefix, info in sorted(_k8s_service_endpoints().items()):
+        for label in ("challenges", "tcp-8090", "http"):
+            port = info.get(label)
+            if port:
+                return ("http://{}:{}".format(info["host"], port),
+                        "k8s service {}:{} ({})".format(info["host"], port, label))
+    if config_url:
+        return config_url.rstrip("/"), "config"
+    return "", "none"
+
+
+def resolve_arena_token():
+    """解析 Arena token：env 优先，其次平台挂载的 token 文件。返回 (token, source)。"""
+    value = (os.environ.get("ARENA_SOLVER_TOKEN") or "").strip()
+    if value:
+        return value, "env ARENA_SOLVER_TOKEN"
+    for name in ("ARENA_GATEWAY_TOKEN_FILE", "ARENA_RUNTIME_TOKEN_FILE"):
+        path = (os.environ.get(name) or "").strip()
+        if path:
+            value = _read_token_file(path)
+            if value:
+                return value, name
+    return "", "none"
+
 class ArenaClient:
     """只做 HTTP 收发与错误归一化；持有 token，不打印它。"""
 
     def __init__(self, base_url: str, token: str, timeout: float = 30.0,
-                 proxy: str = ""):
+                 proxy: str = "", token_source: str = ""):
         """base_url/token 必填；proxy 可选 SOCKS5（[user:pass@]host:port）。"""
         if not base_url:
             raise ArenaProtocolError("arena base_url is required")
@@ -110,6 +185,7 @@ class ArenaClient:
         self._token = token
         self._timeout = timeout
         self._proxy = self._parse_proxy(proxy)
+        self._tokens = self._collect_tokens(token, token_source)
         # 路由状态：显式 ARENA_PROXY（参数或环境）固定走 SOCKS5；否则直连优先，
         # 失败时按环境代理回退，成功后记住可用路由（见 _send）。
         self._route = None
@@ -146,13 +222,22 @@ class ArenaClient:
         return None
 
     def fallback_values(self):
-        """直连失败时可回退的代理（常见环境变量，去重保序，不含 ARENA_PROXY）。"""
+        """直连失败时可回退的代理：常见环境变量 + k8s model-proxy 服务端口。"""
         out = []
         for name in ("ALL_PROXY", "all_proxy", "HTTPS_PROXY", "https_proxy",
                      "HTTP_PROXY", "http_proxy"):
             value = (os.environ.get(name) or "").strip()
             if value and value not in out and self._route_from_env_value(value):
                 out.append(value)
+        for _prefix, info in sorted(_k8s_service_endpoints().items()):
+            if info.get("socks"):
+                candidate = "socks5://{}:{}".format(info["host"], info["socks"])
+            elif info.get("http-proxy"):
+                candidate = "http://{}:{}".format(info["host"], info["http-proxy"])
+            else:
+                continue
+            if candidate not in out:
+                out.append(candidate)
         return out
 
     def _fallback_routes(self):
@@ -177,6 +262,41 @@ class ArenaClient:
         if route[0] == "socks":
             return "socks5://{}:{}".format(route[1][0], route[1][1])
         return _env_safe_value("PROXY", str(route[1]))
+
+    def _collect_tokens(self, primary, source_label):
+        """token 候选：主 token 优先，其后是平台挂载的 token 文件。"""
+        out = []
+        if primary:
+            if not source_label:
+                env_token = (os.environ.get("ARENA_SOLVER_TOKEN") or "").strip()
+                source_label = ("env ARENA_SOLVER_TOKEN" if primary == env_token
+                                else "constructor")
+            out.append((source_label, primary))
+        for name in ("ARENA_GATEWAY_TOKEN_FILE", "ARENA_RUNTIME_TOKEN_FILE"):
+            path = (os.environ.get(name) or "").strip()
+            if path:
+                value = _read_token_file(path)
+                if value and all(value != seen for _, seen in out):
+                    out.append((name, value))
+        return out
+
+    def token_source(self):
+        """当前生效 token 的来源标签（诊断用，不返回值）。"""
+        return self._tokens[0][0] if self._tokens else ""
+
+    def _route_plan(self):
+        if self._proxy:
+            return [("socks", self._proxy)]
+        if self._resolved:
+            return [self._route]
+        return [None] + self._fallback_routes()
+
+    def _pin_route(self, route):
+        if not self._proxy and not self._resolved:
+            self._route = route
+            self._resolved = True
+            print("[arena] using route {}".format(self._route_name(route)),
+                  file=sys.stderr, flush=True)
 
     def _socks5_connect(self, host, port, proxy=None):
         import socket as _socket
@@ -272,48 +392,60 @@ class ArenaClient:
             return exc.code, exc.read()
 
     def _send(self, method, path, query, data, headers):
-        """发送请求：显式代理只走 SOCKS5；否则直连优先、环境代理回退、记住可用路由。"""
-        if self._proxy:
-            routes = [("socks", self._proxy)]
-        elif self._resolved:
-            routes = [self._route]
-        else:
-            routes = [None] + self._fallback_routes()
+        """发送请求：路由候选 x token 候选依次尝试，成功即记住组合。
+
+        路由：显式 ARENA_PROXY 只走 SOCKS5；否则直连优先，环境代理与 k8s
+        model-proxy 服务端口（socks/http-proxy）回退。HTTP 401/403 视为
+        token 不匹配，换下一个候选重试；失败请求不产生服务端副作用。
+        """
         failures = []
-        for index, route in enumerate(routes):
-            try:
-                code, body = self._do_request(
-                    route, method, path, query, data, headers,
-                    timeout=self._timeout if index == 0 else min(self._timeout, 10.0))
-            except (urllib.error.URLError, OSError, TimeoutError, ArenaProtocolError) as exc:
-                reason = _redact(str(exc))
-                failures.append("{}: {}".format(self._route_name(route), reason))
-                print("[arena] route {} failed ({} {}): {}".format(
-                    self._route_name(route), method, path, reason),
-                    file=sys.stderr, flush=True)
-                continue
-            if not self._proxy and not self._resolved:
-                self._route = route
-                self._resolved = True
-                print("[arena] using route {} ({} {})".format(
-                    self._route_name(route), method, path), file=sys.stderr, flush=True)
-            return code, body
+        last_http = None
+        for index, route in enumerate(self._route_plan()):
+            timeout = self._timeout if index == 0 else min(self._timeout, 10.0)
+            for label, token in self._tokens:
+                hdrs = dict(headers)
+                hdrs["Authorization"] = "Bearer " + token
+                try:
+                    code, body = self._do_request(route, method, path, query,
+                                                  data, hdrs, timeout=timeout)
+                except (urllib.error.URLError, OSError, TimeoutError,
+                        ArenaProtocolError) as exc:
+                    reason = _redact(str(exc))
+                    failures.append("{}: {}".format(self._route_name(route), reason))
+                    print("[arena] route {} failed ({} {}): {}".format(
+                        self._route_name(route), method, path, reason),
+                        file=sys.stderr, flush=True)
+                    break  # 该路由传输层不通，换下一条路由
+                if code in (401, 403):
+                    failures.append("{}: HTTP {}".format(self._route_name(route), code))
+                    last_http = (code, body)
+                    print("[arena] token {} rejected (HTTP {}) on {}".format(
+                        label, code, self._route_name(route)),
+                        file=sys.stderr, flush=True)
+                    continue  # 同一路由换下一个 token
+                if token != self._token:
+                    print("[arena] using token from {}".format(label),
+                          file=sys.stderr, flush=True)
+                    self._token = token
+                self._pin_route(route)
+                return code, body
+        if last_http is not None:
+            return last_http
         raise ArenaProtocolError("arena {} {} failed on all routes [{}]".format(
             method, path, "; ".join(failures) or "none"))
 
     def request_raw(self, method: str, path: str, query: Dict[str, str] = None) -> bytes:
         """GET 原始字节（附件下载用），不做 JSON/文本解码。"""
-        headers = {"Authorization": "Bearer " + self._token}
-        code, body = self._send(method, path, query, None, headers)
+        code, body = self._send(method, path, query, None, {})
         if code >= 400:
             raise ArenaProtocolError("arena {} {} -> HTTP {}".format(method, path, code))
         return body
 
     def request(self, method: str, path: str, query: Dict[str, str] = None,
                 payload: Dict[str, Any] = None) -> Any:
-        """统一请求入口：Bearer 鉴权；路由选择见 _send（直连优先、代理回退）。"""
+        """统一请求入口：鉴权头由 _send 按 token 候选注入；路由见 _send。"""
         data = None
-        headers = {"Authorization": "Bearer " + self._token}
+        headers = {}
         if payload is not None:
             data = json.dumps(payload).encode("utf-8")
             headers["Content-Type"] = "application/json"
@@ -371,6 +503,8 @@ class ArenaHarnessAdapter(HarnessAdapter):
 
     def __init__(self, base_url: str, token: str,
                  proxy: str = "",
+                 base_source: str = "",
+                 token_source: str = "",
                  help_path: str = DEFAULT_HELP_PATH,
                  list_path: str = DEFAULT_LIST_PATH,
                  start_path: str = DEFAULT_START_PATH,
@@ -385,7 +519,8 @@ class ArenaHarnessAdapter(HarnessAdapter):
                  env_policy: str = "prewarm"):
         """端点路径均可覆盖；env_policy 决定 prewarm / on_demand 两种环境策略。"""
         self._client = ArenaClient(base_url, token, timeout=client_timeout,
-                                   proxy=proxy)
+                                   proxy=proxy, token_source=token_source)
+        self._base_source = base_source
         self._paths = {"help": help_path, "list": list_path, "start": start_path,
                        "files": files_path, "submit": submit_path, "finish": finish_path}
         self._download_template = download_template
@@ -413,7 +548,9 @@ class ArenaHarnessAdapter(HarnessAdapter):
     def startup(self) -> HarnessContext:
         """拉取 help（权威规则来源）并建立 v1-arena 上下文。"""
         # 平台注入契约不完全可知：启动即打印脱敏诊断，失败时无需重建镜像定位。
-        print(describe_transport(self._client.base_url, self._client.fallback_values()),
+        print(describe_transport(self._client.base_url, self._client.fallback_values(),
+                                 base_source=self._base_source,
+                                 token_source=self._client.token_source()),
               file=sys.stderr, flush=True)
         # help 是权威工作流与规则来源；内容只入 metadata，不做协议推断。
         self.help_text = self._client.request("GET", self._paths["help"])
