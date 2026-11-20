@@ -143,6 +143,25 @@ docker run --rm --network none --read-only --cap-drop ALL \
 - 注意：apktool 的 Debian 包装器会在 HOME 下建目录，`--read-only` 且 /tmp 不可写时版本自检失败（mkdir 报错）；比赛容器 /tmp 可写，不受影响。Go 测试同理需可写可执行的 /tmp（Docker `--tmpfs` 默认 noexec，测试时要显式加 `exec`）。
 - 入口冒烟复验（同 v1 口径）：无凭据 → banner + ARENA gate 报错 → supervisor 重启 3/3 → 退出 1；假凭据（占位字符串）断网 → Arena startup 失败 → 退出 1。行为与 v1 一致，入口代码未变。
 
+### 解题思路记忆（2026-11-20 第三次构建加入）
+
+- 机制：平台回执 `ACCEPTED` 后，orchestrator 从该题的获胜尝试（路线/成立条件/步骤/已排除）、
+  提交引用证据对应的完整成功命令链（command_log argv basename）、本题教训蒸馏出一份整题
+  思路，写入运行库 `solutions` 表（migration v3）；每个意图开始时按 **同题精确命中 > 同域
+  + 题名/关键词** 检索最相关 ≤2 条注入 prompt（标注"历史经验，先验证再使用"），命中即
+  复用计数 +1。
+- 边界：FLAG/候选答案复用 lessons 的 sanitizer 脱敏后才入库；跨域不共享（同 lessons 口径，
+  防止泄露其他题结论）；记录/检索全部 fail-open，异常只记 `solution_record_failed` 事件，
+  不影响主循环。
+- 持久化：记忆存在运行库（`data/practice.db` / `data/official.db`）里，同一数据卷的后续
+  运行直接受益；平台重建容器且不挂数据卷时记忆随库重置。
+- 验证：`tests/unit/test_framework_solutions.py`（蒸馏脱敏/幂等/检索优先级/worker 注入
+  fail-open 共 6 例）；全量 `run_checks.py` 346 passed / 1 skipped。
+- v3 重建与验收：镜像 ID `sha256:8d5591b506fe`（2.52GB，与 v2 持平——纯代码层变更）；
+  断网 `check_competition.py` 通过（37 工具、offline_check=passed）；镜像内 migration v3
+  实测建出 `solutions` 全列；入口无凭据冒烟 banner → gate 报错 → 重启 3/3 → 退出 1，
+  与 v2 行为一致。构建日志：`logs/build-competition-arena-20261120-v3-memory.log`。
+
 ### 仍未验收
 
 - 真实凭据与平台的端到端联调（BAIZHI_API_KEY 真实调用、Arena 任务/附件/提交回执）未执行，需要明确授权后在正式平台进行。

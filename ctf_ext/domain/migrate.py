@@ -129,6 +129,27 @@ MIGRATIONS = [
         );
         """,
     ),
+    (
+        3,
+        """
+        CREATE TABLE IF NOT EXISTS solutions (
+            id TEXT PRIMARY KEY,
+            challenge_id TEXT NOT NULL,
+            challenge_name TEXT NOT NULL DEFAULT '',
+            domain TEXT NOT NULL DEFAULT 'unknown',
+            title TEXT NOT NULL DEFAULT '',
+            approach TEXT NOT NULL DEFAULT '',
+            key_commands TEXT NOT NULL DEFAULT '[]',
+            keywords TEXT NOT NULL DEFAULT '[]',
+            source_submission TEXT UNIQUE,
+            reuse_count INTEGER NOT NULL DEFAULT 0,
+            last_used_at REAL,
+            created_at REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_solutions_domain ON solutions(domain, created_at);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_solutions_challenge ON solutions(challenge_id);
+        """,
+    ),
 ]
 
 

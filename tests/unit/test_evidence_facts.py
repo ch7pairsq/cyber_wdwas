@@ -37,9 +37,9 @@ def test_migration_is_idempotent_and_adds_new_tables():
     board, conn = new_board()
     migrate(conn)  # 第二次执行不得报错，也不得重复登记版本
     versions = conn.execute("SELECT COUNT(*) c FROM schema_migrations").fetchone()["c"]
-    assert versions == 2
+    assert versions == 3  # v1 扩展表 / v2 事实与事件 / v3 解题思路记忆
     names = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    assert {"facts", "events", "config_snapshots"} <= names
+    assert {"facts", "events", "config_snapshots", "solutions"} <= names
     assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
 
 

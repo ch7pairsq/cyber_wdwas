@@ -20,6 +20,7 @@ from ..domain.models import Challenge
 from ..harness.contract import ContractViolation, validate_worker_output
 from ..harness.schema import RunSummary
 from ..store import lessons as lesson_store
+from ..store import solutions as solution_store
 from ..store.blackboard import DuplicateStrategy, IntentDraft, WorkerResult
 from .heartbeat import HeartbeatFile
 from .lease import LeaseHeartbeat
@@ -719,6 +720,7 @@ class Orchestrator:
             results.append(out)
             if out["submission"] and out["submission"]["status"] == "ACCEPTED":
                 solved.add(out["challenge_id"])
+            self._maybe_record_solution(out)
 
     def _spawn_workers(self, deadline, tasks, results, solved, count: int) -> None:
         """并行主循环：N 个工作线程跑 step()，主线程负责心跳/热配置/看门狗/加时。"""
@@ -791,6 +793,28 @@ class Orchestrator:
             results.append(out)
             if out["submission"] and out["submission"]["status"] == "ACCEPTED":
                 solved.add(out["challenge_id"])
+            self._maybe_record_solution(out)
+
+    def _maybe_record_solution(self, out) -> None:
+        """平台确认解出后蒸馏整题解题思路入 solutions 表；失败只记事件不阻断。
+
+        submission 可能是 sqlite.Row：统一转 dict；思路蒸馏与复用检索共用
+        store/solutions.py（FLAG 脱敏复用 lessons sanitizer）。
+        """
+        submission = out.get("submission") if isinstance(out, dict) else None
+        if not submission or submission["status"] != "ACCEPTED":
+            return
+        try:
+            payload = dict(submission)
+            with self._board.transaction() as db:
+                solution_store.record_solution(db, str(out["challenge_id"]), payload, commit=False)
+            self._board.append_event("solution_recorded", str(out["challenge_id"]), {})
+        except Exception as exc:
+            try:
+                self._board.append_event("solution_record_failed", str(out.get("challenge_id") or ""),
+                                         {"error": type(exc).__name__})
+            except Exception:
+                pass  # 记忆功能 fail-open：不能影响主循环
 
     def _grant_endgame(self, tasks, solved, deadline) -> bool:
         """终局加时：可解题做完且时间富余时，给预算耗尽的题授权一次追加额度。

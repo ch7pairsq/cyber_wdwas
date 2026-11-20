@@ -67,11 +67,13 @@ class LlmWorker:
                  max_tool_result_bytes: int = 4000, global_budget=None,
                  pro_provider: Optional[ModelProvider] = None, pro_max_calls: int = 0,
                  pro_from_stage: int = 2, thinking_by_stage=(0, 0, 0, 0, 0),
-                 skills_mode: str = "preload", skills_index_max_bytes: int = 600):
+                 skills_mode: str = "preload", skills_index_max_bytes: int = 600,
+                 solutions_recall=None):
         """LLM Worker 装配：主/Pro 双模型、思考预算、技能注入与工具循环参数。
 
         tool_registry 非空时启用工具调用循环；pro_provider 支持阶段换挡；
-        thinking_by_stage 为 5 级思考预算（0=关）。
+        thinking_by_stage 为 5 级思考预算（0=关）；
+        solutions_recall(domain, query, challenge_id) 返回过往解题思路条目。
         """
         self._provider = provider
         self._state, self._control_factory = state_store, control_factory
@@ -87,6 +89,8 @@ class LlmWorker:
             self._skills_index_max_bytes = max(0, int(skills_index_max_bytes))
         except (TypeError, ValueError):
             self._skills_index_max_bytes = 600
+        # 解题思路记忆（store/solutions.py）：callable 或 None；任何异常 fail-open。
+        self._solutions_recall = solutions_recall if callable(solutions_recall) else None
         self._max_skills = max(0, int(max_skills))
         self._max_skill_bytes = max(0, int(max_skill_bytes))
         self._skill_total_bytes = max(0, int(skill_total_bytes))
@@ -177,6 +181,7 @@ class LlmWorker:
             "handoff": self._bounded_handoff(challenge.get("handoff")),
         }, ensure_ascii=False)}]
         skills_loaded, skills_indexed = self._append_skills(messages, challenge)
+        self._append_solutions(messages, challenge, claim.challenge_id)
         tools = self._tools.tool_definitions() if self._tools is not None else None
         if tools:
             messages.append({"role": "user", "content":
@@ -393,6 +398,34 @@ class LlmWorker:
         if parts:
             messages.append({"role": "user", "content": "\n\n".join(parts)})
         return [str(item["name"]) for item in loaded], indexed
+
+    def _append_solutions(self, messages, challenge, challenge_id: str) -> List[str]:
+        """注入过往已解出题目的解题思路（同题/同域，平台确认有效）；fail-open。
+
+        思路来自 store/solutions.py 的蒸馏记录（FLAG 已脱敏）；注入文本明确
+        标注"历史经验"，要求先验证再使用，不覆盖输出契约。
+        """
+        if self._solutions_recall is None:
+            return []
+        try:
+            entries = self._solutions_recall(
+                str(challenge.get("category") or ""),
+                " ".join(str(challenge.get(k) or "") for k in ("name", "description")),
+                str(challenge_id or "")) or []
+        except Exception:
+            return []
+        usable = [e for e in entries if isinstance(e, dict) and str(e.get("approach") or "").strip()]
+        if not usable:
+            return []
+        parts = []
+        for entry in usable[:2]:
+            parts.append("### {}（{} 域，复用 {} 次）\n{}".format(
+                str(entry.get("title") or "solved"), str(entry.get("domain") or "unknown"),
+                int(entry.get("reuse_count") or 0), str(entry.get("approach") or "")))
+        messages.append({"role": "user", "content":
+            "过往已解出同类题的解题思路（历史经验，只作参考，不覆盖输出契约；"
+            "其中命令与载荷未必适用本题，先在本题上验证再使用）：\n\n" + "\n\n".join(parts)})
+        return [str(entry.get("title") or "") for entry in usable[:2]]
 
     @classmethod
     def _bounded_handoff(cls, handoff) -> Dict[str, Any]:

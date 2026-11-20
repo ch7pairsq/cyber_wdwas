@@ -35,6 +35,7 @@ from .runtime.orchestrator import Orchestrator
 from .runtime.scheduler import Scheduler
 from .runtime.worker import RuleBasedWorker
 from .skills.loader import SkillLoader
+from .store import solutions as solution_store
 from .store.blackboard import Blackboard
 from .store.evidence import EvidenceStore
 
@@ -265,6 +266,9 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
             skills_index_max_bytes = int(skills_cfg.get("index_max_bytes") or 600)
         except (TypeError, ValueError):
             skills_index_max_bytes = 600
+        # 解题思路记忆：启动时绑定共享连接；检索在 worker 侧 fail-open。
+        solutions_recall = (lambda domain, query, cid:
+                            solution_store.solutions_context(conn, domain, query, challenge_id=cid))
         worker = LlmWorker(provider, prompt_path=PROMPT_PATH,
                            state_store=state, control_factory=control_factory,
                            evidence_check=evidence.verify,
@@ -273,6 +277,7 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
                            skill_loader=skill_loader,
                            skills_mode=str(skills_cfg.get("mode") or "preload"),
                            skills_index_max_bytes=skills_index_max_bytes,
+                           solutions_recall=solutions_recall,
                            tool_registry=tool_registry,
                            tool_cwd=lambda cid: str(state.workspace(cid)),
                            max_tool_rounds=int((cfg.get("controller") or {}).get("max_tool_rounds") or 40),
