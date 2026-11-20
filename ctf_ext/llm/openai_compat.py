@@ -22,11 +22,13 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from typing import Optional
 
 from .deepseek import _validate_tools
 from .provider import (ModelProvider, ProviderConfigError, ProviderError,
-                       ProviderResponse, ProviderTimeout, RateLimited, RateLimiter)
+                       ProviderResponse, ProviderTimeout, RateLimited, RateLimiter,
+                       TRANSPORT_RETRY_DELAYS, platform_ca_bundle)
 
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-flash"
@@ -190,8 +192,11 @@ class DeepSeekOfficialProvider(ModelProvider):
         trust_env=False：凭据只发往固定官方端点，不继承任意环境代理；
         备选代理取平台隧道的显式地址（HTTPS_PROXY，TLS 端到端不变）。
         连接类失败（含黑洞路由超时）触发回退；HTTP 状态码不触发。
+        verify 用 platform_ca_bundle()：certifi 公共 CA + 平台注入 CA
+        （TLS-MITM 出口场景），证书链校验完整保留。
         """
         import requests
+        verify = platform_ca_bundle()
         routes = [("direct", None)]
         env_proxy = (os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
                      or os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
@@ -210,12 +215,14 @@ class DeepSeekOfficialProvider(ModelProvider):
                                     headers={"Authorization": "Bearer " + self._api_key,
                                              "Content-Type": "application/json"},
                                     timeout=timeout, allow_redirects=False, stream=True,
-                                    verify=True, proxies=proxies)
+                                    verify=verify, proxies=proxies)
             except (requests.ConnectionError, requests.Timeout) as exc:
                 timed_out = timed_out or isinstance(exc, requests.Timeout)
                 failures.append("{}:{}".format(label, type(exc).__name__))
+                # 打印底层异常消息（非异常类 docstring）：SSL 类失败需要看到
+                # CERTIFICATE_VERIFY_FAILED 等真实原因；无凭据泄漏风险（key 在 header）。
                 print("[llm] transport failed on {} route ({}: {})".format(
-                    label, type(exc).__name__, type(exc).__doc__ or ""),
+                    label, type(exc).__name__, exc),
                     file=sys.stderr, flush=True)
                 continue
             if label != self._proxy_route:
@@ -226,6 +233,32 @@ class DeepSeekOfficialProvider(ModelProvider):
             return resp
         raise (requests.Timeout if timed_out else requests.ConnectionError)(
             "model transport failed on all routes: " + "; ".join(failures))
+
+    def _send_with_retry(self, session, payload, timeout):
+        """连接类快速失败（SSL/连接拒绝）的退避重试；超时保持快速判死。
+
+        一轮路由阶梯（direct→proxy）全部失败后整体退避重试，最多 3 次
+        （5/15/30s），避免一次瞬时抖动烧掉整个意图。黑洞路由类超时是持续
+        状态，重试无意义；HTTP 状态错误不在此层处理（complete 对非 2xx
+        直接判定）。
+        """
+        import requests
+        attempt = 0
+        while True:
+            try:
+                return self._send(session, payload, timeout)
+            except requests.Timeout:
+                raise
+            except requests.ConnectionError as exc:
+                if attempt >= len(TRANSPORT_RETRY_DELAYS):
+                    raise
+                delay = TRANSPORT_RETRY_DELAYS[attempt]
+                attempt += 1
+                print("[llm] transport retry {}/{} in {}s ({}: {})".format(
+                    attempt, len(TRANSPORT_RETRY_DELAYS), delay,
+                    type(exc).__name__, exc),
+                    file=sys.stderr, flush=True)
+                time.sleep(delay)
 
     def complete(self, messages, *, system=None, json_mode=False, timeout=None,
                  max_tokens=4096, tools=None, thinking_budget=0):
@@ -269,7 +302,7 @@ class DeepSeekOfficialProvider(ModelProvider):
             # 官方 API 同样不继承任意 HTTP_PROXY，凭据只发往固定端点；
             # 平台隧道路由见 _send（显式地址，非环境继承）。
             session.trust_env = False
-            response = self._send(session, payload, timeout or self._timeout)
+            response = self._send_with_retry(session, payload, timeout or self._timeout)
             if response.status_code == 429:
                 self._limiter.on_rate_limited()
                 raise RateLimited("429 from official deepseek api")

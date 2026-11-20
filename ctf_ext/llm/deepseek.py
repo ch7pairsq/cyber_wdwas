@@ -7,10 +7,13 @@ from __future__ import annotations
 
 import json
 import os
+import sys
+import time
 from typing import Optional
 
 from .provider import (ModelProvider, ProviderConfigError, ProviderError,
-                       ProviderResponse, ProviderTimeout, RateLimited, RateLimiter)
+                       ProviderResponse, ProviderTimeout, RateLimited, RateLimiter,
+                       TRANSPORT_RETRY_DELAYS, platform_ca_bundle)
 
 DEFAULT_BASE_URL = "https://ai-api-gateway.app.baizhi.cloud/api/anthropic"
 DEFAULT_MODEL = "deepseek-flash"
@@ -151,12 +154,31 @@ class DeepSeekProvider(ModelProvider):
             session = requests.Session()
             # 百智云是 API 网关，不继承任意 HTTP_PROXY 将模型凭据转发到其他代理。
             session.trust_env = False
-            response = session.post(self._base_url + "/v1/messages", json=payload,
-                                    headers={"x-api-key": self._api_key,
-                                             "anthropic-version": "2023-06-01",
-                                             "Content-Type": "application/json"},
-                                    timeout=timeout or self._timeout,
-                                    allow_redirects=False, stream=True, verify=True)
+            verify = platform_ca_bundle()
+            # 连接类快速失败（SSL/连接拒绝）退避重试，语义对齐主通道 _send_with_retry；
+            # 黑洞路由类超时是持续状态，快速判死不重试。
+            attempt = 0
+            while True:
+                try:
+                    response = session.post(self._base_url + "/v1/messages", json=payload,
+                                            headers={"x-api-key": self._api_key,
+                                                     "anthropic-version": "2023-06-01",
+                                                     "Content-Type": "application/json"},
+                                            timeout=timeout or self._timeout,
+                                            allow_redirects=False, stream=True, verify=verify)
+                except requests.Timeout:
+                    raise
+                except requests.ConnectionError as exc:
+                    if attempt >= len(TRANSPORT_RETRY_DELAYS):
+                        raise
+                    attempt += 1
+                    delay = TRANSPORT_RETRY_DELAYS[attempt - 1]
+                    print("[llm] transport retry {}/{} in {}s ({}: {})".format(
+                        attempt, len(TRANSPORT_RETRY_DELAYS), delay,
+                        type(exc).__name__, exc), file=sys.stderr, flush=True)
+                    time.sleep(delay)
+                    continue
+                break
             if response.status_code == 429:
                 self._limiter.on_rate_limited()
                 raise RateLimited("429 from company gateway")

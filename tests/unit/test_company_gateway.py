@@ -55,8 +55,11 @@ class FakeSession:
 
 def invoke(result=None, **kwargs):
     session = FakeSession(result if result is not None else FakeResponse())
-    fake = SimpleNamespace(Session=lambda: session, Timeout=TransportTimeout, RequestException=TransportError)
-    with patch.dict(sys.modules, {"requests": fake}):
+    fake = SimpleNamespace(Session=lambda: session, Timeout=TransportTimeout,
+                           RequestException=TransportError, ConnectionError=TransportError)
+    # 传输类失败现在会退避重试（5/15/30s）：单测里 patch 掉真实 sleep。
+    with patch.dict(sys.modules, {"requests": fake}), \
+            patch("ctf_ext.llm.deepseek.time.sleep"):
         response = DeepSeekProvider(api_key="test-key-not-a-real-secret").complete(
             [{"role": "user", "content": "离线测试"}], system="只用提供的题目", json_mode=True, **kwargs)
     return response, session
