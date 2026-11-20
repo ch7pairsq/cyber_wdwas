@@ -28,7 +28,7 @@ Docker 与参赛状态中的容器记录为此前结果，不包含本次尚未�
 ## 2026-11-20 增量：切换 DeepSeek 官方 API 主通道与双模型换挡启用
 
 - 主通道切换为 DeepSeek 官方 API（`https://api.deepseek.com`，OpenAI Chat Completions 兼容），模型 ID 采用官方口径：`deepseek-flash`（高频探索）/ `deepseek-v4-pro`（换挡攻坚）；原预留 `deepseek-chat`/`deepseek-reasoner` 移出白名单，公司网关通道（`baizhi_anthropic`）保留为备选。
-- 密钥注入名仍为 `BAIZHI_API_KEY`，值改为 DeepSeek 官方 API key（本机来源 `~/chaitin_agent/chaitin_ds_key`）；本机已创建 0600 纯文本 key 文件。
+- 密钥注入名仍为 `BAIZHI_API_KEY`，值改为 DeepSeek 官方 API key；本机已创建 0600 纯文本 key 文件。
 - 双模型换挡按预留逻辑启用（arena 配置 `pro_model: deepseek-v4-pro`）：stage≥pro_from_stage 的换路径回合与提交前评审路由 Pro，调用失败/每题次数超限（`budget.pro_max_calls_per_challenge`）自动回退 flash（fail-open）；阶段思考预算在官方通道映射为 `thinking: {"type": "enabled"}`（攻坚档追加 `reasoning_effort: high`，官方示例口径）。
 - 修复换挡装配回退语义：Pro 实例构造失败（白名单拒绝等）由仅捕获 SystemExit 扩为同时捕获 ProviderConfigError，与"构造失败一律回退单模型"注释一致；`config.py` 新增 `pro_model`/`pro_from_stage` 配置期校验。
 - 验证口径：单元 **302/302**（1 项跳过与本改动无关）；真实 API 冒烟 7/7（flash/pro 基础调用、两档 thinking、工具调用回路、错误 key 401 不泄凭据、端点白名单拒绝）；三套配置经真实加载路径校验，flash 主实例 + v4-pro 换挡实例装配一致。
@@ -92,7 +92,7 @@ bash scripts/ci.sh
 ## 真实模型与官方平台的边界
 
 - `--mode llm` 是实验入口。已接通 Provider 请求、响应契约校验、修复重试与本地只读工具循环；但完整附件读取、真实网关的 `tools`/`tool_use` 兼容、可信容器沙箱和官方平台仍未验收，**不是补上 Key 就能正式解题**。
-- 模型主通道自 2026-11-20 起切换为 DeepSeek 官方 API（OpenAI Chat Completions 兼容，`https://api.deepseek.com`，已真实调用验收）；模型 ID：`deepseek-flash`（探索）/ `deepseek-v4-pro`（换挡攻坚，`model.pro_model` 启用，stage≥pro_from_stage 的换路径回合与提交前评审路由 Pro，失败/超限回退 flash）。原预留模型 ID `deepseek-chat`/`deepseek-reasoner` 已按官方口径废弃出白名单；公司百智云网关通道（`baizhi_anthropic`）保留为备选。`BAIZHI_API_KEY` 注入名不变，值为 DeepSeek 官方 API key（本机来源 `~/chaitin_agent/chaitin_ds_key`），只在运行时注入，不写入镜像、配置或报告。切换官方通道须同步平台出口白名单覆盖 api.deepseek.com。
+- 模型主通道自 2026-11-20 起切换为 DeepSeek 官方 API（OpenAI Chat Completions 兼容，`https://api.deepseek.com`，已真实调用验收）；模型 ID：`deepseek-flash`（探索）/ `deepseek-v4-pro`（换挡攻坚，`model.pro_model` 启用，stage≥pro_from_stage 的换路径回合与提交前评审路由 Pro，失败/超限回退 flash）。原预留模型 ID `deepseek-chat`/`deepseek-reasoner` 已按官方口径废弃出白名单；公司百智云网关通道（`baizhi_anthropic`）保留为备选。`BAIZHI_API_KEY` 注入名不变，值为 DeepSeek 官方 API key，只在运行时注入，不写入镜像、配置或报告。切换官方通道须同步平台出口白名单覆盖 api.deepseek.com。
 - 比赛禁止 `web_search`、其他搜索 API 和运行时安装。已增加工具层拒绝与参赛候选镜像安装器移除；任意 Python 代码的出站访问仍须平台网络策略约束，不能把应用检查当作完整沙箱。
 - 官方 Harness 的 SDK、fixture 和字段映射尚未验收；CLI 的官方模式仍明确拒绝启动。适配器存在不代表 CLI 已完成接线。
 - 下载限额 0 的设计语义是禁止下载，但热更新与共享计数仍有下述缺口；不能将模块保护等同于完整出口隔离。

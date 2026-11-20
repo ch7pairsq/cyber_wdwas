@@ -78,7 +78,7 @@ model:
   provider: "deepseek_official_openai"
   base_url: "https://api.deepseek.com"
   model: "deepseek-flash"    # 官方模型 ID：deepseek-flash（探索）/ deepseek-v4-pro（换挡攻坚）
-  api_key_env: "BAIZHI_API_KEY"  # 注入名不变；值为 DeepSeek 官方 API key（本机：~/chaitin_agent/chaitin_ds_key），仅运行时注入
+  api_key_env: "BAIZHI_API_KEY"  # 注入名不变；值为 DeepSeek 官方 API key，仅运行时注入
   max_tokens: 4096
   tools_enabled: true        # 关闭后不发送工具定义
   # 双模型换挡（预留逻辑）：pro_model 非空时 stage>=pro_from_stage 的换路径回合

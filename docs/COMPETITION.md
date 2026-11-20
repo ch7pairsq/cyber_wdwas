@@ -14,7 +14,7 @@
 - 主通道（2026-11-20 用户确认切换）：DeepSeek 官方 API，OpenAI Chat Completions 兼容协议（POST /chat/completions、Bearer 鉴权），Base URL 固定 https://api.deepseek.com ，model ID 仅允许 deepseek-flash／deepseek-v4-pro（已真实调用验收）。双模型换挡：`model.pro_model=deepseek-v4-pro` 启用，stage≥pro_from_stage 的换路径回合与提交前评审路由 Pro，调用失败/每题次数超限回退 flash（fail-open）。切换只改配置 `model.provider`（`deepseek_official_openai` ↔ `baizhi_anthropic`），业务代码零改动；出口白名单须覆盖 api.deepseek.com。
 - 备选通道（保留）：公司百智云网关，Base URL https://ai-api-gateway.app.baizhi.cloud/api/anthropic ，Anthropic Messages 兼容协议（POST /v1/messages、x-api-key、anthropic-version），唯一 model ID deepseek-flash。
 - 两条通道互斥；`config/base.yaml`、`arena.yaml`、`official-arena.yaml` 当前默认均走官方通道，百智网关保留为备选（切换只改 `model.provider`）。两通道执行同样的传输纪律：不继承任意 HTTP_PROXY、不跟随重定向、校验 TLS、不发送 tools/web_search 定义、响应大小上限，对非文本工具响应和模型 ID 不一致的响应拒绝处理。两条通道均已经过真实调用：百智通道在 2026-11-19 arena 平台演练，官方通道为 2026-11-20 切换后验收。
-- 凭据环境变量固定为 BAIZHI_API_KEY（2026-11-18 用户确认，两条通道共用；切换通道时变量名不变，值对应所选通道的 Key；2026-11-20 起默认值为 DeepSeek 官方 API key，本机来源 ~/chaitin_agent/chaitin_ds_key）。Key 只能运行时注入，不打入镜像，不写配置文件与数据库快照。
+- 凭据环境变量固定为 BAIZHI_API_KEY（2026-11-18 用户确认，两条通道共用；切换通道时变量名不变，值对应所选通道的 Key；2026-11-20 起默认值为 DeepSeek 官方 API key）。Key 只能运行时注入，不打入镜像，不写配置文件与数据库快照。
 - 可选 Key 落盘缓存（2026-11-18 新增，默认关闭）：环境变量在进程重启与容器重启时都会保留，只有"平台重建容器且不重注入、并挂载持久卷"的场景才需要落盘兜底。启用后缓存文件 0600 原子写入，不进 SQLite／证据／报告／日志，本轮运行正常结束时清理；是否启用待平台确认挂载与重启语义后再定。
 
 接口路径名称中的 anthropic 代表兼容协议，不代表调用 Claude；两条通道请求中的模型都是用户指定的 DeepSeek 系列。Provider 不发送 tools/web_search 定义，对非文本工具响应和模型 ID 不一致的响应拒绝处理。

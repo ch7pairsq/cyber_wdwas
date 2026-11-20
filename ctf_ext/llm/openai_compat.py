@@ -2,7 +2,7 @@
 
 2026-11-18 用户决定：比赛日可切换到 DeepSeek 官方 API，预留接口；
 2026-11-20 用户确认：官方通道转为默认主通道，密钥改用 DeepSeek 官方 API key
-（本机来源 ~/chaitin_agent/chaitin_ds_key，注入环境变量名仍为 BAIZHI_API_KEY）。
+（注入环境变量名仍为 BAIZHI_API_KEY）。
 约束：
 - base_url 固定 https://api.deepseek.com，model 仅允许官方 ID
   （deepseek-flash / deepseek-v4-pro，双模型换挡见 config model.pro_model）；

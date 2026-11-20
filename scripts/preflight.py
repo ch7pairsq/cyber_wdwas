@@ -136,7 +136,7 @@ def main() -> int:
         check("ssrf private-network blocked", exc.reason_code == "PRIVATE_NETWORK", exc.reason_code)
 
     key = os.environ.get("BAIZHI_API_KEY", "")
-    check("BAIZHI_API_KEY", bool(key), "运行时注入 DeepSeek 官方 API key（本机来源 ~/chaitin_agent/chaitin_ds_key）", warn=True)
+    check("BAIZHI_API_KEY", bool(key), "运行时注入 DeepSeek 官方 API key", warn=True)
 
     failed = [r for r in results if r[0] == "FAIL"]
     print("-" * 50)
