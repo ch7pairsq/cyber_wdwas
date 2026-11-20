@@ -71,6 +71,7 @@ policy:
     - pdftotext
     - pdfinfo
     - qrencode
+    - tesseract
     - zbarimg
     - java
     - javac

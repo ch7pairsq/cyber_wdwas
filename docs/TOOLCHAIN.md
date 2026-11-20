@@ -71,10 +71,21 @@ SHA256；当前版本先保证“包名固定、构建期安装、运行期不�
 | `procyon` | `procyon-decompiler` | Java 字节码反编译（trixie 无 jadx/cfr；Debian 包二进制名为 `procyon`） |
 | `apktool` | `apktool` | Android apk 解包（资源 + smali） |
 | `go` / `gofmt` | `golang-go` | Go 1.24：编译/运行本地单文件（gob 构造等） |
+| `tesseract` | `tesseract-ocr` + `tesseract-ocr-chi-sim` | OCR（注册工具 `ocr_text` 主命令；中英文） |
+| `tshark` | `tshark` | pcap 解析（只读本地文件，不抓包） |
+| `ffmpeg` / `ffprobe` | `ffmpeg` | 音视频解码、频谱图、抽帧 |
+| `wasm2wat` | `wabt` | WASM 反汇编为文本 |
+| `john` | `john` | 哈希/弱口令破解（社区版，无 *2john 提取脚本） |
+| `photorec` / `testdisk` | `testdisk` | 文件雕刻、分区恢复 |
+| `unrar` | `unrar` | RAR 解压（non-free 组件，许可以包内 copyright 为准） |
+| `upx` | `upx-ucl` | UPX 脱壳（trixie main 4.2.4） |
+| `scapy`/`numpy`/`sympy`/`PIL`/`Crypto`/`gmpy2`/`z3`/`unicorn`/`jwt` | `python3-scapy` 等 `python3-*` | `python_exec`（/usr/bin/python3）可 import 的解题库，用 `modules` 字段做 import 校验 |
 
 `python3-pwntools` 会通过 Debian 依赖带入 `python3-pip`；镜像构建完成后仍由
 `strip_installers.py` 删除 pip 入口，`pwn` 本身不依赖运行期 pip。构建验收需要确认
-`pwn`/`ROPgadget`/`cstool`/`checksec`/`patchelf`/`z3` 六个主二进制都存在。
+`pwn`/`ROPgadget`/`cstool`/`checksec`/`patchelf`/`z3` 六个主二进制以及 `tesseract`
+都存在；纯 Python 库（scapy/numpy/sympy/PIL/pycryptodome/gmpy2/z3/unicorn/jwt）
+由安装脚本用 `/usr/bin/python3` 做 import 探测，缺失即构建失败。
 
 比赛容器无网络：`go` 仅限本地单文件编译（模块下载不可用）；`java` 运行 jar 同理，
 不能从远程仓库拉依赖。
@@ -85,11 +96,14 @@ SHA256；当前版本先保证“包名固定、构建期安装、运行期不�
 
 - `sagemath`：密码学强，但体积和构建时间很大；
 - `ghidra`：反编译强，但需要 JVM 和较大镜像；
-- `upx`：Debian bookworm 只在 backports 提供，默认不装；确有需要时改用固定版本的官方 release 或 backports，并重新验证；
 - `radare2`、`rizin`：bookworm 官方源没有对应包（`packages.debian.org/bookworm/radare2` 返回不可用，`rizin` 无此包）；Reverse 主路径改用 `objdump` + `gdb` + `cstool` + `ROPgadget`，不引入非 Debian 源；
-- `jadx`（trixie 官方源无此包，Java 反编译已用 `procyon-decompiler` 覆盖）、`angr`、`ghidra`、`torch`：按题型和体积另行评估；
+- `jadx`（trixie 官方源无此包，Java 反编译已用 `procyon-decompiler` 覆盖）、`angr`、`torch`：按题型和体积另行评估；
 - `nmap`、`nuclei`、`sqlmap`：主动扫描器，不属于离线技能文本；需要明确授权和网络策略；
-- `pycryptodome`、`gmpy2`：本轮不加入工具清单（没有独立可执行文件可用于二进制校验）；如后续需要，先在 Debian 包与哈希锁之间做完整许可/体积审查。
+- `uncompyle6`、`decompyle3`、`pyinstxtractor_ng`：trixie 无 Debian 包；走 PyPI 必须先做 `--require-hashes` 锁文件，本轮不引入；
+- `zip2john` 等 *2john 脚本：Debian `john` 是社区版（非 jumbo），不含这些提取脚本；需要提取哈希时在 `python_exec` 里手工构造。
+
+纯 Python 库（`pycryptodome`、`gmpy2` 等）已改以 apt `python3-*` 包进入清单
+（2026-11-20）：无独立二进制，用清单的 `modules` 字段做 import 校验，不走 pip。
 
 `ctf-skills` 是方法文本，不是工具。它不能替代 `binwalk`、`gdb`、`qemu` 等实际执行能力；
 反过来，只有工具没有技能文本也不会自动提高解题率。
@@ -133,12 +147,12 @@ docker build --target competition \
 工作目录、超时与输出上限检查。工具结果以 `tool_result` 回传，完整输出登记为证据；模型最终
 必须引用 `evidence_id`，否则 B.2 契约拒收。
 
-默认注册 18 个工具，不提供任意 shell/Python 执行：侦察类 `file_info`、`strings`、`hexdump`、
+默认注册 24 个工具，不提供任意 shell/Python 执行：侦察类 `file_info`、`strings`、`hexdump`、
 `metadata`、`png_check`、`binwalk_scan`；结构类 `elf_headers`、`symbols`、`checksec`、
 `disassemble`、`disasm_bytes`（cstool）、`rop_gadgets`；内容提取类 `pdf_text`、`qr_decode`、
 `archive_list`；受控执行类 `archive_extract`、`binwalk_extract`、`steghide_extract`（固定输出名、
 非幂等、标记 risk_level=execute，生产 `sandbox_required=true` 时与所有本地命令一样 fail-closed）。
-内置技能库 `ctf_ext/skills/` 现有 10 节，覆盖 crypto/reverse/pwn/forensics/misc 五个域，
+内置技能库 `ctf_ext/skills/` 现有 45 节，覆盖 crypto/reverse/pwn/forensics/misc 五个域，
 按题目分类（含 `reversing→reverse` 等别名）与关键词选择。需要新增工具时，先确认
 Debian 包、许可、体积和实际题型收益，再补 `ToolSpec` 与回归；不以“更多工具”为目标。
 

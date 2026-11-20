@@ -40,7 +40,7 @@
 
 需要自定义运算（大数/编码链/像素级隐写/解析私有格式）而现有工具不够时，用 python_exec 提交完整代码（一次一段，print 输出）。报错时 traceback 会原样回传——读它、改代码、重试，不要猜。注意：只有标准库、pwntools 及预装库可用；不要猜库名，先 import 试。
 
-python_exec 里可直接调用的扩展二进制：tshark（pcap 解析）、ffmpeg（音视频/频谱图/抽帧）、upx（-d 脱壳）、wasm2wat（WASM 反汇编）、john/zip2john（弱口令与哈希）、photorec（文件雕刻）、unrar（RAR 解压）；可直接 import 的扩展库：scapy（流量包构造解析）、uncompyle6/decompyle3（.pyc 反编译）、pyinstxtractor_ng（PyInstaller 解包）、pyjwt、pycryptodome、PIL、numpy、gmpy2、sympy、z3、unicorn。
+python_exec 里可直接调用的扩展二进制：tshark（pcap 解析）、ffmpeg（音视频/频谱图/抽帧）、upx（-d 脱壳）、wasm2wat（WASM 反汇编）、john（弱口令与哈希；社区版不含 zip2john 等 *2john 提取脚本，需自备原始哈希）、photorec（文件雕刻）、unrar（RAR 解压）；可直接 import 的扩展库：scapy（流量包构造解析）、pyjwt、pycryptodome、PIL、numpy、gmpy2、sympy、z3、unicorn。uncompyle6/decompyle3/pyinstxtractor_ng 镜像内不可用（无 Debian 包）；.pyc 反编译改用反汇编 + 手工分析。
 
 ## 图片与 PDF 取证
 

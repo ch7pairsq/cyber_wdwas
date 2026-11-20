@@ -346,17 +346,17 @@
     },
     {
       "name": "upx",
-      "package": null,
-      "source": "manual",
+      "package": "upx-ucl",
+      "source": "apt",
       "bins": [
         "upx"
       ],
-      "tier": "optional",
-      "installed_by_default": false,
+      "tier": "ctf",
+      "installed_by_default": true,
       "allowlist": false,
       "risk": "execute",
       "license": "GPL-2.0-or-later",
-      "notes": "bookworm-backports 才提供；默认不装，避免基础源不稳定"
+      "notes": "trixie main 的 upx-ucl 4.2.4（二进制名 upx）；python_exec 内调用做 -d 脱壳"
     },
     {
       "name": "qemu-user",
@@ -379,7 +379,8 @@
       "source": "apt",
       "bins": [
         "pdftotext",
-        "pdfinfo"
+        "pdfinfo",
+        "pdfimages"
       ],
       "tier": "ctf",
       "installed_by_default": true,
@@ -558,6 +559,255 @@
       "risk": "execute",
       "license": "BSD-3-Clause",
       "notes": "Go 1.24 工具链：编译/运行本地单文件（gob 等序列化构造）；runtime 无网络，模块下载不可用"
+    },
+    {
+      "name": "tesseract-ocr",
+      "package": "tesseract-ocr",
+      "source": "apt",
+      "bins": [
+        "tesseract"
+      ],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": true,
+      "risk": "read",
+      "license": "Apache-2.0",
+      "notes": "OCR 命令行（注册工具 ocr_text 的主命令）；自带 eng/osd 数据，中文需 tesseract-ocr-chi-sim"
+    },
+    {
+      "name": "tesseract-ocr-chi-sim",
+      "package": "tesseract-ocr-chi-sim",
+      "source": "apt",
+      "bins": [
+        "tesseract"
+      ],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": false,
+      "risk": "read",
+      "license": "Apache-2.0",
+      "notes": "chi_sim 简体中文训练数据；纯数据包，bins 复用 tesseract 仅作存在性校验"
+    },
+    {
+      "name": "tshark",
+      "package": "tshark",
+      "source": "apt",
+      "bins": [
+        "tshark"
+      ],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": false,
+      "risk": "read",
+      "license": "GPL-2.0-or-later",
+      "notes": "pcap 解析；python_exec 内调用，只读本地文件，不抓包不联网"
+    },
+    {
+      "name": "ffmpeg",
+      "package": "ffmpeg",
+      "source": "apt",
+      "bins": [
+        "ffmpeg",
+        "ffprobe"
+      ],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": false,
+      "risk": "execute",
+      "license": "GPL-2.0-or-later",
+      "notes": "音视频解码/频谱图/抽帧；python_exec 内调用，仅本地文件"
+    },
+    {
+      "name": "wabt",
+      "package": "wabt",
+      "source": "apt",
+      "bins": [
+        "wasm2wat"
+      ],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": false,
+      "risk": "read",
+      "license": "Apache-2.0",
+      "notes": "WebAssembly 工具集（wasm2wat 反汇编为文本）"
+    },
+    {
+      "name": "john",
+      "package": "john",
+      "source": "apt",
+      "bins": [
+        "john"
+      ],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": false,
+      "risk": "compute",
+      "license": "GPL-2.0-or-later",
+      "notes": "John the Ripper 社区版：弱口令/哈希破解；不含 jumbo 的 *2john 提取脚本"
+    },
+    {
+      "name": "testdisk",
+      "package": "testdisk",
+      "source": "apt",
+      "bins": [
+        "photorec",
+        "testdisk"
+      ],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": false,
+      "risk": "read",
+      "license": "GPL-2.0-or-later",
+      "notes": "photorec 文件雕刻 / testdisk 分区恢复；python_exec 内调用"
+    },
+    {
+      "name": "unrar",
+      "package": "unrar",
+      "source": "apt",
+      "bins": [
+        "unrar"
+      ],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": false,
+      "risk": "execute",
+      "license": "non-free (RARLAB freeware)",
+      "notes": "RAR 解压（Debian non-free 组件，trixie 默认源已启用）；许可以包内 copyright 为准"
+    },
+    {
+      "name": "python3-scapy",
+      "package": "python3-scapy",
+      "source": "apt",
+      "bins": [],
+      "modules": [
+        "scapy"
+      ],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": false,
+      "risk": "compute",
+      "license": "GPL-2.0-or-later",
+      "notes": "流量包构造/解析库；python_exec（/usr/bin/python3）可 import"
+    },
+    {
+      "name": "python3-numpy",
+      "package": "python3-numpy",
+      "source": "apt",
+      "bins": [],
+      "modules": [
+        "numpy"
+      ],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": false,
+      "risk": "compute",
+      "license": "BSD-3-Clause",
+      "notes": "数值计算库；态矢模拟、像素级隐写等 python_exec 场景"
+    },
+    {
+      "name": "python3-sympy",
+      "package": "python3-sympy",
+      "source": "apt",
+      "bins": [],
+      "modules": [
+        "sympy"
+      ],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": false,
+      "risk": "compute",
+      "license": "BSD-3-Clause",
+      "notes": "符号计算库；python_exec（/usr/bin/python3）可 import"
+    },
+    {
+      "name": "python3-pil",
+      "package": "python3-pil",
+      "source": "apt",
+      "bins": [],
+      "modules": [
+        "PIL"
+      ],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": false,
+      "risk": "compute",
+      "license": "MIT-CMU",
+      "notes": "Pillow 图像库；隐写像素处理、OCR 前处理等场景"
+    },
+    {
+      "name": "python3-pycryptodome",
+      "package": "python3-pycryptodome",
+      "source": "apt",
+      "bins": [],
+      "modules": [
+        "Crypto"
+      ],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": false,
+      "risk": "compute",
+      "license": "BSD-2-Clause AND Public-Domain",
+      "notes": "密码学库（Crypto 模块）；RSA/AES 等场景，取代手写模运算"
+    },
+    {
+      "name": "python3-gmpy2",
+      "package": "python3-gmpy2",
+      "source": "apt",
+      "bins": [],
+      "modules": [
+        "gmpy2"
+      ],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": false,
+      "risk": "compute",
+      "license": "LGPL-3.0-or-later",
+      "notes": "大数运算库；iroot/invert 等场景"
+    },
+    {
+      "name": "python3-z3",
+      "package": "python3-z3",
+      "source": "apt",
+      "bins": [],
+      "modules": [
+        "z3"
+      ],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": false,
+      "risk": "compute",
+      "license": "MIT",
+      "notes": "z3 Python 绑定（CLI z3 另有独立条目）；约束求解场景"
+    },
+    {
+      "name": "python3-unicorn",
+      "package": "python3-unicorn",
+      "source": "apt",
+      "bins": [],
+      "modules": [
+        "unicorn"
+      ],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": false,
+      "risk": "compute",
+      "license": "BSD-3-Clause",
+      "notes": "Unicorn CPU 模拟框架 Python 绑定；逆向/emulation 场景"
+    },
+    {
+      "name": "python3-jwt",
+      "package": "python3-jwt",
+      "source": "apt",
+      "bins": [],
+      "modules": [
+        "jwt"
+      ],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": false,
+      "risk": "compute",
+      "license": "MIT",
+      "notes": "PyJWT；web.jwt 场景的令牌构造/校验"
     }
   ]
 }

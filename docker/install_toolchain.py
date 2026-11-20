@@ -5,13 +5,15 @@
 - 只在 docker build 阶段调用 apt-get；
 - 运行期不提供 pip/apt/uv/npm 入口；
 - 安装完成后写入 /opt/toolchain-installed.json 与许可文件副本；
-- 校验失败返回非零，避免带着缺失工具进入比赛。
+- 校验失败返回非零，避免带着缺失工具进入比赛；
+- 二进制用 PATH 探测，Python 库用 /usr/bin/python3 做 import 探测。
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -53,12 +55,20 @@ def validate_manifest(data: Dict) -> None:
         if tool.get("source") not in ("apt", "base", "manual"):
             raise ValueError("invalid source for " + name)
         bins = tool.get("bins")
-        if not isinstance(bins, list) or not bins or any(not isinstance(x, str) or not x for x in bins):
-            raise ValueError("tool bins must be a non-empty string list: " + name)
+        if not isinstance(bins, list) or any(not isinstance(x, str) or not x for x in bins):
+            raise ValueError("tool bins must be a string list: " + name)
         if not isinstance(tool.get("installed_by_default", True), bool):
             raise ValueError("installed_by_default must be bool: " + name)
         if not isinstance(tool.get("allowlist", False), bool):
             raise ValueError("allowlist must be bool: " + name)
+        # 纯 Python 库（python3-*）没有独立二进制：bins 为空时必须提供 modules 做 import 探测。
+        modules = tool.get("modules", [])
+        if not isinstance(modules, list) or any(not isinstance(x, str) or not x for x in modules):
+            raise ValueError("tool modules must be a string list: " + name)
+        if any(not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", m) for m in modules):
+            raise ValueError("invalid python module name: " + name)
+        if not bins and not modules:
+            raise ValueError("tool needs non-empty bins or modules: " + name)
 
 
 def _tier_index(tier: str) -> int:
@@ -97,13 +107,28 @@ def apt_packages(data: Dict, tier: str) -> List[str]:
 
 
 def verify_tools(data: Dict, tier: str = "ctf") -> List[str]:
-    """检查该层所有默认工具的二进制；返回 name:binary 缺失项。"""
+    """检查该层所有默认工具的二进制与 Python 模块；返回 name:binary 缺失项。"""
     missing = []
     for tool in tools_for_tier(data, tier, include_optional=(tier == "full")):
         for binary in tool["bins"]:
             if shutil.which(binary) is None:
                 missing.append("{}:{}".format(tool["name"], binary))
+        for module in tool.get("modules", []):
+            if not _module_importable(module):
+                missing.append("{}:python3-import:{}".format(tool["name"], module))
     return missing
+
+
+def _module_importable(module: str) -> bool:
+    """用 /usr/bin/python3 探测 import（apt python3-* 的目标解释器，与 python_exec 同环境）。"""
+    try:
+        probe = subprocess.run(
+            ["/usr/bin/python3", "-c", "import " + module],
+            capture_output=True, timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return probe.returncode == 0
 
 
 def _apt_env() -> Dict[str, str]:
@@ -144,6 +169,10 @@ def write_metadata(data: Dict, tier: str, metadata_path: Path) -> None:
         },
         "tools": {
             tool["name"]: list(tool["bins"]) for tool in installed
+        },
+        "modules": {
+            tool["name"]: list(tool["modules"])
+            for tool in installed if tool.get("modules")
         },
         "missing": verify_tools(data, tier),
     }

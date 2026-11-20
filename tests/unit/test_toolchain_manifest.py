@@ -22,7 +22,7 @@ def test_manifest_has_core_and_ctf_tools():
     assert {"file", "binutils", "binwalk", "gdb", "qemu-user"} <= names
     assert {"reverse-pwntools", "ropgadget", "checksec", "patchelf", "capstone-tool", "z3"} <= names
     assert "radare2" not in names and "rizin" not in names
-    assert all(tool["bins"] for tool in manifest["tools"])
+    assert all(tool["bins"] or tool.get("modules") for tool in manifest["tools"])
 
 
 def test_ctf_tier_is_cumulative_and_has_no_duplicate_packages():
@@ -32,7 +32,15 @@ def test_ctf_tier_is_cumulative_and_has_no_duplicate_packages():
     assert set(core) <= set(ctf)
     assert len(ctf) == len(set(ctf))
     assert "binutils" in core and "binwalk" in ctf
-    assert "upx-ucl" not in ctf
+    # upx 已转正：trixie main 有 upx-ucl，默认随 ctf 层安装。
+    assert "upx-ucl" in ctf
+    # tesseract（ocr_text 主命令）与 chi_sim 数据包默认安装。
+    assert {"tesseract-ocr", "tesseract-ocr-chi-sim"} <= set(ctf)
+    # 纯 Python 库条目：modules 字段必须落在 ctf 层。
+    lib_pkgs = {t["name"] for t in manifest["tools"] if t.get("modules")}
+    assert {"python3-scapy", "python3-numpy", "python3-sympy", "python3-pil",
+            "python3-pycryptodome", "python3-gmpy2", "python3-z3",
+            "python3-unicorn", "python3-jwt"} <= lib_pkgs
     assert {"python3-pwntools", "python3-ropgadget", "checksec", "patchelf", "capstone-tool", "z3"} <= set(ctf)
 
 
@@ -45,6 +53,23 @@ def test_missing_binary_is_reported():
     finally:
         toolchain.shutil.which = original
     assert "binwalk:binwalk" in missing
+
+
+def test_module_verification_pass_and_fail():
+    """modules 字段：stdlib 可 import 则通过；不存在的模块上报缺失。"""
+    manifest = _manifest()
+    tools = copy.deepcopy(manifest["tools"])
+    tools.append({"name": "test-stdlib", "package": None, "source": "base",
+                  "bins": [], "modules": ["os"], "tier": "ctf",
+                  "installed_by_default": True, "allowlist": False})
+    tools.append({"name": "test-ghost", "package": None, "source": "base",
+                  "bins": [], "modules": ["nonexistent_module_9x7"], "tier": "ctf",
+                  "installed_by_default": True, "allowlist": False})
+    patched = copy.deepcopy(manifest)
+    patched["tools"] = tools
+    missing = toolchain.verify_tools(patched, "ctf")
+    assert "test-ghost:python3-import:nonexistent_module_9x7" in missing
+    assert not any(m.startswith("test-stdlib:") for m in missing)
 
 
 def test_duplicate_tool_name_is_rejected():
