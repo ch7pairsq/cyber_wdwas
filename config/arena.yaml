@@ -14,13 +14,18 @@ concurrency:
   max_running_projects: 3
   executor: serial
 budget:
-  # 按 8 题 2 小时窗口校准：短预算快轮转，耗尽的题靠 endgame 加时兜底。
-  per_challenge_seconds: 2400
-  claim_timeout_seconds: 1500
-  max_model_tokens_per_intent: 600000
-  max_tool_calls_per_intent: 300
-  # 运行级全局上限：8 题 × 预期 ~80 万均值，防绕圈止损（非费用控制）
-  max_model_tokens_total: 20000000
+  # 2026-11-21 按“用足 300 元 API 预算”放宽：取消单题短窗口限制，
+  # 只保留全局 token 保险丝与防死循环护栏（stall/repeat/步数止损）。
+  # 单题时限接近运行总时长（absolute_deadline 兜底）。
+  per_challenge_seconds: 12000
+  claim_timeout_seconds: 3600
+  # 单题累计 token 上限：600k → 5M（原正式赛 static_file_server
+  # 三次尝试 46 步即耗尽 600k 的直接原因）
+  max_model_tokens_per_intent: 5000000
+  max_tool_calls_per_intent: 1000
+  # 运行级全局 token 上限：0 = 不设（用户 2026-11-21 决定，300 元额度
+  # 只靠时间+步数限制约束）；用量账本仍持久化，可在库里看实耗
+  max_model_tokens_total: 0
   repeat_limit: 6
   stall_steps: 30
   # 终局加时：全部可解题做完且剩余时间 > endgame_min_seconds 时，对预算
@@ -111,14 +116,18 @@ model:
 storage:
   db_path: data/practice.db
 controller:
+  # 2026-11-21 校准：步数窗口按意图重置（reset_intent_window），而单意图
+  # 预算（1500s/600k tokens）实测仅够 20-26 步——旧阈值 [30,50,70,100]
+  # 导致 pro 档（stage2=50 步）永远触达不了，全程 stage0 盲试（正式赛
+  # static_file_server 三次尝试 46 步未进 stage1 的教训）。前移后：
+  # 8 步轻思考、16 步启用 pro 换路径、24 步深水、32 步心跳止损。
   thresholds:
-  - 30
-  - 50
-  - 70
-  - 100
-  # 步数窗口按意图重置（reset_intent_window），200 是单意图止损上限，
-  # 覆盖 40 轮工具调用的目标用量还有余量
-  max_steps: 200
+  - 8
+  - 16
+  - 24
+  - 32
+  # 与 max_tool_rounds=40 对齐：stage4 在 32-40 步区间停止新增调用
+  max_steps: 40
   # 跨题并行 worker 数：对齐平台 3 环境上限（题内串行见 concurrency）。
   # 2026-11-19 用户验收"单引擎验收"通过：三题并行、题内 intent 串行，
   # 以 parallel_acceptance 显式放行（config.py 校验闸门）。

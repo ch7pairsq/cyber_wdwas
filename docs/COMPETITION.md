@@ -257,6 +257,31 @@ docker run --rm --network none --read-only --cap-drop ALL \
   base 层全部 exists 复用，仅上传源码/wheels/pip 三层）；registry config digest
   `sha256:beb875094a076e4bd…` 与本地 tar 一致（用户/entrypoint 已比对）。
 
+### v8 镜像：预算与 stage 晋升校准（2026-11-21）
+
+- **问题诊断**（正式赛首轮 1/2 题复盘）：static_file_server 三次尝试合计 46 步
+  未解出，全部 `budget_exceeded` 止损。根因有二：
+  1. 步数窗口按意图重置（`reset_intent_window`），而阈值 `[30,50,70,100]`
+     下 pro 档（stage2=50 步）在单意图预算内永远触达不了——全程 stage0
+     盲试（日志全程 `thinking=0` 印证）；
+  2. 单题累计 token 上限 600k 太紧（约 20-26 步即耗尽）。
+- **arena.yaml 调整**（用户确认）：
+  - `controller.thresholds: [8,16,24,32]`——8 步轻思考、16 步启用 pro 换路径、
+    24 步深水、32 步心跳止损；
+  - `controller.max_steps: 40`（与 tool_rounds=40 对齐）；
+  - `budget.per_challenge_seconds: 2400→12000`、`claim_timeout_seconds:
+    1500→3600`（时间限制保留，接近运行总时长，absolute_deadline 兜底）；
+  - `budget.max_model_tokens_per_intent: 600k→5M`、
+    `max_tool_calls_per_intent: 300→1000`；
+  - `budget.max_model_tokens_total: 2000万→0`（**0 = 不设全局 token 上限**，
+    用户决定 300 元额度只靠时间+步数限制约束；用量账本仍持久化）；
+  - 防死循环护栏保留：stall_steps=30、repeat_limit=6、stage4 heartbeat。
+- **验证**：364 passed / 1 skipped / 0 failed；容器内 load_config 确认生效值
+  （budget 12000/3600/5M/global=0，controller [8,16,24,32]/40）；nocred
+  rc=1 fail-closed 正常；镜像 `20defc2cabd9`（22 层，10001:10001 不变）。
+- **推送**：`yuqiao.zhang/cyber-wdwas:dev` manifest PUT → 201，registry config
+  digest `sha256:ff128135b628…` 与本地 tar 一致（已比对）。
+
 ### 仍未验收
 
 - 真实凭据与平台的端到端联调（BAIZHI_API_KEY 真实调用、Arena 任务/附件/提交回执）未执行，需要明确授权后在正式平台进行。
