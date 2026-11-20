@@ -151,6 +151,17 @@ class LlmWorker:
         契约校验（失败一次修复重试）→ WorkerResult。异常分类后返回可重试失败。
         """
         started = self._clock()
+        if not getattr(self, "_cfg_logged", False):
+            self._cfg_logged = True
+            print("[llm] worker: model={} pro_model={} pro_max_calls={} "
+                  "pro_from_stage={} max_tokens={} timeout={}s tool_rounds={} "
+                  "contract_attempts={} skills_mode={} system_chars={}".format(
+                      getattr(self._provider, "_model", "?"),
+                      getattr(self._pro_provider, "_model", None) or "-",
+                      self._pro_max_calls, self._pro_from_stage, self._max_tokens,
+                      self._timeout, self._max_tool_rounds, self._max_attempts,
+                      self._skills_mode, len(self._system)),
+                  file=sys.stderr, flush=True)
         messages: List[Dict[str, Any]] = [{"role": "user", "content": json.dumps({
             "intent_id": claim.intent_id,
             "challenge": {
@@ -214,11 +225,11 @@ class LlmWorker:
                 provider = self._select_provider(claim)
                 prompt_chars = sum(len(str(m.get("content") or "")) for m in messages)
                 print("[llm] call model={} thinking={} mt={} t={} round={} msgs={} "
-                      "tools={} chars={}".format(
+                      "tools={} chars={} skills={}".format(
                           getattr(provider, "_model", "?"), thinking_used,
                           request.get("max_tokens"), request.get("timeout"),
                           tool_rounds, len(messages), len(request.get("tools") or ()),
-                          prompt_chars), file=sys.stderr, flush=True)
+                          prompt_chars, skills_loaded), file=sys.stderr, flush=True)
                 response = provider.complete(messages, **request)
                 usage = getattr(response, "usage", None) or {}
                 print("[llm] ok p={} c={} stop={} tool_calls={} text_chars={}".format(

@@ -632,9 +632,11 @@ class Orchestrator:
             factory.deadline = deadline
         global_budget = getattr(self._worker, "_global_budget", None)
         self._touch_heartbeat()
-        print("[orch] run start worker={} deadline={}s parallel={}".format(
-            self._worker_name, max_seconds, self._parallel_agents),
-            file=sys.stderr, flush=True)
+        print("[orch] run start worker={} deadline={}s parallel={} "
+              "claim_timeout={}s backoff={}s".format(
+                  self._worker_name, max_seconds, self._parallel_agents,
+                  self._claim_timeout, self._retry_backoff),
+              file=sys.stderr, flush=True)
         tasks = self.bootstrap()
         try:
             recover_expired_leases(self._board)  # 启动即恢复未完成租约（§17.4）

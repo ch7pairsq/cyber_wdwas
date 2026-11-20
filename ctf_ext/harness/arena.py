@@ -585,8 +585,21 @@ class ArenaHarnessAdapter(HarnessAdapter):
                                  base_source=self._base_source,
                                  token_source=self._client.token_source()),
               file=sys.stderr, flush=True)
+        print("[arena] adapter: {} auto_start={} auto_finish={} env_policy={} "
+              "max_envs={} client_timeout={}s explicit_proxy={}".format(
+                  " ".join("{}={}".format(k, v) for k, v in self._paths.items()),
+                  self._auto_start, self._auto_finish, self._env_policy,
+                  self._max_envs, self._timeout, bool(self._client._proxy)),
+              file=sys.stderr, flush=True)
         # help 是权威工作流与规则来源；内容只入 metadata，不做协议推断。
         self.help_text = self._client.request("GET", self._paths["help"])
+        try:
+            help_dump = json.dumps(self.help_text, ensure_ascii=False)
+        except (TypeError, ValueError):
+            help_dump = str(self.help_text)
+        print("[arena] help: {} chars, head={}".format(
+            len(help_dump), help_dump[:160].replace("\n", " ")),
+            file=sys.stderr, flush=True)
         self._ctx = HarnessContext(protocol="v1-arena", competition_id="cyber-arena")
         return self._ctx
 
@@ -655,8 +668,11 @@ class ArenaHarnessAdapter(HarnessAdapter):
             try:
                 listing = self._client.request("GET", self._paths["files"],
                                                query={"unique_code": task.challenge_id})
-            except ArenaProtocolError:
-                continue  # files 列表失败不阻塞读题；附件可后续按 ref 重试
+            except ArenaProtocolError as exc:
+                # files 列表失败不阻塞读题；附件可后续按 ref 重试（日志可见原因）。
+                print("[arena] files listing failed for {}: {}".format(
+                    task.challenge_id, exc), file=sys.stderr, flush=True)
+                continue
             entries = listing.get("entries") or [] if isinstance(listing, dict) else []
             refs = []
             for entry in entries:
@@ -672,6 +688,26 @@ class ArenaHarnessAdapter(HarnessAdapter):
             note = self._env_note(info, bool(task.metadata.get("arena_files")))
             if note:
                 task.description = (task.description or "") + "\n\n" + note
+        # 全量打印题目详情与启动参数：平台日志即完整排查材料（脱敏：无凭据）。
+        for idx, task in enumerate(self._tasks):
+            entries = [e.get("path") for e in (task.metadata.get("arena_files") or [])
+                       if isinstance(e, dict)]
+            print("[arena] task[{}] {} name={} cat={} pts={} diff={} files={}".format(
+                idx, task.challenge_id, task.name, task.category,
+                task.points_hint, task.difficulty_level, entries),
+                file=sys.stderr, flush=True)
+            desc = (task.description or "").replace("\n", " ")
+            print("[arena] task[{}] desc={}".format(
+                idx, desc[:400] + ("..." if len(desc) > 400 else "")),
+                file=sys.stderr, flush=True)
+            info = task.metadata.get("start_info")
+            if info:
+                try:
+                    info_dump = json.dumps(info, ensure_ascii=False)
+                except (TypeError, ValueError):
+                    info_dump = str(info)
+                print("[arena] task[{}] start_info={}".format(
+                    idx, info_dump[:400]), file=sys.stderr, flush=True)
         return list(self._tasks)
 
     def _env_note(self, info: Dict[str, Any], has_files: bool) -> str:
@@ -757,6 +793,13 @@ class ArenaHarnessAdapter(HarnessAdapter):
             self._started.add(unique_code)
             # start 响应可能携带环境/服务地址等材料信息，原样保留供 worker 查阅。
             self._start_info[unique_code] = resp
+            if resp:
+                try:
+                    resp_dump = json.dumps(resp, ensure_ascii=False)
+                except (TypeError, ValueError):
+                    resp_dump = str(resp)
+                print("[arena] start {} -> {}".format(unique_code, resp_dump[:300]),
+                      file=sys.stderr, flush=True)
 
     # ------------------------------------------------------------- attachments
     def read_attachment(self, ref: str, *, max_bytes: int):

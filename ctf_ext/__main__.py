@@ -305,6 +305,39 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
         orch.apply_config(hot.config)
     if mode == "fallback":
         scheduler.set_limits(1, 1)
+    # 一次打印全部生效启动参数（脱敏：无凭据），平台日志即完整排查材料。
+    print("[run] config: protocol={} mode={} max_workers={} "
+          "parallel={} claim_timeout={}s backoff={}s poll={}s intents/chal={}".format(
+              protocol, mode, int(conc.get("max_workers") or 1),
+              int((cfg.get("controller") or {}).get("parallel_agents") or 1),
+              claim_timeout_seconds,
+              float(runtime_cfg.get("retry_backoff_seconds") or 0),
+              float(runtime_cfg.get("intent_poll_seconds") or 0.1),
+              planner_limit), file=sys.stderr, flush=True)
+    print("[run] model: provider={} model={} pro_model={} key_env={} "
+          "max_tokens={} request_timeout={}s tools={} tool_rounds={} skills_mode={}".format(
+              model_cfg.get("provider"), pinned_model,
+              (pro_model_id or "-") if mode == "llm" else "-",
+              model_cfg.get("api_key_env") or "BAIZHI_API_KEY",
+              int(model_cfg.get("max_tokens") or 4096),
+              float(model_cfg.get("request_timeout_seconds") or 120),
+              bool(model_cfg.get("tools_enabled", True)),
+              int((cfg.get("controller") or {}).get("max_tool_rounds") or 40),
+              str((cfg.get("skills") or {}).get("mode") or "preload")),
+          file=sys.stderr, flush=True)
+    print("[run] budget: per_intent_tokens={} per_intent_tools={} "
+          "per_intent_seconds={} global_tokens={} pro_calls/chal={} "
+          "repeat_limit={} stall_steps={} endgame_bonus={}".format(
+              int(budget.get("max_model_tokens_per_intent") or 50000),
+              int(budget.get("max_tool_calls_per_intent")
+                  or budget.get("max_tools_per_intent") or 100),
+              float(budget.get("per_challenge_seconds") or 900),
+              int(budget.get("max_model_tokens_total") or 0),
+              int(budget.get("pro_max_calls_per_challenge") or 0),
+              int(budget.get("repeat_limit") or 3),
+              int(budget.get("stall_steps") or 20),
+              float(budget.get("endgame_token_bonus") or 0)),
+          file=sys.stderr, flush=True)
     return orch
 
 
