@@ -62,15 +62,22 @@ SHA256；当前版本先保证“包名固定、构建期安装、运行期不�
 | `checksec` | `checksec` | NX/PIE/RELRO/Canary 检查 |
 | `patchelf` | `patchelf` | ELF 解释器/RPATH 调整（受控 pwn 场景） |
 | `z3` | `z3` | SMT 约束求解 |
-
-`python3-pwntools` 会通过 Debian 依赖带入 `python3-pip`；镜像构建完成后仍由
-`strip_installers.py` 删除 pip 入口，`pwn` 本身不依赖运行期 pip。构建验收需要确认
-`pwn`/`ROPgadget`/`cstool`/`checksec`/`patchelf`/`z3` 六个主二进制都存在。
 | `strace` / `ltrace` | `strace` / `ltrace` | 系统/库调用 |
 | `qemu-x86_64` / `qemu-aarch64` | `qemu-user` | 跨架构本地运行 |
 | `pdftotext` / `pdfinfo` | `poppler-utils` | PDF |
 | `qrencode` | `qrencode` | QR 生成 |
 | `zbarimg` | `zbar-tools` | QR/条码识别 |
+| `java` / `javac` / `jar` | `default-jdk-headless` | OpenJDK 21：运行/编译 Java（反序列化 payload、jar 分析） |
+| `procyon` | `procyon-decompiler` | Java 字节码反编译（trixie 无 jadx/cfr；Debian 包二进制名为 `procyon`） |
+| `apktool` | `apktool` | Android apk 解包（资源 + smali） |
+| `go` / `gofmt` | `golang-go` | Go 1.24：编译/运行本地单文件（gob 构造等） |
+
+`python3-pwntools` 会通过 Debian 依赖带入 `python3-pip`；镜像构建完成后仍由
+`strip_installers.py` 删除 pip 入口，`pwn` 本身不依赖运行期 pip。构建验收需要确认
+`pwn`/`ROPgadget`/`cstool`/`checksec`/`patchelf`/`z3` 六个主二进制都存在。
+
+比赛容器无网络：`go` 仅限本地单文件编译（模块下载不可用）；`java` 运行 jar 同理，
+不能从远程仓库拉依赖。
 
 ### 暂不放进默认镜像
 
@@ -80,7 +87,7 @@ SHA256；当前版本先保证“包名固定、构建期安装、运行期不�
 - `ghidra`：反编译强，但需要 JVM 和较大镜像；
 - `upx`：Debian bookworm 只在 backports 提供，默认不装；确有需要时改用固定版本的官方 release 或 backports，并重新验证；
 - `radare2`、`rizin`：bookworm 官方源没有对应包（`packages.debian.org/bookworm/radare2` 返回不可用，`rizin` 无此包）；Reverse 主路径改用 `objdump` + `gdb` + `cstool` + `ROPgadget`，不引入非 Debian 源；
-- `jadx`、`angr`、`ghidra`、`torch`：按题型和体积另行评估；
+- `jadx`（trixie 官方源无此包，Java 反编译已用 `procyon-decompiler` 覆盖）、`angr`、`ghidra`、`torch`：按题型和体积另行评估；
 - `nmap`、`nuclei`、`sqlmap`：主动扫描器，不属于离线技能文本；需要明确授权和网络策略；
 - `pycryptodome`、`gmpy2`：本轮不加入工具清单（没有独立可执行文件可用于二进制校验）；如后续需要，先在 Debian 包与哈希锁之间做完整许可/体积审查。
 

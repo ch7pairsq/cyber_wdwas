@@ -499,6 +499,65 @@
       "risk": "compute",
       "license": "MIT",
       "notes": "SMT 求解器；用于约束求解"
+    },
+    {
+      "name": "java-jdk",
+      "package": "default-jdk-headless",
+      "source": "apt",
+      "bins": [
+        "java",
+        "javac",
+        "jar"
+      ],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": true,
+      "risk": "execute",
+      "license": "GPL-2.0-with-classpath-exception",
+      "notes": "OpenJDK 21 运行/编译：跑 jar（如 ysoserial 类工具）、编译本地利用代码；比赛容器无网络，仅限本地文件"
+    },
+    {
+      "name": "procyon-decompiler",
+      "package": "procyon-decompiler",
+      "source": "apt",
+      "bins": [
+        "procyon"
+      ],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": true,
+      "risk": "read",
+      "license": "Apache-2.0",
+      "notes": "Java 字节码反编译（trixie 官方源无 jadx/cfr）；Debian 包二进制名为 procyon；jar 先用 unzip/7z 解包"
+    },
+    {
+      "name": "apktool",
+      "package": "apktool",
+      "source": "apt",
+      "bins": [
+        "apktool"
+      ],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": true,
+      "risk": "execute",
+      "license": "Apache-2.0",
+      "notes": "Android apk 解包：资源 + smali；内部调用 java"
+    },
+    {
+      "name": "golang",
+      "package": "golang-go",
+      "source": "apt",
+      "bins": [
+        "go",
+        "gofmt"
+      ],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": true,
+      "risk": "execute",
+      "license": "BSD-3-Clause",
+      "notes": "Go 1.24 工具链：编译/运行本地单文件（gob 等序列化构造）；runtime 无网络，模块下载不可用"
     }
   ]
 }

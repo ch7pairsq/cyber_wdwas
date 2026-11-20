@@ -78,6 +78,13 @@ policy:
   - qrencode
   - tesseract
   - zbarimg
+  - java
+  - javac
+  - jar
+  - procyon
+  - apktool
+  - go
+  - gofmt
   authorized_arena_targets:
   - 10.201.0.0/16
 model:

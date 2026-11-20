@@ -131,6 +131,18 @@ docker run --rm --network none --read-only --cap-drop ALL \
 - 成品镜像入口核对：`ENTRYPOINT=["bash","/app/scripts/run_official.sh"]`、USER 10001:10001、标签 `official-arena-entry-wired`。
 - 成品镜像入口冒烟（均 `--network none`）：30s 无凭据 → banner + ARENA_SOLVER_TOKEN 缺失 → 退出 1；300s 无凭据 → supervisor 重启 3/3 后退出 1；假凭据 → Arena `startup()` GET `/openapi/v1/challenges/help` → `Network is unreachable` → `ArenaProtocolError` → 退出 1。假凭据为占位字符串，未触达真实服务。
 
+### 工具链扩展：Java/Go（2026-11-20 第二次构建）
+
+- 目标：补齐 Java（jar 运行/编译/反编译/apk 解包）与 Go（本地单文件编译）解题能力。
+- Debian trixie 官方源核实（代理 `apt-cache policy` 实测）：`jadx`/`cfr`/`smali`/`baksmali`/`dex2jar` 均无包；可用替代 `default-jdk-headless`（OpenJDK 21.0.13.1）、`procyon-decompiler`（Debian 包二进制名是 **`procyon`**）、`apktool` 2.7.0、`golang-go`（Go 1.24.4）。
+- 清单与白名单：`docker/toolchain.json` ctf 层 +4 条目（37 工具 / 36 apt 包）；`command_allowlist` +7 命令（java/javac/jar/procyon/apktool/go/gofmt），base/arena/official-arena 三份同步。
+- 构建失败教训：`procyon-decompiler` 包的二进制名不是包名而是 `/usr/bin/procyon`，首次构建 `verify_tools` 按 bins 校验失败退出 1；修正 manifest bins 后重建通过（构建日志：`logs/build-competition-arena-20261120-v2-javago.log`）。
+- 重建成功：镜像 ID `sha256:4ba923a41a23`，大小 2.52GB（v1 1.55GB，增量约 +1.0GB，来自 JDK+Go 及依赖；平台镜像大小限制仍未确认，需留意）。
+- 断网加固复验（`--network none --read-only --cap-drop ALL --security-opt no-new-privileges:true`）：`check_competition.py` 通过（offline_check=passed、toolchain_tools=37、runtime_installers=false、无 pip/apt 入口）。
+- 容器内工具实测（均 `--network none`）：`java -version`/`javac`/`jar` = 21.0.13；`procyon` 反编译 javac 产物输出源码；`apktool --version` = 2.7.0；`go run` 编译运行 gob 编码单文件成功（gob_len=27）。
+- 注意：apktool 的 Debian 包装器会在 HOME 下建目录，`--read-only` 且 /tmp 不可写时版本自检失败（mkdir 报错）；比赛容器 /tmp 可写，不受影响。Go 测试同理需可写可执行的 /tmp（Docker `--tmpfs` 默认 noexec，测试时要显式加 `exec`）。
+- 入口冒烟复验（同 v1 口径）：无凭据 → banner + ARENA gate 报错 → supervisor 重启 3/3 → 退出 1；假凭据（占位字符串）断网 → Arena startup 失败 → 退出 1。行为与 v1 一致，入口代码未变。
+
 ### 仍未验收
 
 - 真实凭据与平台的端到端联调（BAIZHI_API_KEY 真实调用、Arena 任务/附件/提交回执）未执行，需要明确授权后在正式平台进行。
