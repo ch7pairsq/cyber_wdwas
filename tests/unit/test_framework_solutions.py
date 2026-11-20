@@ -82,7 +82,8 @@ def test_context_prefers_same_challenge_then_same_domain_excludes_cross_domain()
     with fixture() as store:
         _solved(store, "s1", "forensics", "zip-nested-flag")
         _solved(store, "c2", "forensics", "png-trailing-data")
-        _solved(store, "c3", "crypto", "rsa-small-exponent")
+        # crypto 题名故意带 "zip" 关键词：跨域关键词命中也不得注入
+        _solved(store, "c3", "crypto", "zip-cipher-rsa")
         with store.board._write() as db:
             for cid in ("s1", "c2", "c3"):
                 solutions.record_solution(db, cid, _submission(store, cid), commit=False)
@@ -92,7 +93,7 @@ def test_context_prefers_same_challenge_then_same_domain_excludes_cross_domain()
         assert len(ctx) == 2
         assert all(entry["domain"] == "forensics" for entry in ctx)
         assert ctx[0]["domain"] == "forensics" and "zip" in str(ctx[0]["approach"])
-        # crypto 题的思路不得跨域泄露
+        # crypto 题的思路不得跨域泄露（即使关键词命中）
         assert all(entry["domain"] != "crypto" for entry in ctx)
         with store.board._write() as db:
             exact = solutions.solutions_context(db, "misc", "", challenge_id="c2", limit=1)
@@ -105,6 +106,19 @@ def test_no_match_returns_empty():
         with store.board._write() as db:
             assert solutions.solutions_context(db, "crypto", "rsa", limit=2) == []
             assert solutions.solutions_context(db, "", "", limit=2) == []
+
+
+def test_recall_via_board_read_view_returns_entries():
+    """__main__ 的 recall 必须走黑板读视图（RLock 内），功能等价且线程安全。"""
+    from ctf_ext.__main__ import _recall_solutions
+    with fixture() as store:
+        _solved(store)
+        with store.board._write() as db:
+            solutions.record_solution(db, "s1", _submission(store), commit=False)
+        entries = _recall_solutions(store.board, "forensics", "zip nested", "c9")
+        assert len(entries) == 1 and entries[0]["domain"] == "forensics"
+        assert store.db.execute(
+            "SELECT reuse_count FROM solutions WHERE challenge_id='s1'").fetchone()[0] == 1
 
 
 def test_worker_injects_solution_message_and_fails_open():

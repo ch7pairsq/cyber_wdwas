@@ -74,6 +74,16 @@ def _make_provider(cfg, model_override: str = None):
                    timeout=float(model.get("request_timeout_seconds") or 120))
 
 
+def _recall_solutions(board, domain: str, query: str, challenge_id: str):
+    """解题思路检索：走黑板读视图（与写事务共用 RLock），共享连接读写不交叠。
+
+    检索失败向上抛由 worker 侧 fail-open 兜底；bump 计数在 autocommit 下
+    即时生效，失败只损失计数不影响注入。
+    """
+    with board.read_view() as db:
+        return solution_store.solutions_context(db, domain, query, challenge_id=challenge_id)
+
+
 def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
                   config_path: str = None, data_root: str = ".",
                   heartbeat_path: str = None, claim_timeout_seconds: float = None):
@@ -266,9 +276,10 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
             skills_index_max_bytes = int(skills_cfg.get("index_max_bytes") or 600)
         except (TypeError, ValueError):
             skills_index_max_bytes = 600
-        # 解题思路记忆：启动时绑定共享连接；检索在 worker 侧 fail-open。
+        # 解题思路记忆：检索必须走黑板读视图（与写事务共用 RLock，
+        # 共享 sqlite 连接上读写不得交叠）；worker 侧再 fail-open。
         solutions_recall = (lambda domain, query, cid:
-                            solution_store.solutions_context(conn, domain, query, challenge_id=cid))
+                            _recall_solutions(board, domain, query, cid))
         worker = LlmWorker(provider, prompt_path=PROMPT_PATH,
                            state_store=state, control_factory=control_factory,
                            evidence_check=evidence.verify,

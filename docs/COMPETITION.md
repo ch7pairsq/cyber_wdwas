@@ -155,12 +155,17 @@ docker run --rm --network none --read-only --cap-drop ALL \
   不影响主循环。
 - 持久化：记忆存在运行库（`data/practice.db` / `data/official.db`）里，同一数据卷的后续
   运行直接受益；平台重建容器且不挂数据卷时记忆随库重置。
-- 验证：`tests/unit/test_framework_solutions.py`（蒸馏脱敏/幂等/检索优先级/worker 注入
-  fail-open 共 6 例）；全量 `run_checks.py` 346 passed / 1 skipped。
-- v3 重建与验收：镜像 ID `sha256:8d5591b506fe`（2.52GB，与 v2 持平——纯代码层变更）；
-  断网 `check_competition.py` 通过（37 工具、offline_check=passed）；镜像内 migration v3
-  实测建出 `solutions` 全列；入口无凭据冒烟 banner → gate 报错 → 重启 3/3 → 退出 1，
-  与 v2 行为一致。构建日志：`logs/build-competition-arena-20261120-v3-memory.log`。
+- 验证：`tests/unit/test_framework_solutions.py`（蒸馏脱敏/幂等/检索优先级/跨域不泄露/
+  worker 注入 fail-open 共 7 例）；全量 `run_checks.py` 347 passed / 1 skipped。
+- 代码审查修复（2026-11-20 复查）：① recall 回调改走 `board.read_view()`（共享 sqlite
+  连接的读必须与写事务共用 RLock，原实现绕锁违反并发前提）；② `search_solutions` 收紧
+  跨域边界——关键词命中的跨域行一律不注入（原实现 score>0 即放行，存在跨域泄露可能），
+  与 lessons"跨题共享只匹配同一领域"口径一致。
+- v4 重建与验收：镜像 ID `sha256:352410f88eee`（2.52GB）；断网 `check_competition.py`
+  通过（37 工具、offline_check=passed）；入口无凭据冒烟 banner → gate 报错 → 重启 3/3 →
+  退出 1；镜像内已确认审查修复代码。构建日志：
+  `logs/build-competition-arena-20261120-v4-reviewfix.log`。交付镜像
+  `portus.in.chaitin.net/yuqiao.zhang/cyber-wdwas:competition-20261120`。
 
 ### 仍未验收
 

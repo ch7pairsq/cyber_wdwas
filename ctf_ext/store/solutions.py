@@ -213,16 +213,17 @@ def search_solutions(db, domain: str, query: str, challenge_id: Optional[str] = 
         "SELECT * FROM solutions ORDER BY created_at DESC LIMIT ?", (_MAX_ROWS,)).fetchall()
     scored: List[tuple] = []
     for row in rows:
-        score = 0.0
-        if challenge_id and row["challenge_id"] == challenge_id:
-            score += 10.0
+        same_challenge = bool(challenge_id and row["challenge_id"] == challenge_id)
         row_domain = str(row["domain"] or "").casefold()
-        if domain_text and row_domain == domain_text:
+        # 跨域且非同题：宁可空缺也不注入无关思路（关键词命中也不放宽，
+        # 与 lessons"跨题共享只匹配同一领域"口径一致）。
+        if not same_challenge and (not domain_text or row_domain != domain_text):
+            continue
+        score = 0.0
+        if same_challenge:
+            score += 10.0
+        else:
             score += 6.0
-        elif domain_text and domain_text in str(row["title"] or "").casefold():
-            score += 1.0
-        if not (challenge_id and row["challenge_id"] == challenge_id) and score <= 0:
-            continue  # 不同题且不同域：宁可空缺也不注入无关思路
         keywords = " ".join(_json_list(row["keywords"])).casefold()
         title = str(row["title"] or "").casefold()
         for term in terms:
