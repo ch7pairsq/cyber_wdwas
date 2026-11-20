@@ -9,7 +9,9 @@ from typing import Any, Dict, List, Optional
 
 STATUSES = ("completed", "partial", "blocked", "failed")
 OUTCOMES = ("success", "no_signal", "error", "timeout")
-STRATEGY_RE = re.compile(r"^[a-z0-9_]+(\.[a-z0-9_]+){2,}$")
+# 连字符合法：worker 产出的 strategy_key 可能含 hyphen（如
+# web.flaglang.signed-cookie-deny-bypass），旧正则误拒导致整轮 failed_contract。
+STRATEGY_RE = re.compile(r"^[a-z0-9_-]+(\.[a-z0-9_-]+){2,}$")
 MAX_SUMMARY_ITEMS = 5
 FLAG_RE = re.compile(r"flag\{[^}\s]{1,200}\}", re.IGNORECASE)
 

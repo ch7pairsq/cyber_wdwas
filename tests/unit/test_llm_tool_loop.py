@@ -4,7 +4,7 @@ import json
 
 from tests.framework_support import FLAG, fixture
 
-from ctf_ext.llm.provider import ProviderResponse
+from ctf_ext.llm.provider import ProviderError, ProviderResponse
 from ctf_ext.runtime.control import SessionControl
 from ctf_ext.runtime.llm_worker import LlmWorker
 from ctf_ext.store.blackboard import IntentDraft
@@ -91,6 +91,93 @@ def test_tool_output_is_logged_and_can_ground_flag():
         assert decision.status == "confirmed"
         assert decision.level == "L1"
         assert decision.command_id
+
+
+def test_tool_round_limit_forces_no_tool_conclusion():
+    # 工具轮次用尽不再弃赛（旧行为：整轮证据作废、同题重跑更费预算）：
+    # 追加收尾指令后做一轮无工具总结，走正常契约解析。
+    with fixture() as store:
+        store.board.add_intent(IntentDraft(challenge_id="c1", strategy_key="misc.triage.auto", params={}))
+        claim = store.board.claim_intent("w1", lease_seconds=60)
+        registry = _registry(store)
+        evidence_id = hashlib.sha256((FLAG + "\n").encode()).hexdigest()
+        tool_resp = ProviderResponse(text="", tool_calls=[{"id": "call-1", "name": "echo_flag", "input": {}}],
+                                     usage={"total_tokens": 5}, raw={})
+        provider = FakeProvider([
+            tool_resp, tool_resp,
+            ProviderResponse(text=json.dumps(_payload(evidence_id), ensure_ascii=False),
+                             usage={"total_tokens": 10}, raw={}),
+        ])
+        worker = LlmWorker(
+            provider, state_store=store,
+            control_factory=lambda cid: SessionControl(store, cid),
+            evidence_check=store.evidence.verify,
+            tool_registry=registry,
+            tool_cwd=str(store.workspace("c1")),
+            max_tool_rounds=1,
+        )
+        result = worker.work(claim, {"challenge_id": "c1"})
+
+        assert result.candidate_answer == FLAG
+        assert len(provider.calls) == 3
+        # 收尾轮请求不再携带工具定义，收尾指令已注入消息流。
+        assert "tools" not in provider.calls[2]["kwargs"]
+        assert "工具轮次已用尽" in provider.calls[2]["messages"][-1]["content"]
+        assert result.resource_usage["tool_calls"] == 1
+
+
+def test_hallucinated_tool_name_retries_once_and_recovers():
+    # "tool call is not permitted" 是契约层可修复问题：注入纠正提示在同一
+    # claim 内重写一轮；不再走 ProviderError 失败 → reclaim 全轮重跑的浪费路径。
+    with fixture() as store:
+        store.board.add_intent(IntentDraft(challenge_id="c1", strategy_key="misc.triage.auto", params={}))
+        claim = store.board.claim_intent("w1", lease_seconds=60)
+        evidence_id = hashlib.sha256((FLAG + "\n").encode()).hexdigest()
+
+        class HallucinatingProvider:
+            def __init__(self):
+                self.calls = []
+
+            def complete(self, messages, **kwargs):
+                self.calls.append({"last": messages[-1]})
+                if len(self.calls) == 1:
+                    raise ProviderError("tool call is not permitted (requested name='shell', id='x1')")
+                return ProviderResponse(text=json.dumps(_payload(evidence_id), ensure_ascii=False),
+                                        usage={"total_tokens": 10}, raw={})
+
+        provider = HallucinatingProvider()
+        worker = LlmWorker(provider, state_store=store,
+                           control_factory=lambda cid: SessionControl(store, cid))
+        result = worker.work(claim, {"challenge_id": "c1"})
+
+        assert result.candidate_answer == FLAG
+        assert len(provider.calls) == 2
+        assert "工具列表" in provider.calls[1]["last"]["content"]
+
+
+def test_hallucinated_tool_name_fails_after_one_retry():
+    # 重试后仍幻觉工具名 → 按原 ProviderError 失败路径收敛（in-claim 重试
+    # 不无限循环，也不绕过熔断计数）。
+    with fixture() as store:
+        store.board.add_intent(IntentDraft(challenge_id="c1", strategy_key="misc.triage.auto", params={}))
+        claim = store.board.claim_intent("w1", lease_seconds=60)
+
+        class AlwaysHallucinating:
+            def __init__(self):
+                self.calls = 0
+
+            def complete(self, messages, **kwargs):
+                self.calls += 1
+                raise ProviderError("tool call is not permitted (requested name='shell', id='x1')")
+
+        provider = AlwaysHallucinating()
+        worker = LlmWorker(provider, state_store=store,
+                           control_factory=lambda cid: SessionControl(store, cid))
+        result = worker.work(claim, {"challenge_id": "c1"})
+
+        assert provider.calls == 2
+        assert result.status == "failed" and result.outcome == "error"
+        assert result.failure_reason == "ProviderError"
 
 
 def test_tool_cannot_escape_work_root_or_change_command():

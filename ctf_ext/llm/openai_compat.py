@@ -116,18 +116,26 @@ def _to_openai_tool(tool):
 
 
 def _parse_response(data, declared):
-    """OpenAI 响应 → (text, tool_calls, usage, finish_reason)；字段不符一律失败。"""
+    """OpenAI 响应 → (text, tool_calls, usage, finish_reason)；字段不符一律失败。
+
+    所有 invalid official api response 均带简短结构上下文（类型/索引/长度），
+    不含响应正文——2026-11-21 正式赛 3 次同因失败（无上下文）无从定位的教训。
+    """
     if not isinstance(data, dict):
-        raise ProviderError("invalid official api response")
+        raise ProviderError("invalid official api response (body type={})".format(
+            type(data).__name__))
     if data.get("model") not in ALLOWED_MODELS:
-        raise ProviderError("unexpected model in official api response")
+        raise ProviderError("unexpected model in official api response ({!r})".format(
+            str(data.get("model"))[:80]))
     choices = data.get("choices")
     if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
-        raise ProviderError("invalid official api response")
+        raise ProviderError("invalid official api response (choices type={} len={})".format(
+            type(choices).__name__, len(choices) if isinstance(choices, list) else "-"))
     choice = choices[0]
     message = choice.get("message")
     if not isinstance(message, dict):
-        raise ProviderError("invalid official api response")
+        raise ProviderError("invalid official api response (choices[0].message type={})".format(
+            type(message).__name__))
     text = message.get("content")
     # reasoning_content 是推理字段（thinking 开启时可能出现），跳过，不参与文本拼接。
     if not isinstance(text, str):
@@ -135,23 +143,29 @@ def _parse_response(data, declared):
     tool_calls = []
     wire_calls = message.get("tool_calls") or []
     if not isinstance(wire_calls, list):
-        raise ProviderError("invalid official api response")
-    for call in wire_calls:
+        raise ProviderError("invalid official api response (tool_calls type={})".format(
+            type(wire_calls).__name__))
+    for idx, call in enumerate(wire_calls):
         if not isinstance(call, dict) or not isinstance(call.get("function"), dict):
-            raise ProviderError("invalid official api response")
+            raise ProviderError("invalid official api response (tool_call[{}] structure invalid)".format(idx))
         call_id = call.get("id")
         fn = call["function"]
         name, arguments = fn.get("name"), fn.get("arguments")
         if (not isinstance(call_id, str) or not call_id
                 or not isinstance(name, str) or name not in declared
                 or not isinstance(arguments, str)):
-            raise ProviderError("tool call is not permitted")
+            # 带上被拒的工具名/ID：区分“模型幻觉工具名”（可契约修复）与
+            # 结构性损坏，llm_worker 按 "tool call is not permitted" 前缀匹配。
+            raise ProviderError("tool call is not permitted (requested name={!r}, id={!r})".format(
+                name, call_id))
         try:
             args = json.loads(arguments)
-        except ValueError:
-            raise ProviderError("invalid official api response") from None
+        except ValueError as exc:
+            raise ProviderError("invalid official api response (tool_call[{}] arguments not valid JSON: {})".format(
+                idx, exc)) from None
         if not isinstance(args, dict):
-            raise ProviderError("invalid official api response")
+            raise ProviderError("invalid official api response (tool_call[{}] arguments must be an object, got {})".format(
+                idx, type(args).__name__))
         tool_calls.append({"id": call_id, "name": name, "input": args})
     if not text and not tool_calls:
         # 诊断信息（枚举/数字，不含内容）：区分截断（finish_reason=length 且
@@ -161,7 +175,8 @@ def _parse_response(data, declared):
             int((data.get("usage") or {}).get("completion_tokens") or 0)))
     usage = data.get("usage") or {}
     if not isinstance(usage, dict):
-        raise ProviderError("invalid official api response")
+        raise ProviderError("invalid official api response (usage type={})".format(
+            type(usage).__name__))
     prompt = int(usage.get("prompt_tokens", 0))
     completion = int(usage.get("completion_tokens", 0))
     if prompt < 0 or completion < 0:
@@ -322,7 +337,12 @@ class DeepSeekOfficialProvider(ModelProvider):
                 text, tool_calls, prompt, completion, finish_reason = _parse_response(
                     data, {tool["name"] for tool in safe_tools or ()})
             except (ValueError, TypeError, KeyError, AttributeError) as exc:
-                raise ProviderError("invalid official api response") from None
+                # 底层异常类型 + 2xx 响应体头部（≤160 字符，控制字符清洗）：
+                # JSONDecodeError/负 usage 等原先被吞成同一句，无从区分。
+                head = "".join(ch if ch.isprintable() else " "
+                               for ch in body[:160].decode("utf-8", "replace"))
+                raise ProviderError("invalid official api response ({}: {}; body head={!r})".format(
+                    type(exc).__name__, exc, head)) from None
             self._limiter.on_success()
             return ProviderResponse(text=text, usage={"prompt_tokens": prompt,
                                     "completion_tokens": completion,

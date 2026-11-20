@@ -72,3 +72,20 @@ def test_candidate_answer_must_match_platform_flag_format():
     except ContractViolation as exc:
         assert any("flag{" in e for e in exc.errors)
     validate_worker_output(_payload(candidate_answer="flag{ok_12345}"))
+
+
+def test_strategy_key_allows_hyphen():
+    # 连字符合法：worker 产出的 key 含 hyphen（如
+    # web.flaglang.signed-cookie-deny-bypass）曾被误拒为整轮 failed_contract。
+    validate_worker_output(_payload(attempt=dict(
+        _payload()["attempt"], strategy_key="web.flaglang.signed-cookie-deny-bypass")))
+    validate_worker_output(_payload(attempt=dict(
+        _payload()["attempt"], strategy_key="misc.waf-bypass.header-smuggling.pass2")))
+    # 大写/空段仍拒绝。
+    bad = _payload()
+    bad["attempt"] = dict(bad["attempt"], strategy_key="Misc.Triage.AUTO")
+    try:
+        validate_worker_output(bad)
+        raise AssertionError("expected ContractViolation")
+    except ContractViolation as exc:
+        assert any("strategy_key" in e for e in exc.errors)

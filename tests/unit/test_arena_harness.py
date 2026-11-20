@@ -200,6 +200,25 @@ def test_submit_success_and_idempotency(arena_url):
     assert len(_StubArena.submissions) == 1
 
 
+def test_submit_logs_flag_and_verdict(arena_url, capsys):
+    # 错题观测地基：[submit] 行必须包含 flag 原文与平台回执（2026-11-21 正式赛
+    # 3 道错题只留下传输日志、回执无处可查的教训）；幂等重放也带标记。
+    ad = _adapter(arena_url)
+    ad.startup()
+    ad.read_tasks()
+    sub = Submission(challenge_id="CH-1", answer="flag{arena_stub_1}",
+                     idempotency_key="k-log")
+    receipt = ad.submit_answer(sub)
+    assert receipt.status == "ACCEPTED"
+    captured = capsys.readouterr()
+    assert "[submit]" in captured.err
+    assert "ch=CH-1" in captured.err and "flag=flag{arena_stub_1}" in captured.err
+    assert "verdict=ACCEPTED" in captured.err
+    ad.submit_answer(sub)
+    captured = capsys.readouterr()
+    assert "(idempotent replay)" in captured.err
+
+
 def test_submit_not_started_retries_after_start(arena_url):
     ad = _adapter(arena_url, auto_start=False)
     ad.startup()

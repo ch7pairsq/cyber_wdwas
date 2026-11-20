@@ -203,7 +203,9 @@ def test_unpermitted_and_foreign_responses_are_rejected():
         "tool_calls": [{"id": "t9", "type": "function",
                         "function": {"name": "web_search", "arguments": "{}"}}]},
         "finish_reason": "tool_calls"}]})
-    expect(ProviderError, lambda: invoke(undeclared, tools=[definition]))
+    error = expect(ProviderError, lambda: invoke(undeclared, tools=[definition]))
+    # 诊断：被拒的工具名要可见（区分幻觉工具名与结构性损坏）。
+    assert "web_search" in str(error) and "not permitted" in str(error)
     foreign = FakeResponse(payload={"model": "gpt-4o",
                                     "choices": [{"message": {"role": "assistant", "content": "x"},
                                                  "finish_reason": "stop"}]})
@@ -224,6 +226,26 @@ def test_invalid_and_oversized_response_rejected():
     expect(ProviderError, lambda: invoke(FakeResponse(chunks=[b"not json"])))
     expect(ProviderError, lambda: invoke(FakeResponse(chunks=[b"x" * (2 * 1024 * 1024 + 1)])))
     expect(ProviderError, lambda: invoke(FakeResponse(payload={"model": DEFAULT_MODEL, "choices": []})))
+
+
+def test_invalid_response_errors_carry_context():
+    # invalid official api response 带结构上下文 + 2xx 响应体头部（2026-11-21
+    # 正式赛 3 次同因失败无从定位的教训）；非 2xx 仍不回显 body（见防泄密测试）。
+    error = expect(ProviderError, lambda: invoke(FakeResponse(chunks=[b"not json"])))
+    assert "JSONDecodeError" in str(error) and "not json" in str(error)
+    error = expect(ProviderError, lambda: invoke(
+        FakeResponse(payload={"model": DEFAULT_MODEL, "choices": []})))
+    assert "choices" in str(error)
+    # 工具调用参数非法 JSON：带索引与解析器原因。
+    definition = {"name": "file_info", "description": "identify file",
+                  "input_schema": {"type": "object"}}
+    bad_args = FakeResponse(payload={"model": DEFAULT_MODEL, "choices": [{"message": {
+        "role": "assistant", "content": None,
+        "tool_calls": [{"id": "t1", "type": "function",
+                        "function": {"name": "file_info", "arguments": "{oops"}}]},
+        "finish_reason": "tool_calls"}]})
+    error = expect(ProviderError, lambda: invoke(bad_args, tools=[definition]))
+    assert "tool_call[0]" in str(error)
 
 
 def test_repr_never_contains_key():

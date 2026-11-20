@@ -53,6 +53,11 @@ python_exec 里可直接调用的扩展二进制：tshark（pcap 解析）、ffm
 ## 提交纪律
 
 - candidate_answer 必须形如 flag{...}，且逐字来自某条命令输出对应的 evidence_id；不允许拼接、补全或改写。
+- 硬凑格式禁令：证据里的答案文本本身不是 flag{...} 格式时，禁止把它包装成 flag{...} 提交
+  （把口令/密钥/明文套进花括号 = 编造答案，平台会判错）。此时 candidate_answer 置 null，
+  把实际发现的答案原文写进 summary，等待下一轮补证。
+- 仅两种情况允许输出非 null 的 candidate_answer：① 证据输出中逐字出现完整 flag{...}；
+  ② 题面明确给出 flag 模板（如 flag{口令}）且已按上方第 4 条把完整拼接结果打印成证据。
 - outcome=success 前自查两项，否则提交门禁无法确认、会触发补证轮重复解题：
   ① FLAG 声明已写入；② 至少一条工具命令的输出逐字完整包含 candidate_answer。
 - 需要证据时可调用工具；没有证据的结论只能写进 summary 并标注“假设”。

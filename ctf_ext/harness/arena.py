@@ -872,12 +872,22 @@ class ArenaHarnessAdapter(HarnessAdapter):
 
     # ----------------------------------------------------------------- submit
     def submit_answer(self, submission: Submission) -> SubmitReceipt:
-        """幂等提交：同 key 返回首次回执；底层对 409 特殊状态做对账。"""
+        """幂等提交：同 key 返回首次回执；底层对 409 特殊状态做对账。
+
+        每次提交（含幂等重放）都打 [submit] 行：flag 原文 + 平台回执状态与
+        detail。flag 是题目答案而非凭据，可以落日志；2026-11-21 正式赛
+        3 道错题只留下 `submit -> 200 (145B)` 传输日志，回执无处可查——
+        本行是错题定位的唯一观测点。
+        """
         key = submission.idempotency_key
-        if key in self._receipts:  # 幂等：不重复判定（附录 E）
-            return self._receipts[key]
-        receipt = self._submit_once(submission)
-        self._receipts[key] = receipt
+        cached = key in self._receipts  # 幂等：不重复判定（附录 E）
+        receipt = self._receipts[key] if cached else self._submit_once(submission)
+        if not cached:
+            self._receipts[key] = receipt
+        print("[submit] ch={} flag={} verdict={} receipt_id={} detail={}{}".format(
+            submission.challenge_id, submission.answer.strip(), receipt.status,
+            receipt.receipt_id or "-", (receipt.detail or "")[:200],
+            " (idempotent replay)" if cached else ""), file=sys.stderr, flush=True)
         return receipt
 
     def _submit_once(self, submission: Submission) -> SubmitReceipt:

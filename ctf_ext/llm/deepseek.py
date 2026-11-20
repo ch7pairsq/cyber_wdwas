@@ -208,7 +208,10 @@ class DeepSeekProvider(ModelProvider):
                         if (not isinstance(call_id, str) or not call_id
                                 or not isinstance(name, str) or name not in declared
                                 or not isinstance(arguments, dict)):
-                            raise ProviderError("tool call is not permitted")
+                            # 带上被拒的工具名/ID：与 openai_compat 同口径，
+                            # llm_worker 按 "tool call is not permitted" 前缀匹配做契约重试。
+                            raise ProviderError("tool call is not permitted (requested name={!r}, id={!r})".format(
+                                name, call_id))
                         tool_calls.append({"id": call_id, "name": name, "input": arguments})
                     elif block.get("type") in ("thinking", "redacted_thinking"):
                         continue  # 网关可返回推理块；跳过，不参与文本拼接
@@ -226,7 +229,11 @@ class DeepSeekProvider(ModelProvider):
                 if prompt < 0 or completion < 0:
                     raise ValueError("negative usage")
             except (ValueError, TypeError, KeyError, AttributeError) as exc:
-                raise ProviderError("invalid company gateway response") from None
+                # 底层异常类型 + 响应体头部（≤160 字符，控制字符清洗），与 openai_compat 同口径。
+                head = "".join(ch if ch.isprintable() else " "
+                               for ch in body[:160].decode("utf-8", "replace"))
+                raise ProviderError("invalid company gateway response ({}: {}; body head={!r})".format(
+                    type(exc).__name__, exc, head)) from None
             self._limiter.on_success()
             return ProviderResponse(text=text, usage={"prompt_tokens": prompt,
                                     "completion_tokens": completion,

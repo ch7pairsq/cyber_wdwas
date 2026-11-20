@@ -30,6 +30,14 @@ DEFAULT_SYSTEM = (
     "没有证据的结论只能写进 summary 并标注假设；candidate_answer 必须带 evidence_ids。"
 )
 REPAIR_SUFFIX = "上一次输出不合格，原因如下：\n- {errors}\n只输出修正后的 JSON 对象，不要解释。"
+# 幻觉工具名的契约修复提示：in-claim 重写一轮用（限 1 次，见 work 主循环）。
+TOOL_NAME_CORRECTION = ("系统未提供该工具。只能调用系统提供的工具列表中的工具；"
+                        "不需要工具时直接输出附录 B.2 的最终 JSON 对象。")
+# 工具轮次用尽的收尾指令：不弃赛，改做一轮无工具总结（保留已收集的证据）。
+TOOL_ROUNDS_EXHAUSTED = ("工具轮次已用尽。忽略本次工具调用请求：基于以上全部证据立即"
+                         "输出附录 B.2 的最终 JSON 对象，不再调用任何工具；"
+                         "candidate_answer 仅在有 evidence_id 支撑且形如 flag{...} 时非空，"
+                         "否则置 null。")
 FENCE = chr(96) * 3
 
 
@@ -227,6 +235,7 @@ class LlmWorker:
         tool_rounds = 0
         contract_attempts = 0
         hint_sent = False
+        tool_name_retried = False  # 幻觉工具名的 in-claim 纠正重试，每 claim 限 1 次
         while True:
             provider = None  # 仅在本轮 complete 前赋值；异常时区分是否 Pro 回退
             thinking_used = 0  # 本轮思考预算；网关拒绝时粘滞关闭并重试
@@ -291,6 +300,16 @@ class LlmWorker:
                     # 空响应诊断：末条消息脱敏摘要，定位触发上游空回的内容。
                     print("[llm] empty-response context: {}".format(
                         _last_message_head(messages)), file=sys.stderr, flush=True)
+                if "tool call is not permitted" in str(exc) and not tool_name_retried:
+                    # 幻觉了未声明工具名的契约层可修复问题：注入纠正提示在同一
+                    # claim 内重写一轮（限 1 次，防 in-claim 循环绕过熔断计数）。
+                    # 二次出现仍走 ProviderError 失败路径。不追加 assistant 工具块：
+                    # OpenAI 兼容端点要求 tool_calls 后必须跟 tool 消息，悬空会 400。
+                    tool_name_retried = True
+                    print("[llm] hallucinated tool name; retrying with correction",
+                          file=sys.stderr, flush=True)
+                    messages.append({"role": "user", "content": TOOL_NAME_CORRECTION})
+                    continue
                 if thinking_used > 0 and not self._thinking_down:
                     self._thinking_down = True
                     continue
@@ -322,6 +341,18 @@ class LlmWorker:
                 if self._tools is None:
                     return self._failure(claim, "failed", OUTCOME_ERROR, "tool_unavailable", started, tokens, skills_loaded, tool_calls, skills_indexed)
                 if tool_rounds >= self._max_tool_rounds:
+                    if tools:
+                        # 工具轮次用尽：不再直接弃赛（此前整轮证据作废、同题重跑更费
+                        # 预算），改为追加收尾指令做最后一轮无工具总结，走正常契约
+                        # 解析。tools 置 None 后不会再进本分支；若收尾轮模型仍返回
+                        # 工具调用，走下方兜底。
+                        print("[llm] tool_round_limit reached ({}); forcing no-tool final summary".format(
+                            tool_rounds), file=sys.stderr, flush=True)
+                        messages.append({"role": "user", "content": TOOL_ROUNDS_EXHAUSTED})
+                        tools = None
+                        continue
+                    # 收尾轮仍坚持工具调用（请求已无工具定义，官方通道不该发生）：
+                    # 放弃，保留原失败码。
                     return self._failure(claim, "failed", OUTCOME_ERROR, "tool_round_limit", started, tokens, skills_loaded, tool_calls, skills_indexed)
                 messages.append({"role": "assistant", "content": self._assistant_content(response)})
                 print("[llm] tools round={} names={}".format(
