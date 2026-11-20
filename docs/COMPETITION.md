@@ -192,6 +192,41 @@ docker run --rm --network none --read-only --cap-drop ALL \
   `portus.in.chaitin.net/yuqiao.zhang/cyber-wdwas:competition-20261120`（重跑尝试
   需平台重新拉取/发起）。
 
+### 2026-11-20 平台重跑 SSLError 烧光窗口：平台 CA 合并信任 + 传输层退避重试（v6）
+
+- **现象**：v5 推送后平台重跑，startup 成功但解题循环中模型调用全部
+  `SSLError`（direct/proxy 双路由都挂）：每个 intent round 0 即死 →
+  重新 claim → 死循环烧光 13800s。日志归档还显示更早的 previous 实例
+  503 一次即烧光（3 秒重启间隔证明跑的是**不含 v5 重试的旧镜像**，
+  平台拉取时机早于 v5 推送）。
+- **根因（实锤）**：`openai_compat.py`/`deepseek.py` 均 `trust_env=False +
+  verify=True`，requests 只认 certifi，平台注入的
+  `SSL_CERT_FILE/REQUESTS_CA_BUNDLE/CURL_CA_BUNDLE/NODE_EXTRA_CA_CERTS`
+  全部失效；平台出口为 TLS-MITM 型（direct 路由也被透明拦截），拦截链
+  不被信任 → SSLError。旧日志只打异常类 docstring，看不到底层真实原因。
+- **修复**（经确认三方案）：
+  1. `provider.platform_ca_bundle()`：certifi 公共 CA + 平台注入 PEM 合并为
+     一次性 bundle（0600）交给 `verify=<路径>`；证书链校验完整保留（非禁用
+     验证），无注入时返回 True 行为不变；按环境快照缓存。
+  2. 连接类快速失败（SSL/连接拒绝）退避重试 3 次（5/15/30s）；黑洞路由类
+     超时保持快速判死不重试；HTTP 状态错误不重试；startup 断网快速失败语义不变。
+  3. 底层异常消息（`exc`）替代 `type(exc).__doc__` 打印，可直接看到
+     CERTIFICATE_VERIFY_FAILED 等真实原因（key 在 header，无凭据泄漏风险）。
+- **验证**：新增 `test_llm_transport_tls.py` 13 个测试（CA 合并/OpenSSL 加载/
+  verify 联动/重试成功/耗尽报错/超时不重试，两通道覆盖）；全量
+  `run_checks.py` 363 passed / 1 skipped。
+- **构建教训**：旧 `overlay.Dockerfile`（`FROM ebffa5e49fe4`，v1/33 工具）构建出的
+  叠加镜像会回退 v4 的 Java/Go 工具链（37→33）；作废，改用
+  `overlay-v6.Dockerfile`（`FROM 050b1a84ff8e` + 3 个 llm 文件 COPY）重建。
+- v6 镜像 ID `sha256:d194b5e5eae5`（基于 v5，37 工具）：断网 check_competition
+  通过（offline_check=passed、37 工具、无安装器）、容器内确认
+  `platform_ca_bundle/_send_with_retry/TRANSPORT_RETRY_DELAYS` 在镜像且无注入时
+  verify=True、无凭据冒烟 gate 报错 → 重启 3/3 → 退出 1（与 v4/v5 一致）。构建日志
+  `logs/build-competition-arena-20261120-v6-sslretry.log`，已覆盖推送
+  `portus.in.chaitin.net/yuqiao.zhang/cyber-wdwas:competition-20261120`
+  digest `sha256:d194b5e5eae5892acf5c584c8f9f18e3b076af474fe3a6c137d6e1ff52c57522`
+  （重跑需平台重新拉取新 digest，避免再调度到旧镜像实例）。
+
 ### 仍未验收
 
 - 真实凭据与平台的端到端联调（BAIZHI_API_KEY 真实调用、Arena 任务/附件/提交回执）未执行，需要明确授权后在正式平台进行。
