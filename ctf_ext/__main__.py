@@ -154,6 +154,11 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
                         ("help_path", "list_path", "start_path", "files_path",
                          "submit_path", "finish_path", "download_template")
                         if arena_cfg.get(k)}
+        # startup 阶段对平台 5xx 的退避重试：默认 20 次 × 30s，可在配置覆盖。
+        arena_kwargs["startup_retry_attempts"] = int(
+            arena_cfg.get("startup_retry_attempts") or 20)
+        arena_kwargs["startup_retry_seconds"] = float(
+            arena_cfg.get("startup_retry_seconds") or 30)
         proxy = os.environ.get("ARENA_PROXY") or arena_cfg.get("proxy") or ""
         try:
             harness = ArenaHarnessAdapter(base_url, token, proxy=proxy,

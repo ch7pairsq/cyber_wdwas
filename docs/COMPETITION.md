@@ -172,6 +172,26 @@ docker run --rm --network none --read-only --cap-drop ALL \
   18023→proxy.in.chaitin.net:8123 兜底完成；daemon.json 已把 portus 加入 no-proxy，
   备份 `.bak-20261120`，下次 daemon 重启后可直连）。
 
+### 2026-11-20 平台首跑 503 与 startup 重试修复（v5）
+
+- **现象**：平台托管首跑，镜像启动/配置/凭据解析全部正常（base 取自
+  `BENCHMARK_BASE_URL` k8s service、token 取自 env、direct 路由可达），但平台后端
+  `GET /openapi/v1/challenges/help -> 503 {"code":"resource_unavailable",
+  "message":"platform is unavailable"}`（0.01s 即返回，属平台侧不可用）。
+- **我方缺口**：startup 对平台 5xx 无重试，supervisor 3 次重启在数秒内烧光退出，
+  剩余 ~3h50m 尝试窗口全部浪费。
+- **修复**：`ArenaProtocolError` 携带 HTTP status；startup 对 5xx（未就绪/过载）
+  退避重试（默认 20 次 × 30s ≈ 10 分钟，配置键 `harness.arena.startup_retry_attempts`
+  / `startup_retry_seconds`，official-arena.yaml 已固化），supervisor 3 次重启合计
+  ~30 分钟容错；连接层失败与 4xx（凭据/协议错误）仍立即失败，断网冒烟语义不变。
+- **验证**：stub 服务 3 个新测试（503 重试后成功 / 预算耗尽报错 / 401 不重试立即失败）；
+  全量 `run_checks.py` 350 passed / 1 skipped。
+- v5 镜像 ID `sha256:050b1a84ff8e`（2.52GB）：断网 check_competition 通过、无凭据冒烟
+  快速失败行为与 v4 一致、startup 重试代码确认在镜像内。构建日志：
+  `logs/build-competition-arena-20261120-v5-startupretry.log`。已覆盖推送
+  `portus.in.chaitin.net/yuqiao.zhang/cyber-wdwas:competition-20261120`（重跑尝试
+  需平台重新拉取/发起）。
+
 ### 仍未验收
 
 - 真实凭据与平台的端到端联调（BAIZHI_API_KEY 真实调用、Arena 任务/附件/提交回执）未执行，需要明确授权后在正式平台进行。

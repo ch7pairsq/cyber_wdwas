@@ -24,6 +24,8 @@ class _StubArena(BaseHTTPRequestHandler):
     invalid_state: set = {"CH-DONE", "CH-CLOSED"}
     # True = 题目列表携带完成态字段（供 invalid_state 对账探测）。
     extra_challenges: bool = False
+    # startup 重试模拟：前 N 次 help 返回 503 resource_unavailable。
+    help_failures_remaining: int = 0
 
     def log_message(self, *args):  # 静默
         pass
@@ -43,6 +45,10 @@ class _StubArena(BaseHTTPRequestHandler):
         if not self._auth_ok():
             return self._json({"error": "unauthorized"}, 401)
         if self.path.startswith("/openapi/v1/challenges/help"):
+            if _StubArena.help_failures_remaining > 0:
+                _StubArena.help_failures_remaining -= 1
+                return self._json({"code": "resource_unavailable",
+                                   "message": "platform is unavailable", "detail": {}}, 503)
             return self._json({"workflow": "1. start 2. solve 3. submit"})
         if self.path.startswith("/openapi/v1/challenges/files"):
             if "path=" in self.path:
@@ -101,6 +107,7 @@ def arena_url():
     _StubArena.submissions = []
     _StubArena.finished = []
     _StubArena.extra_challenges = False
+    _StubArena.help_failures_remaining = 0
     server = HTTPServer(("127.0.0.1", 0), _StubArena)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -117,6 +124,32 @@ def test_startup_reads_help_and_context(arena_url):
     ctx = ad.startup()
     assert ctx.protocol == "v1-arena"
     assert ad.help_text["workflow"].startswith("1. start")
+
+
+def test_startup_retries_5xx_then_succeeds(arena_url):
+    """平台 503 resource_unavailable：startup 退避重试后成功（默认烧光重启的教训）。"""
+    _StubArena.help_failures_remaining = 2
+    ad = _adapter(arena_url, startup_retry_attempts=5, startup_retry_seconds=0.0)
+    ad.startup()
+    assert ad.help_text["workflow"].startswith("1. start")
+
+
+def test_startup_persistent_5xx_raises_after_budget(arena_url):
+    _StubArena.help_failures_remaining = 99
+    ad = _adapter(arena_url, startup_retry_attempts=3, startup_retry_seconds=0.0)
+    with pytest.raises(ArenaProtocolError) as ei:
+        ad.startup()
+    assert ei.value.status == 503 and "503" in str(ei.value)
+
+
+def test_startup_4xx_fails_immediately_without_retry(arena_url):
+    """凭据被拒（401）：立即失败，不消耗重试预算（保持 fail-closed 语义）。"""
+    ad = ArenaHarnessAdapter(arena_url, token="st_wrong_token_value",
+                             client_timeout=5.0,
+                             startup_retry_attempts=5, startup_retry_seconds=0.0)
+    with pytest.raises(ArenaProtocolError) as ei:
+        ad.startup()
+    assert ei.value.status == 401
 
 
 def test_read_tasks_maps_arena_fields_and_auto_starts(arena_url):

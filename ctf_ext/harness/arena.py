@@ -43,7 +43,15 @@ ARENA_REF_SCHEME = "arena://"
 
 
 class ArenaProtocolError(RuntimeError):
-    """Arena 接口失败：属于协议错误，向上抛，不降级。"""
+    """Arena 接口失败：属于协议错误，向上抛，不降级。
+
+    status 为 HTTP 状态码（传输层失败时为 None）；startup 阶段据此区分
+    "平台未就绪"（5xx，可重试）与凭据/协议错误（4xx，立即失败）。
+    """
+
+    def __init__(self, message: str, status: Optional[int] = None):
+        super().__init__(message)
+        self.status = status
 
 
 def _redact(text: str) -> str:
@@ -471,7 +479,8 @@ class ArenaClient:
         """GET 原始字节（附件下载用），不做 JSON/文本解码。"""
         code, body = self._send(method, path, query, None, {})
         if code >= 400:
-            raise ArenaProtocolError("arena {} {} -> HTTP {}".format(method, path, code))
+            raise ArenaProtocolError("arena {} {} -> HTTP {}".format(method, path, code),
+                                     status=code)
         return body
 
     def request(self, method: str, path: str, query: Dict[str, str] = None,
@@ -486,7 +495,8 @@ class ArenaClient:
         if code >= 400:
             detail = _redact(body.decode("utf-8", "replace")[:500])
             raise ArenaProtocolError(
-                "arena {} {} -> HTTP {}: {}".format(method, path, code, detail))
+                "arena {} {} -> HTTP {}: {}".format(method, path, code, detail),
+                status=code)
         return _decode_body(method, path, body)
 
 
@@ -549,10 +559,19 @@ class ArenaHarnessAdapter(HarnessAdapter):
                  auto_finish: bool = False,
                  max_envs: int = 3,
                  client_timeout: float = 30.0,
-                 env_policy: str = "prewarm"):
-        """端点路径均可覆盖；env_policy 决定 prewarm / on_demand 两种环境策略。"""
+                 env_policy: str = "prewarm",
+                 startup_retry_attempts: int = 20,
+                 startup_retry_seconds: float = 30.0):
+        """端点路径均可覆盖；env_policy 决定 prewarm / on_demand 两种环境策略。
+
+        startup_retry_*：startup 阶段对平台 5xx（未就绪/过载）的退避重试；
+        默认 20 次 × 30s ≈ 10 分钟，supervisor 3 次重启合计约 30 分钟容错，
+        避免平台短暂不可用就烧光尝试窗口。
+        """
         self._client = ArenaClient(base_url, token, timeout=client_timeout,
                                    proxy=proxy, token_source=token_source)
+        self._startup_retry_attempts = max(1, int(startup_retry_attempts))
+        self._startup_retry_seconds = max(0.0, float(startup_retry_seconds))
         self._base_source = base_source
         self._paths = {"help": help_path, "list": list_path, "start": start_path,
                        "files": files_path, "submit": submit_path, "finish": finish_path}
@@ -592,7 +611,23 @@ class ArenaHarnessAdapter(HarnessAdapter):
                   self._max_envs, self._timeout, bool(self._client._proxy)),
               file=sys.stderr, flush=True)
         # help 是权威工作流与规则来源；内容只入 metadata，不做协议推断。
-        self.help_text = self._client.request("GET", self._paths["help"])
+        # 平台后端可能短暂未就绪（HTTP 5xx，如 resource_unavailable）：
+        # 启动阶段对 5xx 退避重试，避免 3 秒烧光 supervisor 重启次数浪费
+        # 整个尝试窗口；连接层失败与 4xx（凭据/协议错误）仍立即失败，
+        # 保持 fail-closed 与断网冒烟的快速退出语义。
+        for attempt in range(1, self._startup_retry_attempts + 1):
+            try:
+                self.help_text = self._client.request("GET", self._paths["help"])
+                break
+            except ArenaProtocolError as exc:
+                if not (exc.status is not None and 500 <= exc.status < 600):
+                    raise  # 传输层失败或 4xx：立即向上抛
+                if attempt >= self._startup_retry_attempts:
+                    raise  # 重试预算耗尽：保持原语义由 supervisor 接管
+                print("[arena] platform not ready (HTTP {}), retry {}/{} after {}s".format(
+                    exc.status, attempt, self._startup_retry_attempts,
+                    self._startup_retry_seconds), file=sys.stderr, flush=True)
+                time.sleep(self._startup_retry_seconds)
         try:
             help_dump = json.dumps(self.help_text, ensure_ascii=False)
         except (TypeError, ValueError):

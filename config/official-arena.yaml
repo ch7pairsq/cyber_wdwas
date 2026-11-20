@@ -147,3 +147,7 @@ harness:
     env_policy: on_demand
     max_envs: 3
     client_timeout_seconds: 40
+    # startup 阶段平台 5xx（resource_unavailable 等未就绪状态）的退避重试；
+    # 每次启动最多 20 次 × 30s ≈ 10 分钟，supervisor 3 次重启合计约 30 分钟。
+    startup_retry_attempts: 20
+    startup_retry_seconds: 30
