@@ -128,7 +128,8 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
                          "use harness.protocol=mock until the official adapter is provided")
     if protocol == "arena":
         from .harness.arena import (ArenaHarnessAdapter, ArenaProtocolError,
-                                    resolve_arena_base_url, resolve_arena_token)
+                                    resolve_arena_base_url, resolve_arena_token,
+                                    setup_platform_network_env)
         arena_cfg = (cfg.get("harness") or {}).get("arena") or {}
         base_url, base_source = resolve_arena_base_url(arena_cfg.get("base_url") or "")
         token, token_source = resolve_arena_token()
@@ -154,6 +155,12 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
                                           **arena_kwargs)
         except ArenaProtocolError as exc:
             raise SystemExit("arena harness init failed: {}".format(exc))
+        # 适配器构造后再导出隧道变量：客户端保持"直连优先+回退"阶梯，
+        # 网关工具与模型调用（urllib 读环境）则拿到平台隧道。
+        tunnel_actions = setup_platform_network_env()
+        if tunnel_actions:
+            print("[arena] platform tunnel env exported: {}".format(
+                "; ".join(tunnel_actions)), file=sys.stderr, flush=True)
     else:
         harness = MockHarnessAdapter(default_practice_challenges())
     state = StateStore(board, evidence, os.path.join(os.path.dirname(db_path), "workspaces"))

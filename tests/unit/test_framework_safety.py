@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tests.framework_support import Adapter, FLAG, enqueue, expect, fixture, proof
+from ctf_ext.gateway.execution import tool_environment
 from ctf_ext.gateway.sandbox import run_command
 from ctf_ext.gateway.execution import capture
 from ctf_ext.gateway.policy import PolicyConfig, PolicyDenied, PolicyEngine
@@ -132,3 +133,18 @@ def test_D03_legacy_unknown_record_is_query_only():
             assert adapter.queries == ['old'] and not adapter.calls
         finally:
             gateway.close()
+
+
+def test_H_tool_env_passes_tunnel_proxy_without_credentials():
+    env = {'HTTP_PROXY': 'http://user:pw@10.55.0.9:18082',
+           'HTTPS_PROXY': 'http://10.55.0.9:18082',
+           'NO_PROXY': 'localhost,model-proxy-x',
+           'ARENA_PROXY': 'socks5://u:p@10.55.0.9:18081',
+           'BAIZHI_API_KEY': 'sk-secret', 'ARENA_SOLVER_TOKEN': 'solver-secret'}
+    with patch.dict(os.environ, env):
+        tool_env = tool_environment()
+    assert tool_env['HTTP_PROXY'] == 'http://10.55.0.9:18082'  # 代理口令被剥离
+    assert tool_env['ARENA_PROXY'] == 'socks5://10.55.0.9:18081'
+    assert tool_env['HTTPS_PROXY'] == 'http://10.55.0.9:18082'
+    assert tool_env['NO_PROXY'] == 'localhost,model-proxy-x'
+    assert 'BAIZHI_API_KEY' not in tool_env and 'ARENA_SOLVER_TOKEN' not in tool_env

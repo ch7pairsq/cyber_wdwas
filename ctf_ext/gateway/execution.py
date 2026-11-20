@@ -12,6 +12,31 @@ import uuid
 from dataclasses import dataclass
 
 
+_TOOL_ENV_KEYS = ('ARENA_PROXY', 'ARENA_NETWORK_CIDR', 'ARENA_BASE_URL',
+                  'HTTP_PROXY', 'http_proxy', 'HTTPS_PROXY', 'https_proxy',
+                  'ALL_PROXY', 'all_proxy', 'NO_PROXY', 'no_proxy')
+
+
+def tool_environment():
+    """工具子进程环境：白名单精确到变量；代理值剥离 user:pass@。
+
+    平台隧道（2026-11-20 官方提示词）：赛题靶机只经 SOCKS5/WireGuard
+    可达，代理地址是路由配置而非凭据，放行给子进程；但代理自身的
+    认证信息（若有）不进子进程。模型凭据（BAIZHI_API_KEY 等）仍绝不放行。
+    """
+    env = {'PATH': os.environ.get('PATH', os.defpath), 'LC_ALL': 'C.UTF-8'}
+    for key in _TOOL_ENV_KEYS:
+        value = os.environ.get(key)
+        if value is None:
+            continue
+        if 'PROXY' in key.upper() and '@' in value:
+            scheme, sep, rest = value.partition('://')
+            if sep:
+                value = scheme + '://' + rest.rpartition('@')[-1]
+        env[key] = value
+    return env
+
+
 def capture(argv, *, cwd, timeout, limit=200_000, input_data=b'', discard_stderr=False):
     """有界采集并在截止时杀进程组；stdin 是已限额的本地附件。"""
     import tempfile
@@ -26,13 +51,11 @@ def capture(argv, *, cwd, timeout, limit=200_000, input_data=b'', discard_stderr
                                 # 合并后会被当作命令输出污染证据。
                                 stderr=subprocess.DEVNULL if discard_stderr else subprocess.STDOUT,
                                 start_new_session=True,
-                                # 环境白名单精确到工具所需变量：arena_http 需要
-                                # 代理/授权网段/平台地址；绝不放行 ARENA_SOLVER_TOKEN
-                                # 等凭据（模型代码可读环境，凭据泄露面必须为零）。
-                                env={'PATH': os.environ.get('PATH', os.defpath), 'LC_ALL': 'C.UTF-8',
-                                     **{k: os.environ[k] for k in
-                                        ('ARENA_PROXY', 'ARENA_NETWORK_CIDR', 'ARENA_BASE_URL')
-                                        if k in os.environ}})
+                                # 环境白名单精确到工具所需变量：arena_http 需要代理/
+                                # 授权网段/平台地址；平台隧道代理（HTTP(S)_PROXY/
+                                # NO_PROXY）供子进程访问赛题靶机；绝不放行
+                                # ARENA_SOLVER_TOKEN 等凭据（凭据泄露面必须为零）。
+                                env=tool_environment())
         output, total, timed_out, truncated = bytearray(), 0, False, False
         selector = selectors.DefaultSelector()
         selector.register(proc.stdout, selectors.EVENT_READ)

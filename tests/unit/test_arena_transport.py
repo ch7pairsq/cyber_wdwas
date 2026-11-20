@@ -8,7 +8,8 @@ import pytest
 
 from ctf_ext.harness.arena import (ArenaClient, ArenaProtocolError,
                                    _env_safe_value, describe_transport,
-                                   resolve_arena_base_url, resolve_arena_token)
+                                   resolve_arena_base_url, resolve_arena_token,
+                                   setup_platform_network_env)
 
 
 def test_env_safe_value_masks_credentials_but_keeps_host():
@@ -109,3 +110,30 @@ def test_client_token_candidates_from_files(tmp_path):
         client = ArenaClient("http://a:1", "env-token-123456789", timeout=0.2)
     assert [v for _, v in client._tokens] == ["env-token-123456789", "file-token-value"]
     assert client.token_source() == "env ARENA_SOLVER_TOKEN"
+
+
+def test_resolve_base_url_accepts_official_benchmark_env():
+    # 官方注入契约（2026-11-20）：API 根 = BENCHMARK_BASE_URL
+    with patch.dict(os.environ, {"BENCHMARK_BASE_URL": "http://10.201.0.9:8090/"},
+                    clear=True):
+        assert resolve_arena_base_url("") == ("http://10.201.0.9:8090",
+                                              "BENCHMARK_BASE_URL")
+
+
+def test_setup_platform_network_env_exports_tunnel_idempotently():
+    k8s = {"MODEL_PROXY_X_SERVICE_HOST": "10.55.0.9",
+           "MODEL_PROXY_X_SERVICE_PORT_CHALLENGES": "8090",
+           "MODEL_PROXY_X_SERVICE_PORT_SOCKS": "18081",
+           "MODEL_PROXY_X_SERVICE_PORT_HTTP_PROXY": "18082",
+           "NO_PROXY": "localhost,model-proxy-x"}
+    with patch.dict(os.environ, k8s, clear=True):
+        actions = setup_platform_network_env()
+        assert os.environ["ARENA_PROXY"] == "socks5://10.55.0.9:18081"
+        assert os.environ["HTTPS_PROXY"] == "http://10.55.0.9:18082"
+        assert os.environ["HTTP_PROXY"] == "http://10.55.0.9:18082"
+        assert os.environ["https_proxy"] == "http://10.55.0.9:18082"
+        assert any("ARENA_PROXY" in a for a in actions)
+        # 幂等：已有值不覆盖
+        os.environ["ARENA_PROXY"] = "socks5://custom:1"
+        assert setup_platform_network_env() == []
+        assert os.environ["ARENA_PROXY"] == "socks5://custom:1"

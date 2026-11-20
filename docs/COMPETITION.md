@@ -54,7 +54,17 @@ competition 目标的默认入口已从旧的退出 78 占位改为 `scripts/run
 ## 等待用户／官方提供
 
 1. 交付入口二选一（双轨均已支持，用户比对便利性后定）：仓库方案需平台可访问的镜像仓库／命名空间、推送／拉取凭据；文件方案需上传通道、接受格式（docker load）、大小限制、上传截止与重传规则。目前不推送镜像、不上传文件。
-2. 平台 Harness 托管细节确认：~~注入环境变量名~~ **已实测确认（2026-11-20 harness 日志）**：平台不注入 `ARENA_BASE_URL`；改用 `ARENA_GATEWAY_URL` + `ARENA_GATEWAY_TOKEN_FILE`（token 文件）+ k8s service 变量（`MODEL_PROXY_*_SERVICE_HOST` / 命名端口 `CHALLENGES`），并预注入 `CYBER_ARENA_HELP_MARKDOWN`、`BAIZHI_API_KEY`、`NO_PROXY`。适配器已按 `resolve_arena_base_url/resolve_arena_token` 自动探测（env -> gateway -> k8s service -> config），token 支持 env 与文件双来源、401 自动换源。启动命令可覆盖、模型走 model-proxy 侧车（端口 18081/18082 用途待确认）。
+2. 平台 Harness 托管细节确认：**官方契约已确认（2026-11-20 官方注入说明）**：
+   API 根 = `BENCHMARK_BASE_URL`（`http://10.201.0.9:8090`，追加 `/openapi/v1/...`）；
+   token = `ARENA_SOLVER_TOKEN`；赛题靶机只经隧道可达（WireGuard 或 SOCKS5，
+   "Challenge targets are reachable only through the same access method"），
+   model-proxy 服务的 `SOCKS`/`HTTP_PROXY` 命名端口即隧道入口；
+   409 duplicate=已计数、409 challenge_not_started=先 start；finish 在全部题
+   有结论后才调；凭据绝不打印/发给靶机。适配器解析顺序
+   `ARENA_BASE_URL -> BENCHMARK_BASE_URL -> ARENA_GATEWAY_URL -> k8s service -> config`，
+   `setup_platform_network_env()` 导出 `ARENA_PROXY`/`HTTP(S)_PROXY`（幂等），
+   工具子进程白名单放行代理地址（剥离 user:pass@）。历史实测：
+   **已实测确认（2026-11-20 harness 日志）**：平台不注入 `ARENA_BASE_URL`；改用 `ARENA_GATEWAY_URL` + `ARENA_GATEWAY_TOKEN_FILE`（token 文件）+ k8s service 变量（`MODEL_PROXY_*_SERVICE_HOST` / 命名端口 `CHALLENGES`），并预注入 `CYBER_ARENA_HELP_MARKDOWN`、`BAIZHI_API_KEY`、`NO_PROXY`。适配器已按 `resolve_arena_base_url/resolve_arena_token` 自动探测（env -> gateway -> k8s service -> config），token 支持 env 与文件双来源、401 自动换源。启动命令可覆盖、模型走 model-proxy 侧车（端口 18081/18082 用途待确认）。
 3. DeepSeek 官方通道（现主通道）的平台出口白名单覆盖 api.deepseek.com 与使用额度确认；如回切百智网关，其 Messages 路径、鉴权头和使用额度另行与公司侧确认。
 4. 平台 CPU 架构、资源／镜像大小限制、网络出口规则，以及最终必须预装的工具集合。
 

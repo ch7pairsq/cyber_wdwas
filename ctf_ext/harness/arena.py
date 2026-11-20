@@ -63,7 +63,7 @@ TRANSPORT_ENV_NAMES = ("ARENA_BASE_URL", "ARENA_SOLVER_TOKEN", "ARENA_PROXY",
                        "ARENA_RUNTIME_API_URL", "ARENA_RUNTIME_TOKEN_FILE",
                        "ARENA_ATTEMPT_ID", "ARENA_PREWARM_RUNTIME",
                        "ARENA_PROVIDER_COUNT", "BENCHMARK_BASE_URL",
-                       "CYBER_ARENA_HELP_MARKDOWN")
+                       "BENCHMARK_TOKEN", "CYBER_ARENA_HELP_MARKDOWN")
 MODEL_ENV_NAMES = ("OPENAI_BASE_URL", "OPENAI_API_BASE", "MODEL_BASE_URL",
                    "MODEL_PROXY_URL", "BAIZHI_BASE_URL", "BAIZHI_API_KEY")
 
@@ -143,7 +143,7 @@ def resolve_arena_base_url(config_url: str = ""):
     （model-proxy 服务的 challenges 端口）-> 配置值。平台实测（2026-11-20
     harness）不注入 ARENA_BASE_URL；service 命名端口 CHALLENGES 对应题目 API。
     """
-    for name in ("ARENA_BASE_URL", "ARENA_GATEWAY_URL"):
+    for name in ("ARENA_BASE_URL", "BENCHMARK_BASE_URL", "ARENA_GATEWAY_URL"):
         value = (os.environ.get(name) or "").strip()
         if value:
             return value.rstrip("/"), name
@@ -170,6 +170,35 @@ def resolve_arena_token():
             if value:
                 return value, name
     return "", "none"
+
+
+def setup_platform_network_env():
+    """把平台隧道导出为本进程与工具子进程的环境变量（幂等，不覆盖已有值）。
+
+    平台契约（2026-11-20 harness 实测 + 官方提示词）：赛题靶机只经隧道
+    可达（WireGuard 或 SOCKS5），model-proxy 服务的 SOCKS / HTTP_PROXY
+    命名端口即隧道入口，k8s 已注入 *_SERVICE_HOST 与端口变量。
+    设置 ARENA_PROXY（arena_http 网关工具与子进程用）与
+    HTTP(S)_PROXY（模型 urllib 与子进程用；NO_PROXY 由平台预置）。
+    返回动作清单；调用方打印。Arena 客户端自身不受影响（直连优先，
+    回退链读取这些变量）。
+    """
+    actions = []
+    for _prefix, info in sorted(_k8s_service_endpoints().items()):
+        socks_port, http_port = info.get("socks"), info.get("http-proxy")
+        if socks_port and not os.environ.get("ARENA_PROXY"):
+            value = "socks5://{}:{}".format(info["host"], socks_port)
+            os.environ["ARENA_PROXY"] = value
+            actions.append("ARENA_PROXY=" + value)
+        if http_port and not os.environ.get("HTTPS_PROXY"):
+            value = "http://{}:{}".format(info["host"], http_port)
+            os.environ["HTTPS_PROXY"] = value
+            os.environ.setdefault("https_proxy", value)
+            if not os.environ.get("HTTP_PROXY"):
+                os.environ["HTTP_PROXY"] = value
+                os.environ.setdefault("http_proxy", value)
+            actions.append("HTTP(S)_PROXY=" + value)
+    return actions
 
 class ArenaClient:
     """只做 HTTP 收发与错误归一化；持有 token，不打印它。"""
