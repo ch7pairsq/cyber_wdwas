@@ -785,6 +785,19 @@ class ArenaHarnessAdapter(HarnessAdapter):
         cidr = os.environ.get("ARENA_NETWORK_CIDR", "")
         if cidr:
             parts.append("允许访问的目标网段: " + cidr + "（网段之外一律拒绝）")
+        # 2026-11-21 第三场实测：start 响应返回 ≠ 容器就绪（weak-password
+        # status='available' 有租期；static_file_server status='pending'
+        # 且 expires_at=None）。把状态/租期写进模型可见面，防"开局请求
+        # 撞上未就绪 → 探测失败 → 误判靶机未启动"重演。
+        status = str(info.get("container_status") or "").strip()
+        if status and status not in ("available", "running"):
+            parts.append("容器状态: " + status + "（平台拉起中，尚未就绪）——"
+                         "立即请求可能失败：若连接失败/拒绝，等待 30-60s 后"
+                         "重试同一地址，不要判定靶机未启动")
+        expires = str(info.get("expires_at") or "").strip()
+        if expires:
+            parts.append("容器租期至 " + expires
+                         + "（到期平台可能回收容器；长任务请尽早取得所需数据）")
         if has_files:
             parts.append("题目附件已物化到工作区 handouts/ 目录，可直接用 file_info/strings/archive_extract 处理")
         return "[Arena 运行环境] " + "；".join(parts)

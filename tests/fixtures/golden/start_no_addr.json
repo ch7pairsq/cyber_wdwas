@@ -1,9 +1,9 @@
 {
-  "source": "2026-11-21/22 两场正式赛实测：start 响应 keys 含 container_addr/container_status/description/unique_code(/expires_at)，container_addr 为空数组 []——平台未返回靶机地址，模型靠 arena_help + 题面占位符推导。",
+  "source": "2026-11-21/22 两场正式赛实测：start 响应 keys 含 container_addr/container_status/description/unique_code(/expires_at)。container_addr 为空数组 []；container_status 两态实测：weak-password='available'+expires_at 有值（约 start+30min 租期），static_file_server='pending'+expires_at=None（容器未就绪，start 返回≠就绪）。",
   "protocol": "v1-arena",
   "confidence": "shape-observed",
   "response": {
     "started": true,
-    "note": "container_addr 实测为 []（空数组），非缺失字段"
+    "note": "container_addr 实测为 []（空数组）；container_status 可为 'available' 或 'pending'（pending 时 expires_at=None）"
   }
 }

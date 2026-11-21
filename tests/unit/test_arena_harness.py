@@ -408,6 +408,52 @@ def test_env_note_guides_arena_http_with_container_addr(arena_url):
             os.environ["ARENA_NETWORK_CIDR"] = old
 
 
+def test_env_note_pending_status_warns_not_ready(arena_url):
+    """第三场实测（2026-11-21）：start 返回 status='pending' + expires_at=None
+    ——容器未就绪。note 必须告知"拉起中，失败等 30-60s 重试，不要判未启动"。"""
+    import os
+    payload = dict(golden_response("start_no_addr"))
+    payload["container_status"] = "pending"
+    payload["expires_at"] = None
+    _StubArena.start_payload = payload
+    os.environ["ARENA_NETWORK_CIDR"] = "10.201.0.0/16"
+    try:
+        ad = _adapter(arena_url, env_policy="on_demand")
+        ad.startup()
+        ad.read_tasks()
+        ad.ensure_environment("CH-1")
+        desc = ad.task_description("CH-1")
+        assert "容器状态: pending" in desc
+        assert "尚未就绪" in desc
+        assert "不要判定靶机未启动" in desc
+        assert "容器租期至" not in desc  # expires_at=None 不写租期节
+    finally:
+        os.environ.pop("ARENA_NETWORK_CIDR", None)
+
+
+def test_env_note_expires_at_warns_lease(arena_url):
+    """第三场实测：weak-password status='available' + expires_at 有值
+    （约 start+30min 租期）。就绪态不写 pending 提示，但租期要告知。"""
+    import os
+    payload = dict(golden_response("start_no_addr"))
+    payload["container_status"] = "available"
+    payload["expires_at"] = "2026-11-21T12:45:11.912219+08:00"
+    _StubArena.start_payload = payload
+    os.environ["ARENA_NETWORK_CIDR"] = "10.201.0.0/16"
+    try:
+        ad = _adapter(arena_url, env_policy="on_demand")
+        ad.startup()
+        ad.read_tasks()
+        ad.ensure_environment("CH-1")
+        desc = ad.task_description("CH-1")
+        assert "容器租期至 2026-11-21T12:45:11" in desc
+        assert "到期平台可能回收容器" in desc
+        assert "容器状态: available" not in desc  # 就绪态不写状态节
+        assert "尚未就绪" not in desc
+    finally:
+        os.environ.pop("ARENA_NETWORK_CIDR", None)
+
+
 def test_env_note_without_container_addr_warns_model(arena_url):
     """start 响应无 container_addr（正式赛 static_file_server 疑似形态）：
     描述必须显式告知模型缺地址 + 给出推导与工具路径，而不是让模型
