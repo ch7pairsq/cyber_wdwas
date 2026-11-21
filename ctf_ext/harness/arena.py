@@ -756,23 +756,31 @@ class ArenaHarnessAdapter(HarnessAdapter):
         """运行环境说明（附加到题目描述）；info 为空且无附件时返回空串。
 
         2026-11-21 正式赛教训（static_file_server 40 轮只用 python_exec、
-        判定"靶机未启动"）：模型不知道靶机访问约定（arena_http + 隧道），
-        也不知道 python 直连/通用代理不可靠。这里必须把访问方式写死在
-        模型唯一可读面（description）里，无论 start 是否返回地址。
+        判定"靶机未启动"）：模型不知道靶机访问约定。2026-11-22 第二场
+        修正认知：python requests/httpx 默认走平台预置的 HTTP_PROXY 隧道
+        实际可达，真正不可靠的是手写 socket/禁用代理直连；arena_http 走
+        SOCKS5 隧道且有 DENY 诊断，仍为首选。措辞三分类，不再一刀切
+        "python 网络请求不可靠"（那会让模型放弃可用路径）。
         """
         # container_addr 可能是字符串或列表（多端口）；统一成逗号分隔字符串。
+        # 2026-11-21/22 正式赛实测：平台该字段可为空数组 []（弱密码题与
+        # static_file_server 都如此），此时走无地址分支靠推导。
         raw_addr = info.get("container_addr")
         if isinstance(raw_addr, (list, tuple)):
             raw_addr = ",".join(str(a) for a in raw_addr if a)
         addr = str(raw_addr or "").strip()
+        tunnel_fact = ("python requests/httpx 默认走平台 HTTP_PROXY 隧道，同样可达；"
+                       "手写 socket 或显式禁用代理的直连不可达，不要用")
         parts = []
         if addr:
             parts.append("题目服务地址: http://" + addr
-                         + "（必须用 arena_http 工具访问，host 填 IP 部分；"
-                           "python/requests 直连或经通用 HTTP 代理都不可靠，不要用）")
+                         + "（优先用 arena_http 工具访问，host 填 IP 部分，"
+                           "有 DENY 诊断最可靠；" + tunnel_fact + "）")
         else:
-            parts.append("平台未返回靶机地址：若题目需要远程服务，从题目描述/附件推导"
-                         "目标 host:port，并用 arena_http 工具发起请求；"
+            parts.append("平台未返回靶机地址（container_addr 为空）：若题目需要远程服务，"
+                         "从题目描述（如 ${challenge_host}:${challenge_port} 占位符）/"
+                         "附件/arena_help 推导目标 host:port；"
+                         "优先用 arena_http 工具发起请求；" + tunnel_fact + "；"
                          "工具被 DENY 时把原因原样记录进结果 summary")
         cidr = os.environ.get("ARENA_NETWORK_CIDR", "")
         if cidr:
@@ -870,8 +878,15 @@ class ArenaHarnessAdapter(HarnessAdapter):
                 # container_addr 是否存在无法从 stdout 判断）。
                 keys = sorted(resp.keys()) if isinstance(resp, dict) else type(resp).__name__
                 addr = resp.get("container_addr") if isinstance(resp, dict) else None
-                print("[arena] start {} keys={} container_addr={!r}".format(
-                    unique_code, keys, addr), file=sys.stderr, flush=True)
+                status = resp.get("container_status") if isinstance(resp, dict) else None
+                expires = resp.get("expires_at") if isinstance(resp, dict) else None
+                # container_status/expires_at：平台拉起状态与租期（2026-11-22
+                # 实测 keys 里存在；container_addr 可为空数组，状态字段是
+                # 判断"平台是否真拉起了容器"的直接证据）。
+                print("[arena] start {} keys={} container_addr={!r} "
+                      "container_status={!r} expires_at={!r}".format(
+                          unique_code, keys, addr, status, expires),
+                      file=sys.stderr, flush=True)
                 print("[arena] start {} -> {}".format(unique_code, resp_dump[:300]),
                       file=sys.stderr, flush=True)
 

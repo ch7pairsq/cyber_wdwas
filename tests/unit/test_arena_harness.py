@@ -397,7 +397,9 @@ def test_env_note_guides_arena_http_with_container_addr(arena_url):
         ad.ensure_environment("CH-1")
         desc = ad.task_description("CH-1")
         assert "题目服务地址: http://10.201.0.201:3000" in desc
-        assert "必须用 arena_http 工具" in desc
+        assert "优先用 arena_http 工具" in desc
+        assert "requests/httpx 默认走平台 HTTP_PROXY 隧道" in desc  # 2026-11-22 认知修正
+        assert "手写 socket" in desc
         assert "允许访问的目标网段" in desc
     finally:
         if old is None:
@@ -421,7 +423,9 @@ def test_env_note_without_container_addr_warns_model(arena_url):
         ad.ensure_environment("CH-1")
         desc = ad.task_description("CH-1")
         assert "平台未返回靶机地址" in desc
+        assert "arena_help 推导" in desc  # 无地址时给推导路径
         assert "arena_http" in desc
+        assert "requests/httpx 默认走平台 HTTP_PROXY 隧道" in desc
         assert "允许访问的目标网段" not in desc  # CIDR unset 时不写该节
     finally:
         if old is not None:
@@ -435,7 +439,9 @@ def test_start_diag_prints_container_addr(arena_url, capsys):
     from contextlib import redirect_stderr
     import io
     _StubArena.start_payload = dict(golden_response("start_with_addr"),
-                                    container_addr="10.201.0.9:80")
+                                    container_addr="10.201.0.9:80",
+                                    container_status="running",
+                                    expires_at="2026-11-22T12:00:00Z")
     ad = _adapter(arena_url, env_policy="on_demand")
     ad.startup()
     buf = io.StringIO()
@@ -443,6 +449,8 @@ def test_start_diag_prints_container_addr(arena_url, capsys):
         ad.ensure_environment("CH-1")
     out = buf.getvalue()
     assert "container_addr='10.201.0.9:80'" in out
+    assert "container_status='running'" in out
+    assert "expires_at='2026-11-22T12:00:00Z'" in out
     assert "keys=" in out
 
 

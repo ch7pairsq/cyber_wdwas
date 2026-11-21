@@ -153,4 +153,6 @@ harness:
     # 串行执行器下 on_demand 更省槽位，也避免空闲环境过期。
     env_policy: on_demand
     max_envs: 3
-    client_timeout_seconds: 40
+    # start 拉容器实测 32.75s（2026-11-22 第二场），40s 太贴线：冷启动
+    # 稍慢即 start 失败。放宽到 90s（单次 API 往返上限，非轮次预算）。
+    client_timeout_seconds: 90

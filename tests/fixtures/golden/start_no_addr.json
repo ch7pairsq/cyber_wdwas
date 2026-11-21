@@ -1,8 +1,9 @@
 {
-  "source": "2026-11-20/21 平台实测：start 响应可能不携带 container_addr（静态文件题疑似形态）。agent 必须以\"平台未返回靶机地址\"提示模型，不得误报已启动。",
+  "source": "2026-11-21/22 两场正式赛实测：start 响应 keys 含 container_addr/container_status/description/unique_code(/expires_at)，container_addr 为空数组 []——平台未返回靶机地址，模型靠 arena_help + 题面占位符推导。",
   "protocol": "v1-arena",
   "confidence": "shape-observed",
   "response": {
-    "started": true
+    "started": true,
+    "note": "container_addr 实测为 []（空数组），非缺失字段"
   }
 }
