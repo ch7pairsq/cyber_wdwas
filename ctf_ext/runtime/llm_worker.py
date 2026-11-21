@@ -44,6 +44,12 @@ TOOL_ROUNDS_EXHAUSTED = ("工具轮次已用尽。忽略本次工具调用请求
                          "输出附录 B.2 的最终 JSON 对象，不再调用任何工具；"
                          "candidate_answer 仅在有 evidence_id 支撑且形如 flag{...} 时非空，"
                          "否则置 null。")
+# 无工具收尾轮仍返回 tool_calls 的二次纠正（v22）：上一轮已声明无工具，这次
+# 请求里连工具定义都没有——明确告知直接输出 JSON，否则 attempt 被报废。
+FINAL_SUMMARY_CORRECTION = ("系统当前没有可用工具，刚才的工具调用请求被拒绝。"
+                            "不要再尝试调用任何工具；立即基于以上全部证据输出"
+                            "附录 B.2 的最终 JSON 对象（含 summary/facts/attempt/"
+                            "candidate_answer），这是拿到结果的最后机会。")
 # 远程题主动提示（结论守门第一道）：有靶机信息但工具循环前 N 轮从未调用
 # arena_http 时注入（限 1 次）。正式赛教训：模型 40 轮只用 python_exec，
 # 网络探测失败后自行得出"靶机未启动"错误结论。
@@ -316,6 +322,8 @@ class LlmWorker:
         hint_sent = False
         tool_name_retried = False  # 幻觉工具名的 in-claim 纠正重试，每 claim 限 1 次
         truncation_retried = False  # 输出截断（finish_reason=length）的精简重试，每 claim 限 1 次
+        transport_retried = False  # 传输类瞬态（网络抖动）的重试，每 claim 限 1 次（v22）
+        final_summary_retried = False  # 无工具收尾轮仍坚持调工具的纠正重试，限 1 次（v22）
         # 结论守门：远程题全程 0 次 arena_http 调用时，主动提示 + 拒收
         # "靶机未启动/不可达"类结论（各限 1 次，不无限阻塞）。
         arena_http_calls = 0
@@ -400,6 +408,15 @@ class LlmWorker:
                 return self._failure(claim, "failed", OUTCOME_ERROR, "rate_limited", started, tokens, skills_loaded, tool_calls, skills_indexed)
             except (ProviderError, ProviderConfigError) as exc:
                 print("[llm] error: {}".format(exc), file=sys.stderr, flush=True)
+                if not transport_retried and any(
+                        w in str(exc).lower() for w in ("transport", "connection", "temporarily")):
+                    # v22：传输类瞬态（网络抖动/上游闪断）——2026-11-22 实测三个
+                    # 并行 worker 同时 transport failed，三个 attempt 同瞬间报废。
+                    # 与截断同款 in-claim 重试一次：请求本身没问题，直接重发。
+                    transport_retried = True
+                    print("[llm] transport failure; retrying once in-claim",
+                          file=sys.stderr, flush=True)
+                    continue
                 if "empty model response" in str(exc):
                     # 空响应诊断：末条消息脱敏摘要，定位触发上游空回的内容。
                     print("[llm] empty-response context: {}".format(
@@ -465,8 +482,17 @@ class LlmWorker:
                         messages.append({"role": "user", "content": TOOL_ROUNDS_EXHAUSTED})
                         tools = None
                         continue
-                    # 收尾轮仍坚持工具调用（请求已无工具定义，官方通道不该发生）：
-                    # 放弃，保留原失败码。
+                    if not final_summary_retried:
+                        # v22：收尾轮模型无视"无工具"指令仍返回 tool_calls（实测：
+                        # tools=0 请求下 stop=tool_calls、text_chars=0）——此前直接
+                        # 报废 attempt，40 轮工作全部作废。注入明确纠正提示重试
+                        # 一轮（限 1 次，防循环绕过熔断计数）。
+                        final_summary_retried = True
+                        print("[llm] final summary returned tool_calls; retrying with correction",
+                              file=sys.stderr, flush=True)
+                        messages.append({"role": "user", "content": FINAL_SUMMARY_CORRECTION})
+                        continue
+                    # 纠正后仍坚持工具调用：放弃，保留原失败码。
                     return self._failure(claim, "failed", OUTCOME_ERROR, "tool_round_limit", started, tokens, skills_loaded, tool_calls, skills_indexed)
                 messages.append({"role": "assistant", "content": self._assistant_content(response)})
                 print("[llm] tools round={} names={}".format(

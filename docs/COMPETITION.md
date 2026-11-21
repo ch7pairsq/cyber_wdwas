@@ -482,6 +482,22 @@ build 中间层每轮 ~1.5GB，失败重试前必须 prune（本轮清理后 82%
 预算口径、平台环境数据问题都只在长跑暴露；supervisor 的"活性"与
 "推进"必须分开度量，存活不等于前进。
 
+## 第九轮（v22，2026-11-22 实测日志两缺口）：传输瞬态与收尾轮纠正
+
+实测日志（三并行 worker 同时 transport failed + pcap 题 tool_round_limit 收尾轮
+模型仍返回 tool_calls）暴露 v21 未覆盖的两个 attempt 报废路径，同款 in-claim
+限 1 次重试补齐：
+
+1. **传输类瞬态重试**（llm_worker）：ProviderError 含 transport/connection/
+   temporarily 时 in-claim 重试一次（请求本身没问题直接重发）；此前三个并行
+   attempt 同瞬间报废。
+2. **无工具收尾轮纠正**（llm_worker）：tool_round_limit 强制无工具总结后模型
+   仍返回 tool_calls（tools=0 请求下实测发生）→ 注入 FINAL_SUMMARY_CORRECTION
+   重试一轮（限 1 次），不再直接报废 40 轮工作；二次仍违规保留 tool_round_limit
+   失败码。
+
+测试：test_v21_resilience.py 增至 11 个；本地 441 passed 1 skipped。
+
 ## 第八轮（v21，2026-11-21 审计后续）：四条灾难路径关闭
 
 第二轮日志审计（事件频谱 + 逐题命运 + 代码对照）确认 19 题赛三类故障的完整机制链并修复：

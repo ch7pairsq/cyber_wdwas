@@ -167,3 +167,71 @@ def test_endgame_still_skips_healthy_untouched_challenge():
         orch._worker = SimpleNamespace(_control_factory=factory)
         assert orch._grant_endgame([SimpleNamespace(challenge_id="c1")], set(),
                                    time.time() + 600) is False
+
+
+# ---- v22：传输瞬态重试 + 无工具收尾轮纠正（2026-11-22 实测日志暴露）----
+
+
+def _tool_call_response():
+    from ctf_ext.llm.provider import ProviderResponse
+    return ProviderResponse(text="", tool_calls=[
+        {"name": "python_exec", "input": {"code": "print(1)"}, "id": "t1"}])
+
+
+_TOOL_STUB = SimpleNamespace(
+    tool_definitions=lambda: [{"name": "python_exec"}],
+    execute_arguments=lambda *a, **k: SimpleNamespace(status="ok"))
+
+
+def test_transport_failure_retried_once_in_claim():
+    """传输类瞬态（网络抖动）不再直接报废 attempt：in-claim 重试一次。"""
+    from ctf_ext.llm.provider import ProviderError
+    board, ev, claim, sha = _setup()
+    provider = FakeProvider([
+        ProviderError("official deepseek api transport failed"),
+        _resp(_payload(sha)),
+    ])
+    result = LlmWorker(provider, evidence_check=ev.verify).work(claim, {})
+    assert result.status == "completed" and result.outcome == "success"
+    assert len(provider.calls) == 2
+
+
+def test_transport_failure_retried_only_once():
+    """第二次传输失败仍走失败路径（防 in-claim 循环绕过熔断计数）。"""
+    from ctf_ext.llm.provider import ProviderError
+    board, ev, claim, sha = _setup()
+    provider = FakeProvider([
+        ProviderError("official deepseek api transport failed"),
+        ProviderError("official deepseek api transport failed"),
+    ])
+    result = LlmWorker(provider, evidence_check=ev.verify).work(claim, {})
+    assert result.status == "failed" and result.failure_reason == "ProviderError"
+    assert len(provider.calls) == 2
+
+
+def test_final_summary_tool_calls_corrected_once():
+    """轮次用尽后的无工具收尾轮模型仍调工具：注入纠正重试一轮而非报废。
+
+    max_tool_rounds=0 让第一次 tool_calls 直接进强制收尾路径；第二次仍
+    tool_calls 触发 v22 纠正；第三次输出 JSON 走正常契约。
+    """
+    board, ev, claim, sha = _setup()
+    provider = FakeProvider([
+        _tool_call_response(), _tool_call_response(), _resp(_payload(sha))])
+    result = LlmWorker(provider, evidence_check=ev.verify,
+                       max_tool_rounds=0, tool_registry=_TOOL_STUB).work(claim, {})
+    assert result.status == "completed" and result.outcome == "success"
+    assert len(provider.calls) == 3
+    last_user = [m for m in provider.calls[2]["messages"] if m.get("role") == "user"][-1]
+    assert "没有可用工具" in last_user["content"]  # 纠正提示已注入
+
+
+def test_final_summary_tool_calls_second_time_fails():
+    """纠正后仍坚持工具调用：保留 tool_round_limit 失败码。"""
+    board, ev, claim, sha = _setup()
+    provider = FakeProvider([
+        _tool_call_response(), _tool_call_response(), _tool_call_response()])
+    result = LlmWorker(provider, evidence_check=ev.verify,
+                       max_tool_rounds=0, tool_registry=_TOOL_STUB).work(claim, {})
+    assert result.status == "failed" and result.failure_reason == "tool_round_limit"
+    assert len(provider.calls) == 3
