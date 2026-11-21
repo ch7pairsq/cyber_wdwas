@@ -112,3 +112,38 @@ def test_missing_state_or_challenge_is_tolerated():
         # 空 challenge_id 直接忽略
         orch._collect_submissions([dict(_rejected_event(), challenge_id="")])
         assert _intents(store) == []
+
+
+def test_scheduler_excludes_confirmed_only_until_rejected():
+    """调度排除修复（2026-11-21 8 题模拟发现）：gate confirmed 且平台 REJECTED
+    的题必须重新可领，否则重开意图永远 READY（ch-sim-5 卡死形态）。
+    """
+    from ctf_ext.harness.flag_gate import FlagGate
+    from ctf_ext.harness.gateway import SubmitGateway
+    from ctf_ext.runtime.control import StepPolicy
+    from ctf_ext.runtime.scheduler import Scheduler
+    from ctf_ext.store.blackboard import IntentDraft
+    from tests.framework_support import Adapter, proof
+
+    def _setup(store, final_status):
+        decision = proof(store)
+        gateway = SubmitGateway(store, Adapter())
+        with store.board._write() as db:
+            FlagGate(store).record(db, decision)
+            gateway.enqueue(db, decision)
+        if final_status is not None:
+            store.db.execute("UPDATE submissions SET status=?", (final_status,))
+        store.patch("c1", lambda s: s.update(status="ready"))
+        store.board.add_intent(IntentDraft("c1", "misc.flagretry.1"))
+        return Scheduler(store.board, state_store=store,
+                         step_policy=StepPolicy((8, 16, 24, 96)))
+
+    with fixture() as store:
+        sch = _setup(store, "REJECTED")
+        assert sch.eligible_challenges() == ["c1"]  # 修复前：confirmed 集含 c1 → 永不可领
+    with fixture() as store:
+        sch = _setup(store, "ACCEPTED")
+        assert sch.eligible_challenges() == []      # 平台已得分：accepted 排除
+    with fixture() as store:
+        sch = _setup(store, None)                   # 回执未定（DRAFT）：gate confirmed 仍排除
+        assert sch.eligible_challenges() == []

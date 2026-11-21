@@ -116,7 +116,8 @@ class SubmitGateway:
         rejected/pending 决策，只能经 best_effort 入队产生）只要求答案仍
         是合法 FLAG 格式——拒绝态决策没有 declaration_hash，无法做声明
         反篡改，平台真值仲裁兜底。"""
-        gate = self.db.execute('SELECT * FROM gate_decisions WHERE id=?', (row['gate_id'],)).fetchone()
+        with self.store.board.read_view() as db:
+            gate = db.execute('SELECT * FROM gate_decisions WHERE id=?', (row['gate_id'],)).fetchone()
         if not gate or gate['challenge_id'] != row['challenge_id']:
             return False
         if gate['status'] != 'confirmed':
@@ -131,8 +132,9 @@ class SubmitGateway:
             declared, digest = FlagGate.declaration(self.store.workspace(row['challenge_id']))
             if digest != data['declaration_hash'] or normalized_flag(declared) != normalized_flag(row['answer']):
                 return False
-            command = self.db.execute('SELECT * FROM command_log WHERE id=? AND challenge_id=? AND complete=1 AND returncode=0',
-                                      (data['command_id'], row['challenge_id'])).fetchone()
+            with self.store.board.read_view() as db:
+                command = db.execute('SELECT * FROM command_log WHERE id=? AND challenge_id=? AND complete=1 AND returncode=0',
+                                     (data['command_id'], row['challenge_id'])).fetchone()
             if not command or command['evidence_id'] not in data['evidence_ids']:
                 return False
             self.store.restore_evidence(command['evidence_id'])
@@ -163,7 +165,8 @@ class SubmitGateway:
                 key, receipt = self._responses.get_nowait()
             except queue.Empty:
                 break
-            row = self.db.execute('SELECT s.*,j.gate_id,j.created_at FROM submissions s JOIN submission_jobs j USING(idempotency_key) WHERE idempotency_key=?', (key,)).fetchone()
+            with self.store.board.read_view() as db:
+                row = db.execute('SELECT s.*,j.gate_id,j.created_at FROM submissions s JOIN submission_jobs j USING(idempotency_key) WHERE idempotency_key=?', (key,)).fetchone()
             with self.store.board.transaction() as db:
                 db.execute('UPDATE submissions SET status=?,receipt_id=?,detail=?,updated_at=? WHERE idempotency_key=?',
                            (receipt.status, receipt.receipt_id, receipt.detail, self.clock(), key))
@@ -183,7 +186,8 @@ class SubmitGateway:
             self._inflight = None
         if self._inflight or self._closed:
             return completed
-        row = self.db.execute("SELECT s.*,j.gate_id,j.created_at FROM submissions s JOIN submission_jobs j USING(idempotency_key) WHERE s.status IN ('DRAFT','SENDING','UNKNOWN') AND j.next_query<=? ORDER BY CASE s.status WHEN 'DRAFT' THEN 0 ELSE 1 END,j.created_at LIMIT 1", (self.clock(),)).fetchone()
+        with self.store.board.read_view() as db:
+            row = db.execute("SELECT s.*,j.gate_id,j.created_at FROM submissions s JOIN submission_jobs j USING(idempotency_key) WHERE s.status IN ('DRAFT','SENDING','UNKNOWN') AND j.next_query<=? ORDER BY CASE s.status WHEN 'DRAFT' THEN 0 ELSE 1 END,j.created_at LIMIT 1", (self.clock(),)).fetchone()
         if not row:
             return completed
         if self.policy is not None and self.policy.decide_submission().action == 'deny':

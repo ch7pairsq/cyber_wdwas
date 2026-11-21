@@ -131,7 +131,7 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
         competition_locked=bool((cfg.get("harness") or {}).get("competition_locked", False)),
         sandbox_required=bool(policy_cfg.get("sandbox_required", True)),
     ))
-    board = Blackboard(conn, evidence_check=evidence.verify)
+    board = Blackboard(conn, evidence_check=evidence.verify, db_lock=evidence.db_lock)
 
     protocol = (cfg.get("harness") or {}).get("protocol", "mock")
     if protocol == "official":
@@ -178,7 +178,19 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
             print("[arena] platform tunnel env exported: {}".format(
                 "; ".join(tunnel_actions)), file=sys.stderr, flush=True)
     else:
-        harness = MockHarnessAdapter(default_practice_challenges())
+        # 模拟题集注入：harness.mock.challenges_file（JSON 文件）或
+        # harness.mock.challenges（内联列表）；用于本地多题连续自测
+        # （8 题混合结局：可解/诱饵拒绝/错旗重开/无解 endgame）。
+        mock_cfg = (cfg.get("harness") or {}).get("mock") or {}
+        raw_challenges = None
+        if isinstance(mock_cfg, dict):
+            challenges_file = mock_cfg.get("challenges_file")
+            if challenges_file:
+                with open(challenges_file, "r", encoding="utf-8") as fh:
+                    raw_challenges = json.load(fh)
+            elif mock_cfg.get("challenges"):
+                raw_challenges = list(mock_cfg["challenges"])
+        harness = MockHarnessAdapter(raw_challenges or default_practice_challenges())
     state = StateStore(board, evidence, os.path.join(os.path.dirname(db_path), "workspaces"))
     tool_registry = None
     if bool((cfg.get("model") or {}).get("tools_enabled", True)):

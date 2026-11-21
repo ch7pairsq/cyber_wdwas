@@ -1,0 +1,138 @@
+[
+ {
+  "challenge_id": "ch-sim-1",
+  "name": "alpha starter",
+  "category": "misc",
+  "description": "base64 解码题，flag 与平台真值一致。",
+  "attachments": [
+   "mock://ch-sim-1/note.b64"
+  ],
+  "points_hint": 500.0,
+  "difficulty_level": 1,
+  "metadata": {
+   "files": {
+    "mock://ch-sim-1/note.b64": "6Kej56CB5pys6ZmE5Lu25Y2z5Y+v5b6X5YiwIGZsYWfjgIIKZmxhZ3tzaW1fYWxwaGFfMDAxfQo="
+   }
+  },
+  "flag": "flag{sim_alpha_001}"
+ },
+ {
+  "challenge_id": "ch-sim-2",
+  "name": "bravo starter",
+  "category": "misc",
+  "description": "base64 解码题。",
+  "attachments": [
+   "mock://ch-sim-2/note.b64"
+  ],
+  "points_hint": 500.0,
+  "difficulty_level": 1,
+  "metadata": {
+   "files": {
+    "mock://ch-sim-2/note.b64": "6Kej56CB5pys6ZmE5Lu25Y2z5Y+v5b6X5YiwIGZsYWfjgIIKZmxhZ3tzaW1fYnJhdm9fMDAyfQo="
+   }
+  },
+  "flag": "flag{sim_bravo_002}"
+ },
+ {
+  "challenge_id": "ch-sim-3",
+  "name": "charlie starter",
+  "category": "misc",
+  "description": "base64 解码题。",
+  "attachments": [
+   "mock://ch-sim-3/note.b64"
+  ],
+  "points_hint": 500.0,
+  "difficulty_level": 1,
+  "metadata": {
+   "files": {
+    "mock://ch-sim-3/note.b64": "6Kej56CB5pys6ZmE5Lu25Y2z5Y+v5b6X5YiwIGZsYWfjgIIKZmxhZ3tzaW1fY2hhcmxpZV8wMDN9Cg=="
+   }
+  },
+  "flag": "flag{sim_charlie_003}"
+ },
+ {
+  "challenge_id": "ch-sim-7",
+  "name": "golf starter",
+  "category": "misc",
+  "description": "base64 解码题。",
+  "attachments": [
+   "mock://ch-sim-7/note.b64"
+  ],
+  "points_hint": 500.0,
+  "difficulty_level": 1,
+  "metadata": {
+   "files": {
+    "mock://ch-sim-7/note.b64": "6Kej56CB5pys6ZmE5Lu25Y2z5Y+v5b6X5YiwIGZsYWfjgIIKZmxhZ3tzaW1fZ29sZl8wMDd9Cg=="
+   }
+  },
+  "flag": "flag{sim_golf_007}"
+ },
+ {
+  "challenge_id": "ch-sim-4",
+  "name": "decoy trap",
+  "category": "misc",
+  "description": "附件 flag 是诱饵（内容含 decoy），真值不同：测 gate 拒绝 + best-effort 提交 + REJECTED 重开。",
+  "attachments": [
+   "mock://ch-sim-4/note.b64"
+  ],
+  "points_hint": 500.0,
+  "difficulty_level": 1,
+  "metadata": {
+   "files": {
+    "mock://ch-sim-4/note.b64": "6Kej56CB5pys6ZmE5Lu25Y2z5Y+v5b6X5YiwIGZsYWfjgIIKZmxhZ3tzaW1fZGVjb3lfMDA0fQo="
+   }
+  },
+  "flag": "flag{sim_delta_004}"
+ },
+ {
+  "challenge_id": "ch-sim-5",
+  "name": "wrong flag",
+  "category": "misc",
+  "description": "解出的 flag 证据完整但真值不同：测 confirmed 提交后 REJECTED 重开 + 同答案去重。",
+  "attachments": [
+   "mock://ch-sim-5/note.b64"
+  ],
+  "points_hint": 500.0,
+  "difficulty_level": 1,
+  "metadata": {
+   "files": {
+    "mock://ch-sim-5/note.b64": "6Kej56CB5pys6ZmE5Lu25Y2z5Y+v5b6X5YiwIGZsYWfjgIIKZmxhZ3tzaW1fd3JvbmdfMDA1fQo="
+   }
+  },
+  "flag": "flag{sim_echo_005}"
+ },
+ {
+  "challenge_id": "ch-sim-6",
+  "name": "unsolvable",
+  "category": "misc",
+  "description": "附件无 flag：测 no_signal followup 与 endgame 扩展授权（ready 会话）。",
+  "attachments": [
+   "mock://ch-sim-6/note.b64"
+  ],
+  "points_hint": 500.0,
+  "difficulty_level": 1,
+  "metadata": {
+   "files": {
+    "mock://ch-sim-6/note.b64": "5pys6aKY6ZmE5Lu25Y+q5piv5LiA5Liq6K+05piO5paH5Lu277yM5rKh5pyJ5Lu75L2VIGZsYWfjgIIK5L2g6ZyA6KaB5YW25LuW5omL5q6144CCCg=="
+   }
+  },
+  "flag": "flag{sim_foxtrot_006}"
+ },
+ {
+  "challenge_id": "ch-sim-8",
+  "name": "hotel starter",
+  "category": "misc",
+  "description": "base64 解码题。",
+  "attachments": [
+   "mock://ch-sim-8/note.b64"
+  ],
+  "points_hint": 500.0,
+  "difficulty_level": 1,
+  "metadata": {
+   "files": {
+    "mock://ch-sim-8/note.b64": "6Kej56CB5pys6ZmE5Lu25Y2z5Y+v5b6X5YiwIGZsYWfjgIIKZmxhZ3tzaW1faG90ZWxfMDA4fQo="
+   }
+  },
+  "flag": "flag{sim_hotel_008}"
+ }
+]

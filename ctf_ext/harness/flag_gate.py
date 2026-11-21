@@ -83,7 +83,15 @@ class FlagGate:
                 return decision
             proof = None
             # 只认当前题由执行边界记录的完整成功输出；普通附件/哈希/模型自报不算。
-            for command in self.store.db.execute('SELECT * FROM command_log WHERE challenge_id=? AND complete=1 AND returncode=0 ORDER BY created_at DESC', (challenge_id,)):
+            commands = []
+            # command_log 裸读改走共享锁读视图：evaluate 在 worker 线程执行，
+            # 与并发写共用同一 sqlite 连接，必须与黑板同锁（并发模拟教训）。
+            with self.store.board.read_view() as db:
+                commands = db.execute(
+                    'SELECT * FROM command_log WHERE challenge_id=? AND complete=1 '
+                    'AND returncode=0 ORDER BY created_at DESC',
+                    (challenge_id,)).fetchall()
+            for command in commands:
                 if command['evidence_id'] not in evidence_ids:
                     continue
                 try:

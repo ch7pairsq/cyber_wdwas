@@ -12,6 +12,7 @@ import hashlib
 import os
 import shutil
 import sqlite3
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -26,12 +27,19 @@ class EvidenceTooLarge(Exception):
 class EvidenceStore:
     """put() 返回 sha256，作为 evidence_id。"""
 
-    def __init__(self, root, db: sqlite3.Connection, max_bytes: int = 64 * 1024 * 1024):
-        """root 为内容寻址存储目录（0700），db 为证据登记表所在的 sqlite 连接。"""
+    def __init__(self, root, db: sqlite3.Connection, max_bytes: int = 64 * 1024 * 1024,
+                 db_lock: Optional[threading.RLock] = None):
+        """root 为内容寻址存储目录（0700），db 为证据登记表所在的 sqlite 连接。
+
+        db_lock：与黑板共享的同一把 RLock（同一 sqlite 连接上的读写不得交叠）。
+        2026-11-21 8 题并发模拟教训：EvidenceStore 裸用连接，3 worker 并发
+        put_bytes 触发 sqlite InterfaceError。独立构造时自建锁兑底。
+        """
         self._root = Path(root)
         self._ensure_private_dir(self._root)
         self._db = db
         self._max_bytes = max_bytes
+        self.db_lock = db_lock if db_lock is not None else threading.RLock()
 
     @staticmethod
     def _ensure_private_dir(path: Path) -> None:
@@ -51,7 +59,8 @@ class EvidenceStore:
         if not path.exists():
             self._ensure_private_dir(path.parent)
             self._atomic_write(path, data)
-        self._register(sha, kind, str(path), len(data))
+        with self.db_lock:
+            self._register(sha, kind, str(path), len(data))
         return sha
 
     @staticmethod
@@ -112,17 +121,20 @@ class EvidenceStore:
             finally:
                 if tmp.exists():
                     tmp.unlink()
-        self._register(sha, kind, str(dest), size)
+        with self.db_lock:
+            self._register(sha, kind, str(dest), size)
         return sha
 
     def put_hash(self, sha: str, kind: str = "hash_only") -> str:
         """只登记哈希：适用于输出过大或含敏感内容、不需要留存原文的场景。"""
-        self._register(sha, kind, "", 0)
+        with self.db_lock:
+            self._register(sha, kind, "", 0)
         return sha
 
     def verify(self, sha: str) -> bool:
         """校验证据可被引用：登记存在；普通证据还要文件在且哈希匹配。"""
-        row = self._db.execute("SELECT path, bytes FROM evidence WHERE sha256=?", (sha,)).fetchone()
+        with self.db_lock:
+            row = self._db.execute("SELECT path, bytes FROM evidence WHERE sha256=?", (sha,)).fetchone()
         if not row:
             return False
         if not row["path"]:
@@ -140,7 +152,8 @@ class EvidenceStore:
 
     def exists(self, sha: str) -> bool:
         """只查登记是否存在，不校验文件（快速路径）。"""
-        row = self._db.execute("SELECT 1 FROM evidence WHERE sha256=?", (sha,)).fetchone()
+        with self.db_lock:
+            row = self._db.execute("SELECT 1 FROM evidence WHERE sha256=?", (sha,)).fetchone()
         return row is not None
 
     def _register(self, sha: str, kind: str, path: str, size: int) -> None:

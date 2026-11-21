@@ -120,10 +120,16 @@ def compute_priority(draft: IntentDraft) -> float:
 
 class Blackboard:
     """黑板：意图/租约/尝试/事实/提交的共享状态库，全部写操作走事务与乐观校验。"""
-    def __init__(self, db: sqlite3.Connection, lease_default: float = 180.0, evidence_check=None):
-        """db 为共享 SQLite 连接；lease_default 为租约时长；evidence_check 用于证据引用校验。"""
+    def __init__(self, db: sqlite3.Connection, lease_default: float = 180.0, evidence_check=None,
+                 db_lock: threading.RLock = None):
+        """db 为共享 SQLite 连接；lease_default 为租约时长；evidence_check 用于证据引用校验。
+
+        db_lock：与 EvidenceStore 等其他同一连接的持有者共享同一把 RLock。
+        生产装配传 evidence.db_lock；不传则自建（与 EvidenceStore 默认锁
+        不同把——仅适合单线程场景，生产必须共享否则连接并发未定义行为）。
+        """
         self._db = db
-        self._lock = threading.RLock()
+        self._lock = db_lock if db_lock is not None else threading.RLock()
         self._lease_default = lease_default
         # evidence_check: evidence_id -> bool（通常是 EvidenceStore.verify）；
         # 配置后所有结果引用的证据都必须通过校验（D.1-3）
@@ -326,10 +332,21 @@ class Blackboard:
         return {row["challenge_id"] for row in rows}
 
     def confirmed_challenge_ids(self) -> set:
-        """已过三门确认（可能还在提交中）的题目集合。"""
+        """已过三门确认且平台未判错的题（调度器排除，不空转重解）。
+
+        v12 REJECTED 重开语义：gate 曾 confirmed 但平台已判 REJECTED 的题
+        必须重新可领（flagretry 意图在队），否则重开意图永远卡在 READY、
+        has_waiting_work 永真、endgame 永不触发（2026-11-21 8 题模拟发现
+        ch-sim-5 卡死）。判定口径：该题最新 submission 状态为 REJECTED →
+        不进排除集；ACCEPTED/在途/无回执 → gate confirmed 仍排除。
+        """
         with self.read_view() as db:
             rows = db.execute(
-                "SELECT DISTINCT challenge_id FROM gate_decisions WHERE status='confirmed'"
+                "SELECT DISTINCT gd.challenge_id FROM gate_decisions gd "
+                "WHERE gd.status='confirmed' AND gd.challenge_id NOT IN ("
+                "  SELECT s.challenge_id FROM submissions s WHERE s.status='REJECTED'"
+                "    AND s.updated_at=(SELECT MAX(s2.updated_at) FROM submissions s2"
+                "                      WHERE s2.challenge_id=s.challenge_id))"
             ).fetchall()
         return {row["challenge_id"] for row in rows}
 

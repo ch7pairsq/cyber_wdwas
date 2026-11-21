@@ -1,0 +1,49 @@
+# 8 题连续模拟自测配置（v13 赛前自测；正式赛入口仍为 official-arena.yaml）。
+#
+# 对齐正式赛：parallel_agents=3 / max_workers=4 / max_intents=12 /
+# best_effort_on_reject=true / endgame_token_bonus=2.0 / thresholds 同款。
+# 差异：mock 协议 + RuleBasedWorker + 自定义 8 题题集（sim8_challenges.json），
+# 预算缩短让 8 题的四种结局（confirmed 提交 / gate 拒绝 best-effort /
+# REJECTED 重开去重 / no_signal endgame）在几分钟内全部走到。
+#
+# 跑法：
+#   python3 -m ctf_ext run --mode mock --config config/sim8.yaml \
+#     --db /tmp/sim8/sim.db --seconds 900 --report /tmp/sim8/report.json
+
+harness:
+  protocol: mock
+  competition_locked: false
+  mock:
+    challenges_file: config/sim8_challenges.json
+
+storage:
+  db_path: /tmp/sim8/sim.db
+
+concurrency:
+  max_workers: 4
+  max_project_workers: 1
+  max_running_projects: 3
+  executor: serial
+
+controller:
+  parallel_acceptance: true
+  parallel_agents: 3
+  thresholds: [8, 16, 24, 96]
+  max_steps: 120
+  max_tool_rounds: 40
+
+budget:
+  per_challenge_seconds: 600
+  claim_timeout_seconds: 120
+  max_model_tokens_per_intent: 50000
+  max_tool_calls_per_intent: 50
+  max_model_tokens_total: 0
+  repeat_limit: 6
+  stall_steps: 30
+  endgame_token_bonus: 2.0
+
+runtime:
+  max_intents_per_challenge: 12
+
+submission:
+  best_effort_on_reject: true

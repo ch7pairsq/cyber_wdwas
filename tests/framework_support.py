@@ -25,7 +25,7 @@ def fixture():
         db.row_factory = sqlite3.Row
         migrate(db)
         evidence = EvidenceStore(root / 'evidence', db)
-        board = Blackboard(db, evidence_check=evidence.verify)
+        board = Blackboard(db, evidence_check=evidence.verify, db_lock=evidence.db_lock)
         store = StateStore(board, evidence, root / 'workspaces')
         board.add_challenge(Challenge(id='c1', name='离线测试', category='misc'))
         try:
