@@ -269,6 +269,11 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
 
     conc = cfg.get("concurrency") or {}
     runtime_cfg = cfg.get("runtime") or {}
+    # claim 硬超时：worker 协作式检查与 orchestrator DeadlineGuard 共用同一事实源
+    # （budget.claim_timeout_seconds，v21 提前到分支前解析，LLM/规则两路都生效）。
+    if claim_timeout_seconds is None:
+        claim_timeout_seconds = float(budget.get("claim_timeout_seconds")
+                                      or budget.get("per_intent_seconds") or 90)
     scheduler = Scheduler(board,
                           max_project_workers=int(conc.get("max_project_workers") or 1),
                           max_running_projects=int(conc.get("max_running_projects") or 1),
@@ -320,13 +325,11 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
                            pro_provider=pro_provider,
                            pro_max_calls=int(budget.get("pro_max_calls_per_challenge") or 0),
                            pro_from_stage=int(model_cfg.get("pro_from_stage") or 2),
-                           thinking_by_stage=tuple(model_cfg.get("thinking_by_stage") or ()))
+                           thinking_by_stage=tuple(model_cfg.get("thinking_by_stage") or ()),
+                           claim_timeout_seconds=claim_timeout_seconds)
     else:
         worker = RuleBasedWorker(harness, evidence_store=evidence,
                                  state_store=state, control_factory=control_factory)
-    if claim_timeout_seconds is None:
-        claim_timeout_seconds = float(budget.get("claim_timeout_seconds")
-                                      or budget.get("per_intent_seconds") or 90)
     # 确定性兜底 Worker 没有新的探索信息，默认不做后续规划；只有 LLM 模式展开 Planner。
     planner_limit = int(runtime_cfg.get("max_intents_per_challenge") or (4 if mode == "llm" else 1))
     # best-effort 提交：gate 拒绝/挂起但格式合法的候选仍入队，平台真值仲裁

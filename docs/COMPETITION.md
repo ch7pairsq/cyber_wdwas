@@ -481,3 +481,24 @@ build 中间层每轮 ~1.5GB，失败重试前必须 prune（本轮清理后 82%
 **教训**：长跑正式赛（19 题/4h）是独立于小场 2/2 的测试面——资源累积、
 预算口径、平台环境数据问题都只在长跑暴露；supervisor 的"活性"与
 "推进"必须分开度量，存活不等于前进。
+
+## 第八轮（v21，2026-11-21 审计后续）：四条灾难路径关闭
+
+第二轮日志审计（事件频谱 + 逐题命运 + 代码对照）确认 19 题赛三类故障的完整机制链并修复：
+
+1. **协作式 claim 超时**（llm_worker）：DeadlineGuard 的 SIGALRM 只在主线程生效，
+   parallel=3 时 worker 全在子线程 → claim_timeout 30 分钟硬杀静默失效（watchdog
+   降级现打一次性告警行）。work() 循环每轮开头自检墙钟，超 min(claim_timeout,
+   claim.budget_seconds) 返回可重试超时（claim_deadline）；轮间打断最坏延迟一次
+   模型/工具调用（各 120s 超时）。
+2. **worker 止损隔离**（orchestrator._worker_loop）：并行模式单线程连续 3 次 step
+   异常只退出自己（run_aborted isolated=true），不再 _stop.set() 杀全场；串行语义不变。
+3. **python_exec 并发 1→3**（catalog._spec 加 concurrency_limit 参数）：parallel=3
+   争抢时未抢到的立即拿 TOOL_BUSY 烧整轮（b49c4e1fd53f partial 死因），提到 3
+   每 worker 各占一槽；其余工具默认仍 1。
+4. **blocked 题复活**（blackboard.challenges_with_blocked_intents + endgame）：
+   planner 对 blocked 不扩展、intents 又未打满，endgame 与 planner 互相推诿 →
+   3 个平台问题题永久搁置、剩余时间空转。endgame 授权范围纳入存在终态 FAILED
+   intent 的题（限一次，DuplicateStrategy 兜底）。
+
+测试：tests/unit/test_v21_resilience.py ×7；本地 437 passed 1 skipped。

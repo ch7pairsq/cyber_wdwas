@@ -323,6 +323,19 @@ class Blackboard:
             ).fetchone()
         return int(row["n"] or 0)
 
+    def challenges_with_blocked_intents(self) -> set:
+        """存在终态 FAILED intent（blocked 熔断）的题集合。
+
+        blocked 语义是"需要外部条件"（缺附件、环境未拉起、预算耗尽）——平台
+        环境事后可能恢复（容器调度延迟、附件补传），调度层据此在时间富余时
+        授权一次复活重试（v21）；planner 对 blocked 不扩展，不判定会永久據置。
+        """
+        with self.read_view() as db:
+            rows = db.execute(
+                "SELECT DISTINCT challenge_id FROM intents_ext WHERE status=?", (FAILED,)
+            ).fetchall()
+        return {r["challenge_id"] for r in rows}
+
     def accepted_challenge_ids(self) -> set:
         """已获平台 ACCEPTED 的题目集合（调度层直接排除重解）。"""
         with self.read_view() as db:

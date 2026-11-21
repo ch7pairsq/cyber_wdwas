@@ -159,18 +159,25 @@ class LlmWorker:
                  pro_provider: Optional[ModelProvider] = None, pro_max_calls: int = 0,
                  pro_from_stage: int = 2, thinking_by_stage=(0, 0, 0, 0, 0),
                  skills_mode: str = "preload", skills_index_max_bytes: int = 600,
-                 solutions_recall=None):
+                 solutions_recall=None, claim_timeout_seconds: float = 0.0):
         """LLM Worker 装配：主/Pro 双模型、思考预算、技能注入与工具循环参数。
 
         tool_registry 非空时启用工具调用循环；pro_provider 支持阶段换挡；
         thinking_by_stage 为 5 级思考预算（0=关）；
         solutions_recall(domain, query, challenge_id) 返回过往解题思路条目。
+        claim_timeout_seconds：协作式硬超时线（v21）。SIGALRM 只在主线程生效，
+        parallel 子线程里 DeadlineGuard 静默降级——循环每轮开头自检墙钟补上
+        这层硬边界；0 表示禁用（兼容旧测试与直连调用方）。
         """
         self._provider = provider
         self._state, self._control_factory = state_store, control_factory
         self._check = evidence_check
         self._timeout = timeout
         self._max_tokens = max_tokens
+        try:
+            self._claim_hard_limit = max(0.0, float(claim_timeout_seconds))
+        except (TypeError, ValueError):
+            self._claim_hard_limit = 0.0
         self._max_attempts = max(1, max_attempts)
         self._clock = clock
         self._skills = skill_loader
@@ -314,10 +321,26 @@ class LlmWorker:
         arena_http_calls = 0
         remote_nudge_sent = False
         unreachable_guard_used = False
+        # 协作式硬超时线（v21）：min(claim_timeout, claim 预算秒)。SIGALRM 只在
+        # 主线程生效（watchdog.DeadlineGuard.supported），parallel 子线程里静默
+        # 降级后卡死线程永远等不到 30 分钟硬杀——循环每轮开头自检墙钟补上这层
+        # 边界；轮间打断最坏延迟一次模型/工具调用的时长（各自有 120s 超时）。
+        try:
+            claim_budget = max(0.0, float(claim.budget_seconds or 0.0))
+        except (TypeError, ValueError):
+            claim_budget = 0.0
+        limits = [x for x in (self._claim_hard_limit, claim_budget) if x > 0]
+        claim_hard_seconds = min(limits) if limits else 0.0
         while True:
             # 推进心跳：每轮模型调用前刷新。卡在 provider.complete 或工具
             # fork 阻塞时停更，supervisor 据此发现"活着但不推进"的卡死。
             touch_progress()
+            if claim_hard_seconds and (self._clock() - started) > claim_hard_seconds:
+                print("[llm] collaborative claim deadline: {:.1f}s > {:.1f}s round={}".format(
+                    self._clock() - started, claim_hard_seconds, tool_rounds),
+                    file=sys.stderr, flush=True)
+                return self._failure(claim, "failed", OUTCOME_TIMEOUT, "claim_deadline",
+                                     started, tokens, skills_loaded, tool_calls, skills_indexed)
             provider = None  # 仅在本轮 complete 前赋值；异常时区分是否 Pro 回退
             thinking_used = 0  # 本轮思考预算；网关拒绝时粘滞关闭并重试
             try:

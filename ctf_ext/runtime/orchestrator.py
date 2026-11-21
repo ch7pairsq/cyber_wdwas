@@ -903,7 +903,16 @@ class Orchestrator:
                 self._metrics.incr("runtime.step_errors")
                 if consecutive_errors >= self._max_consecutive_errors:
                     self._board.append_event("run_aborted", "", {
-                        "reason": "consecutive_errors", "count": consecutive_errors})
+                        "reason": "consecutive_errors",
+                        "worker": "{}-{}".format(self._worker_name, idx + 1),
+                        "count": consecutive_errors,
+                        "isolated": self._parallel_agents > 1})
+                    if self._parallel_agents > 1:
+                        # v21 止损隔离：并行模式下单线程连续异常只退出自己，
+                        # 不 _stop.set() —— 否则一个线程遇到 arena 闪断 3 次
+                        # 会停掉所有并行线程，浪费剩余全部时间（19 题赛风险）。
+                        # 其他线程由各自的独立计数自行止损；主线程监控仍在。
+                        break
                     self._stop.set()
                 continue
             consecutive_errors = 0
@@ -957,6 +966,7 @@ class Orchestrator:
             grants = self._endgame
             factory.endgame = grants
         granted = False
+        blocked_cids = self._board.challenges_with_blocked_intents()  # v21 复活判定
         # tasks 元素是 ChallengeInput 对象（不可排序、不是 id），统一取 challenge_id。
         ids = sorted(getattr(t, "challenge_id", str(t)) for t in tasks)
         for cid in ids:
@@ -971,8 +981,13 @@ class Orchestrator:
                 # ready（非 stopped），planner 上限打满后无新意图也不满足
                 # 加时条件 → run 提前退出、整题零提交。放行"规划上限已打
                 # 满"的未解题（剩余时间富余时），授权一次终局加时重试。
-                if self._board.count_intents(cid) < self._planner.max_intents_per_challenge:
+                if cid not in blocked_cids \
+                        and self._board.count_intents(cid) < self._planner.max_intents_per_challenge:
                     continue  # 未耗尽预算且还有规划余量的题让 planner 正常接手
+                # v21：blocked 题（存在终态 FAILED intent）纳入授权——
+                # planner 对 blocked 不扩展、intents 又未打满，两边互相以为
+                # 对方会接手 → 永久據置死锁（19 题赛 3 个平台问题题就此
+                # 丢弃，剩余时间空转）。环境事后可能恢复，给一次重试机会。
             try:
                 self._board.add_intent(IntentDraft(
                     challenge_id=cid, strategy_key="misc.endgame.pass2",

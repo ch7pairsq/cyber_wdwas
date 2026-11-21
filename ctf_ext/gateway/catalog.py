@@ -173,12 +173,19 @@ def _schema_bytes() -> Dict[str, Any]:
 def _spec(name: str, description: str, command: str, builder, schema: Dict[str, Any],
           *, timeout: float = 30.0, max_output_bytes: int = 200_000,
           risk_level: str = "read", idempotent: bool = True,
-          stdin_argument: str = "", stdin_max_bytes: int = 0) -> ToolSpec:
-    """工具描述工厂：统一绑定只读风险级、原始证据策略与固定主命令。"""
+          stdin_argument: str = "", stdin_max_bytes: int = 0,
+          concurrency_limit: int = 1) -> ToolSpec:
+    """工具描述工厂：统一绑定只读风险级、原始证据策略与固定主命令。
+
+    concurrency_limit 默认 1（同一工具全局串行）；重负载多进程工具
+    （python_exec）可调高到 parallel 宽度，避免并行 worker 争抢时
+    TOOL_BUSY 立即拒绝烧掉整轮工具回合（v21）。
+    """
     return ToolSpec(
         name=name, version="debian-bookworm", description=description + DESCRIPTION_PREFIX,
         risk_level=risk_level, allowed_scope="challenge", timeout_seconds=timeout,
-        max_output_bytes=max_output_bytes, concurrency_limit=1, idempotent=idempotent,
+        max_output_bytes=max_output_bytes, concurrency_limit=max(1, int(concurrency_limit)),
+        idempotent=idempotent,
         evidence_policy="raw", command=command, input_schema=schema, argv_builder=builder,
         stdin_argument=stdin_argument, stdin_max_bytes=stdin_max_bytes,
     )
@@ -377,7 +384,12 @@ def default_specs() -> List[ToolSpec]:
         _spec("python_exec", "在工作区内执行一段 Python 解题代码（crypto 运算、编码链、自定义解析、隐写像素处理等），代码经 stdin 提交；print 输出与 traceback 都会回传。",
               "python3", _python_exec_argv, _PYTHON_EXEC_SCHEMA,
               risk_level="execute", idempotent=False, timeout=120.0,
-              max_output_bytes=130_000, stdin_argument="code", stdin_max_bytes=20000),
+              max_output_bytes=130_000, stdin_argument="code", stdin_max_bytes=20000,
+              # v21：默认每工具 1 并发，parallel=3 时三个 worker 争抢 python_exec
+              # 未抢到的立即拿 TOOL_BUSY，模型每轮重试烧掉一整个工具轮次
+              #（19 题赛 b49c4e1fd53f partial：提取脚本从未成功执行）。提到 3
+              # 让每个并行 worker 各占一槽；子进程本身多进程，4 核 6GiB 扛得住。
+              concurrency_limit=3),
         _spec("evidence_digest", "按证据 id 一次性汇总多个证据文件原文，供跨文件证据关联与矛盾排查（只读）。连续卡住或线索多时优先使用。",
               "python3", _evidence_digest_argv, _EVIDENCE_DIGEST_SCHEMA,
               risk_level="read", timeout=30.0, max_output_bytes=130_000),

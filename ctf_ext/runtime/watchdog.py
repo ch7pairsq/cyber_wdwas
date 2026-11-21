@@ -23,6 +23,8 @@ class ClaimTimeout(BaseException):
 class DeadlineGuard:
     """主线程 SIGALRM 超时；非主线程或平台不支持时自动降级为不拦截。"""
 
+    _degrade_logged = False  # 降级只告警一次，避免每个 attempt 刷屏
+
     def __init__(self, seconds: float):
         """seconds<=0 表示已到期，进入即抛 ClaimTimeout。"""
         self.seconds = max(0.0, float(seconds))
@@ -42,6 +44,15 @@ class DeadlineGuard:
         if self.seconds <= 0:
             raise ClaimTimeout("deadline already expired")
         if not self.supported():
+            if not DeadlineGuard._degrade_logged:
+                DeadlineGuard._degrade_logged = True
+                # 静默降级意味着 claim_timeout 完全失效（2026-11-21 第 19 题正式
+                # 赛 35 分钟空转的机制链之一）；v21 已由 worker 协作式超时兑底，
+                # 这行日志用于确认运行时降级确实发生。
+                import sys
+                print("[watchdog] DeadlineGuard degraded: SIGALRM unavailable "
+                      "in this thread; claim_timeout relies on worker "
+                      "collaborative check", file=sys.stderr, flush=True)
             return self
         self._old_handler = signal.getsignal(signal.SIGALRM)
         self._old_timer = signal.getitimer(signal.ITIMER_REAL)
