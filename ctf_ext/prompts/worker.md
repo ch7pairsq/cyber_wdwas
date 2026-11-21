@@ -15,6 +15,9 @@
 - summary：不超过 5 条高信号结论。
 - facts：[{statement, confidence, evidence_ids}]，evidence_ids 必须是证据库已注册的 sha256。
 - attempt：{strategy_key, preconditions, actions, outcome, failure_reason, ruled_out, next_best_action}。
+  类型约束：preconditions/actions/ruled_out 必须是 JSON 字符串数组（没有内容就用 []，不要写成字符串）；
+  strategy_key 必须是恰好三段 domain.technique.variant（如 web.request.traversal、misc.hash.crack）。
+
 - candidate_answer：仅在有证据支撑时非空。
 - resource_usage：{wall_seconds, model_tokens, tool_calls}。
 

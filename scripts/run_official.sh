@@ -24,6 +24,9 @@ mkdir -p "$RUN_DIR"
 cd "$ROOT"
 
 echo "[run_official] total_wall=${TOTAL_SECONDS}s run_dir=${RUN_DIR}"
+# 版本横幅：四场正式赛无法从日志判断镜像版本（system_chars 相同），
+# 每次交付前更新 VERSION 与镜像 tag 对应，日志首行即可归因。
+echo "[run_official] image_version=$(cat "$ROOT/VERSION" 2>/dev/null || echo unknown)"
 
 exec python3 "$ROOT/scripts/supervise.py" \
   --heartbeat "$RUN_DIR/agent.heartbeat" \
