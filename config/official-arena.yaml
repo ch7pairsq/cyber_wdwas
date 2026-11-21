@@ -24,13 +24,18 @@ concurrency:
   executor: serial
 
 budget:
-  # 2026-11-21 与 arena.yaml 同步放宽（600k/1500s 旧值的教训：正式赛
-  # static_file_server 三次尝试 46 步即耗尽 600k）。正式入口
-  # scripts/run_official.sh 固定用本文件，此处不同步则 v8 校准永不生效。
-  # 取消单题短窗口限制，只保留防死循环护栏（stall/repeat/步数止损）；
-  # 单题时限接近运行总时长，由 absolute_deadline 与 supervisor 墙钟兜底。
-  per_challenge_seconds: 12000
-  claim_timeout_seconds: 3600
+  # 19 题 / 4h（有效 13800s）× 3 并行通道 = 41400 题·秒 → 每题平均 2180s。
+  # 首窗口 4500s ≈ 2 倍均值：一次认真解题尝试 + 若干 followup 意图；卡死
+  # 的题 75 分钟释放通道换吞吐，endgame 复活兜底（授权后 token/工具 ×3、
+  # 有效期延到运行截止，已验证 stopped 复位 + 规划打满放行两条路径）。
+  # 11-21 曾放宽到 12000（600k/1500s 旧值教训），但那个教训的真实根因是
+  # stopped 题无复活通道（v12 已修），并非时间盒本身——收紧后节奏变为
+  # "首轮先易后难 → 中段攻坚新题 → 末段 endgame 复活跑到底"。
+  per_challenge_seconds: 4500
+  # 单意图 30 分钟硬杀线（DeadlineGuard）：正常 attempt（max_tool_rounds=40）
+  # 自然收尾在 10-20 分钟级，此线只防真卡死；触发后是可重试失败，同题
+  # 续跑状态保留。旧值 3600 会让一个卡死意图吃掉大半个首窗口。
+  claim_timeout_seconds: 1800
   max_model_tokens_per_intent: 5000000
   max_tool_calls_per_intent: 1000
   # 运行级全局 token 上限：0 = 不设（用户 2026-11-21 决定，300 元额度

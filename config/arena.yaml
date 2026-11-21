@@ -17,8 +17,13 @@ budget:
   # 2026-11-21 按“用足 300 元 API 预算”放宽：取消单题短窗口限制，
   # 只保留全局 token 保险丝与防死循环护栏（stall/repeat/步数止损）。
   # 单题时限接近运行总时长（absolute_deadline 兜底）。
-  per_challenge_seconds: 12000
-  claim_timeout_seconds: 3600
+  # 2026-11-22 与 official-arena.yaml 同步（19 题/4h 口径：首窗口 4500s
+  # ≈ 2 倍均值，卡题早释放 + endgame 复活；单意图 30 分钟硬杀线）。
+  # 本文件当前无代码引用（正式入口固定 official-arena.yaml），同步只为
+  # 防止未来以本文件起跑时预算口径漂移（v8 教训：双文件不同步 = 校准
+  # 永不生效）。
+  per_challenge_seconds: 4500
+  claim_timeout_seconds: 1800
   # 单题累计 token 上限：600k → 5M（原正式赛 static_file_server
   # 三次尝试 46 步即耗尽 600k 的直接原因）
   max_model_tokens_per_intent: 5000000

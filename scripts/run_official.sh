@@ -9,8 +9,11 @@
 #   时间；重启后 Orchestrator 从同一 DB 断点恢复（session_resumed）。
 #
 # 用法： run_official.sh [总秒数]     # 默认 13800
-# 环境要求：BAIZHI_API_KEY / ARENA_SOLVER_TOKEN / ARENA_PROXY /
-#           ARENA_NETWORK_CIDR / ARENA_BASE_URL 由 harness 注入。
+# 环境要求：BAIZHI_API_KEY / ARENA_SOLVER_TOKEN 由 harness 注入。
+# 2026-11-21 正式赛实测契约：ARENA_BASE_URL 与 ARENA_NETWORK_CIDR 平台
+# 都不注入——base 走 BENCHMARK_BASE_URL/k8s service 发现，CIDR 由装配层
+# 从 official-arena.yaml 的 authorized_arena_targets 注入（v15 修复），
+# ARENA_PROXY 隧道由 k8s service 端口自动导出（setup_platform_network_env）。
 set -euo pipefail
 
 TOTAL_SECONDS="${1:-13800}"
@@ -36,6 +39,8 @@ exec python3 "$ROOT/scripts/supervise.py" \
     --evidence "$RUN_DIR/evidence" \
     --heartbeat-file "$RUN_DIR/agent.heartbeat" \
     --report "$RUN_DIR/report.json"
-# claim 超时不传 CLI：official-arena.yaml budget.claim_timeout_seconds=3600 是
+# claim 超时不传 CLI：official-arena.yaml budget.claim_timeout_seconds=1800 是
 # 唯一事实源（v11 硬编码 --claim-timeout 1200 与配置打架，[run] 打印 1200、
-# [orch] 热配置覆盖成 3600，排查时两处对不上）。
+# [orch] 热配置覆盖成 3600，排查时两处对不上；2026-11-22 调 1800 = 单意图
+# 30 分钟硬杀线，正常 attempt（max_tool_rounds=40）10-20 分钟级自然收尾，
+# 极端慢 attempt 被截断后走可重试失败，同题续跑状态与证据保留）。
