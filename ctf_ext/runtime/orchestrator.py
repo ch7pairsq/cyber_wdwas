@@ -55,7 +55,7 @@ class Orchestrator:
                  retry_backoff_seconds: float = 0.0, poll_seconds: float = 0.1,
                  planner=None, max_intents_per_challenge: int = 4,
                  parallel_agents: int = 1, endgame_token_bonus: float = 0.0,
-                 endgame_min_seconds: float = 300.0):
+                 endgame_min_seconds: float = 300.0, best_effort_submit: bool = False):
         """编排器装配：持有黑板/调度器/Worker/Harness 及门控与提交网关。
 
         parallel_agents 决定 step() 循环线程数（题内互斥由调度器保证）；
@@ -101,6 +101,13 @@ class Orchestrator:
         # 平台 REJECTED 后的重试序号：strategy_key 唯一化（misc.flagretry.N），
         # 内存态即可——重启后新回执从 1 重新编号，attempt_key 去重兜底。
         self._flag_retry_seq: Dict[str, int] = {}
+        # best-effort 提交（official-arena.yaml submission.best_effort_on_reject）：
+        # gate 未确认（rejected/pending）但格式合法的候选仍入队，由平台真值仲裁。
+        # 依据：正式平台错提交无计分惩罚（correct=False awarded=0），而 gate
+        # 拒绝 ≠ 平台拒绝——v12 第 2 题 gate 四次拒绝零提交零得分。gate 决策
+        # 行仍诚实落库（record 照记 rejected/pending），去重由网关幂等键兜底：
+        # 同题同答不重发，垃圾候选上界 = 单题意图数。
+        self._best_effort_submit = bool(best_effort_submit)
         factory = getattr(worker, "_control_factory", None)
         if callable(factory):
             factory.endgame = self._endgame
@@ -452,6 +459,20 @@ class Orchestrator:
                 result.failure_reason = "gate_timeout"
                 result.candidate_answer = None
                 decision = None
+                print("[gate] ch={} intent={} decision=timeout reason=gate budget exhausted".format(
+                    claim.challenge_id, claim.intent_id), file=sys.stderr, flush=True)
+        # [gate] 观测行：gate 判定完全在 DB 里，stderr 不可见——2026-11-21
+        # 正式赛第 2 题 gate 连拒四次却无任何诊断线索。flag 原文可记日志
+        # （凭据才脱敏）。无候选/无门控也要打印，凑齐完整判定链。
+        if decision is not None:
+            print("[gate] ch={} intent={} decision={} level={} reason={} answer={} best_effort={}".format(
+                claim.challenge_id, claim.intent_id, decision.status, decision.level,
+                decision.reason or "-", decision.answer or "-", self._best_effort_submit),
+                file=sys.stderr, flush=True)
+        elif result.candidate_answer:
+            print("[gate] ch={} intent={} decision=none reason=gate or gateway not configured answer={}".format(
+                claim.challenge_id, claim.intent_id, result.candidate_answer),
+                file=sys.stderr, flush=True)
         if decision is not None and decision.status == "confirmed":
             # Gate 已确认时 Intent 必须终止；否则 Worker 写 partial 会让同一候选
             # 在租约释放后再次被领取，重复消耗预算。
@@ -464,11 +485,19 @@ class Orchestrator:
         submission_keys = []
 
         def persist_gate(db):
-            """事务钩子：Gate 决策落库；确认态题同步入提交 Outbox（同事务原子）。"""
+            """事务钩子：Gate 决策落库；确认态题同步入提交 Outbox（同事务原子）。
+
+            best_effort 开启时，rejected/pending 决策也入队（gateway.enqueue
+            校验格式与 gate 行存在性，ValueError 视为不可提交，不影响落库）。"""
             if decision is not None:
                 self._gate.record(db, decision)
                 if decision.status == "confirmed":
                     submission_keys.append(self._gateway.enqueue(db, decision))
+                elif self._best_effort_submit and decision.status in ("rejected", "pending"):
+                    try:
+                        submission_keys.append(self._gateway.enqueue(db, decision, best_effort=True))
+                    except ValueError:
+                        self._metrics.incr("best_effort.format_rejected")
 
         try:
             receipt = self._board.write_result(result, key, transaction_hook=persist_gate)
@@ -935,7 +964,12 @@ class Orchestrator:
             except Exception:
                 continue
             if st.get("status") != "stopped":
-                continue  # 未耗尽预算的题不需要加时
+                # v12 教训（2026-11-21 正式赛第 2 题）：gate 拒绝的题会话是
+                # ready（非 stopped），planner 上限打满后无新意图也不满足
+                # 加时条件 → run 提前退出、整题零提交。放行"规划上限已打
+                # 满"的未解题（剩余时间富余时），授权一次终局加时重试。
+                if self._board.count_intents(cid) < self._planner.max_intents_per_challenge:
+                    continue  # 未耗尽预算且还有规划余量的题让 planner 正常接手
             try:
                 self._board.add_intent(IntentDraft(
                     challenge_id=cid, strategy_key="misc.endgame.pass2",

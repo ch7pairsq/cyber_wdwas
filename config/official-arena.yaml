@@ -49,6 +49,22 @@ download:
   max_single_bytes: 20971520
   max_total_bytes: 104857600
 
+runtime:
+  # v12 教训（2026-11-21 正式赛第 2 题）：默认 4 个意图（1 triage + 3
+  # followup）全被 gate 拒绝后无新意图，run 提前 idle 退出、整题零提交。
+  # 单题意图上限提高到 12：短 followup（2-3 轮）成本低，配合 best-effort
+  # 提交 + REJECTED 重开形成平台反馈循环；token/时间预算墙仍兑底。
+  max_intents_per_challenge: 12
+
+submission:
+  # best-effort 提交：gate 未确认（rejected/pending）但格式合法的候选仍
+  # 入队，平台真值仲裁。依据：官方平台错提交无计分惩罚（correct=False
+  # awarded=0，tiebreaker 只统计得分事件），而 gate 拒绝 ≠ 平台拒绝——
+  # v12 第 2 题 gate 四次拒绝导致零提交零得分。gateway 同题同答幂等去重
+  # 防重发，垃圾候选上界 = 单题意图数。practice 配置不开（错提交在那里
+  # 有语义成本）。
+  best_effort_on_reject: true
+
 policy:
   authorized_scope: []
   web_search: false

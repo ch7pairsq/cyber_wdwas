@@ -76,10 +76,10 @@ class Adapter:
         return SubmitReceipt('ACCEPTED', 'queried-receipt')
 
 
-def enqueue(store, gateway, decision):
+def enqueue(store, gateway, decision, best_effort=False):
     with store.board._write() as db:
         FlagGate(store).record(db, decision)
-        return gateway.enqueue(db, decision)
+        return gateway.enqueue(db, decision, best_effort=best_effort)
 
 
 def expect(error, callback):

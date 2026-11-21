@@ -13,7 +13,7 @@ import queue
 import threading
 import time
 
-from .flag_gate import FlagGate, normalized_flag
+from .flag_gate import FLAG_PATTERN, FlagGate, normalized_flag
 from .schema import Submission, SubmitReceipt
 
 
@@ -37,13 +37,27 @@ class SubmitGateway:
         """幂等键：sha256(challenge_id|normalized_flag)，同题同答同键。"""
         return 'sub-' + hashlib.sha256((challenge_id + '|' + normalized_flag(answer)).encode()).hexdigest()
 
-    def enqueue(self, db, decision):
-        """与结果、校验记录在同一事务调用；不执行任何网络操作。"""
-        if decision.status != 'confirmed' or not all(decision.gates.get(k) is True for k in ('grounding', 'negation', 'interrogation')):
+    def enqueue(self, db, decision, best_effort=False):
+        """与结果、校验记录在同一事务调用；不执行任何网络操作。
+
+        best_effort=True（official 配置门控，2026-11-21 正式赛第 2 题教训：
+        gate 拒绝 ≠ 平台拒绝——v12 四次尝试全部 gate rejected，零提交零得分）：
+        门控未确认的候选仍入队，由平台真值仲裁。此时不要求三门全过，
+        但候选必须仍是合法 FLAG 格式（格式门替代三门）；gate_decisions
+        行必须存在（record 与 enqueue 同事务，保证可追溯）。同答案去重
+        与既有状态分级逻辑完全复用。
+        """
+        if best_effort:
+            if not isinstance(decision.answer, str) or not FLAG_PATTERN.fullmatch(decision.answer):
+                raise ValueError('best-effort candidate must be a valid flag format')
+        elif decision.status != 'confirmed' or not all(decision.gates.get(k) is True for k in ('grounding', 'negation', 'interrogation')):
             raise ValueError('unconfirmed candidate cannot enter outbox')
-        gate = db.execute('SELECT payload,status FROM gate_decisions WHERE id=?', (decision.id,)).fetchone()
-        if not gate or gate['status'] != 'confirmed' or json.loads(gate['payload'])['declaration_hash'] != decision.declaration_hash:
+        gate = db.execute('SELECT payload,status,challenge_id FROM gate_decisions WHERE id=?', (decision.id,)).fetchone()
+        if not gate or gate['challenge_id'] != decision.challenge_id:
             raise ValueError('recorded gate decision required')
+        if not best_effort:
+            if gate['status'] != 'confirmed' or json.loads(gate['payload'])['declaration_hash'] != decision.declaration_hash:
+                raise ValueError('recorded gate decision required')
         key = self.key(decision.challenge_id, decision.answer)
         rows = db.execute(
             'SELECT idempotency_key,answer,status FROM submissions WHERE challenge_id=?'
@@ -98,9 +112,18 @@ class SubmitGateway:
             self._thread.start()
 
     def _proof_valid(self, row):
+        """派发前反篡改校验：confirmed 行走完整三查；best-effort 行（关联
+        rejected/pending 决策，只能经 best_effort 入队产生）只要求答案仍
+        是合法 FLAG 格式——拒绝态决策没有 declaration_hash，无法做声明
+        反篡改，平台真值仲裁兜底。"""
         gate = self.db.execute('SELECT * FROM gate_decisions WHERE id=?', (row['gate_id'],)).fetchone()
-        if not gate or gate['status'] != 'confirmed' or gate['challenge_id'] != row['challenge_id']:
+        if not gate or gate['challenge_id'] != row['challenge_id']:
             return False
+        if gate['status'] != 'confirmed':
+            try:
+                return bool(isinstance(row['answer'], str) and FLAG_PATTERN.fullmatch(row['answer']))
+            except (TypeError, ValueError):
+                return False
         data = json.loads(gate['payload'])
         if not all(data.get('gates', {}).get(k) is True for k in ('grounding', 'negation', 'interrogation')):
             return False

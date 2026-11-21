@@ -238,3 +238,74 @@ def test_result_and_outbox_commit_atomically_on_failure():
         assert store.db.execute('SELECT COUNT(*) FROM gate_decisions').fetchone()[0] == 0
         assert store.db.execute('SELECT status FROM intents_ext').fetchone()[0] == 'RUNNING'
         gateway.close()
+
+
+def test_best_effort_enqueues_and_dispatches_rejected_decision():
+    # 2026-11-21 正式赛第 2 题教训：gate 拒绝 ≠ 平台拒绝——v12 四次尝试
+    # 全部 gate rejected，零提交零得分。best-effort（official 配置门控）
+    # 下，未确认但格式合法的候选入队并由平台真值仲裁。
+    with fixture() as store:
+        adapter = Adapter()
+        gateway = SubmitGateway(store, adapter)
+        try:
+            decision = GateDecision('c1', FLAG, 'rejected', 'L4', 'missing declaration or grounding')
+            key = enqueue(store, gateway, decision, best_effort=True)
+            gateway.flush(5)
+            assert len(adapter.calls) == 1 and adapter.calls[0].answer == FLAG
+            assert store.db.execute('SELECT status FROM submissions').fetchone()[0] == 'ACCEPTED'
+            # 决策行诚实保留 rejected 状态（审计/指标不撒谎）
+            assert store.db.execute('SELECT status FROM gate_decisions').fetchone()[0] == 'rejected'
+        finally:
+            gateway.close()
+
+
+def test_best_effort_rejects_invalid_or_unrecorded_candidate():
+    with fixture() as store:
+        gateway = SubmitGateway(store, Adapter())
+        # 格式非法：best-effort 只放行合法 FLAG 格式（格式门替代三门）
+        bad = GateDecision('c1', 'flag{bad format with spaces}', 'rejected', 'L4', 'missing declaration')
+        expect(ValueError, lambda: enqueue(store, gateway, bad, best_effort=True))
+        # 未落库的决策：必须先 record（同事务可追溯）
+        ghost = GateDecision('c1', FLAG, 'rejected', 'L4', 'missing declaration')
+        with store.board._write() as db:
+            expect(ValueError, lambda: gateway.enqueue(db, ghost, best_effort=True))
+        assert store.db.execute('SELECT COUNT(*) FROM submissions').fetchone()[0] == 0
+
+
+def test_best_effort_dedups_same_answer_allows_new_candidate():
+    with fixture() as store:
+        adapter = Adapter(SubmitReceipt('REJECTED', detail='flag mismatch'))
+        gateway = SubmitGateway(store, adapter)
+        try:
+            first = enqueue(store, gateway,
+                            GateDecision('c1', FLAG, 'rejected', 'L4', 'missing declaration'),
+                            best_effort=True)
+            assert enqueue(store, gateway,
+                           GateDecision('c1', FLAG, 'rejected', 'L4', 'missing declaration'),
+                           best_effort=True) == first
+            gateway.flush(5)
+            assert len(adapter.calls) == 1
+            # 平台 REJECTED 后不同答案的新候选放行（与 confirmed 路径同语义）
+            other = 'flag{retry_be9d21}'
+            assert enqueue(store, gateway,
+                           GateDecision('c1', other, 'rejected', 'L4', 'missing declaration'),
+                           best_effort=True) != first
+            gateway.flush(5)
+            assert len(adapter.calls) == 2 and adapter.calls[1].answer == other
+        finally:
+            gateway.close()
+
+
+def test_best_effort_dispatch_survives_proof_check_without_declaration():
+    # 拒绝态决策没有 declaration_hash（L4 拒绝在声明比对前返回），派发前的
+    # _proof_valid 对 best-effort 行只要求答案格式合法，不误判 BLOCKED。
+    with fixture() as store:
+        adapter = Adapter()
+        gateway = SubmitGateway(store, adapter)
+        try:
+            decision = GateDecision('c1', FLAG, 'pending', 'L2', 'reviewer unavailable')
+            enqueue(store, gateway, decision, best_effort=True)
+            gateway.flush(5)
+            assert len(adapter.calls) == 1
+        finally:
+            gateway.close()

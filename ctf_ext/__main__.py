@@ -310,6 +310,9 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
                                       or budget.get("per_intent_seconds") or 90)
     # 确定性兜底 Worker 没有新的探索信息，默认不做后续规划；只有 LLM 模式展开 Planner。
     planner_limit = int(runtime_cfg.get("max_intents_per_challenge") or (4 if mode == "llm" else 1))
+    # best-effort 提交：gate 拒绝/挂起但格式合法的候选仍入队，平台真值仲裁
+    # （仅 official 配置开启；错提交无计分惩罚，gate 拒绝 ≠ 平台拒绝）。
+    best_effort_submit = bool((cfg.get("submission") or {}).get("best_effort_on_reject") or False)
     orch = Orchestrator(harness, board, scheduler, worker, evidence=evidence,
                         hot_config=hot, policy_engine=policy, db=conn,
                         state_store=state, flag_gate=gate, gateway=gateway,
@@ -319,6 +322,7 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
                         retry_backoff_seconds=float(runtime_cfg.get("retry_backoff_seconds") or 0),
                         poll_seconds=float(runtime_cfg.get("intent_poll_seconds") or 0.1),
                         max_intents_per_challenge=planner_limit,
+                        best_effort_submit=best_effort_submit,
                         parallel_agents=int((cfg.get("controller") or {}).get("parallel_agents") or 1),
                         endgame_token_bonus=float(budget.get("endgame_token_bonus") or 0),
                         reviewer_factory=(lambda cid: ProviderReviewer(pro_provider or provider, control_factory(cid))) if mode == "llm" else None)
@@ -328,13 +332,13 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
         scheduler.set_limits(1, 1)
     # 一次打印全部生效启动参数（脱敏：无凭据），平台日志即完整排查材料。
     print("[run] config: protocol={} mode={} max_workers={} "
-          "parallel={} claim_timeout={}s backoff={}s poll={}s intents/chal={}".format(
+          "parallel={} claim_timeout={}s backoff={}s poll={}s intents/chal={} best_effort={}".format(
               protocol, mode, int(conc.get("max_workers") or 1),
               int((cfg.get("controller") or {}).get("parallel_agents") or 1),
               claim_timeout_seconds,
               float(runtime_cfg.get("retry_backoff_seconds") or 0),
               float(runtime_cfg.get("intent_poll_seconds") or 0.1),
-              planner_limit), file=sys.stderr, flush=True)
+              planner_limit, best_effort_submit), file=sys.stderr, flush=True)
     print("[run] model: provider={} model={} pro_model={} key_env={} "
           "max_tokens={} request_timeout={}s tools={} tool_rounds={} skills_mode={}".format(
               model_cfg.get("provider"), pinned_model,
