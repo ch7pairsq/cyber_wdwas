@@ -22,7 +22,9 @@ def test_timeout_is_bounded_and_does_not_abort_other_work():
         orch._scheduler._retry_backoff = 0.2
         start = time.monotonic()
         out = orch.run(0.6)
-        assert time.monotonic() - start < 3
+        # 容差 5s：镜像内全套跑时负载毛刺曾让 3s 断言间歇失败（v20）；
+        # 意图是"timeout 有界不卡死"，不是精确计时。
+        assert time.monotonic() - start < 5
         assert out["solved"] == []
         assert out["execution"]["mode"] == "serial" and out["execution"]["effective_parallel"] == 1
         assert out["execution"]["retry_backoff_seconds"] == 0.2
