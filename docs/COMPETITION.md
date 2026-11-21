@@ -286,3 +286,29 @@ docker run --rm --network none --read-only --cap-drop ALL \
 
 - 真实凭据与平台的端到端联调（BAIZHI_API_KEY 真实调用、Arena 任务/附件/提交回执）未执行，需要明确授权后在正式平台进行。
 - 镜像交付方式未定：仓库推送（`portus.in.chaitin.net`，v7 已验证可用：命名空间 `yuqiao.zhang/cyber-wdwas`、`scripts/push_tar.py` 推送、`:dev` tag）或 `docker save` 文件上传（需平台通道与大小限制）。最终比赛交付 tag 待平台确认后推送。
+
+## 2026-11-22 测试体系升级：接线/回放/减法/守门（v15 后补强）
+
+正式赛 2 题复盘暴露"8 题自测拦不住线上事故"的结构性原因：自建测试
+验证自建假设，sim8 只测解题编排语义，靶机交互路径从未通电。四层补强：
+
+1. **接线测试**（tests/unit/test_wiring.py）：arena 协议 build_runtime
+   装配断言（authorized_arena_targets → ARENA_NETWORK_CIDR 注入、
+   harness/worker 类型）；平台材料（start_info/arena_help）进模型首条
+   消息的可见面断言。
+2. **契约回放库**（tests/fixtures/golden/ + tests/framework_golden.py）：
+   平台真实响应形状固化（submit_correct/submit_wrong/start_with_addr/
+   start_no_addr/platform_env_snapshot），每条标注 source 与 confidence
+   （observed/shape-inferred）。stub 回放真形状而非理想化假设。真环境
+   观测到新字节后回填本目录。
+3. **减法环境测试**：测试环境变量集合 ⊆ 生产快照
+   （platform_env_snapshot.json）；arena_http 在 CIDR unset 时拒绝信息
+   必须明确（"ARENA_NETWORK_CIDR is required"）。
+4. **结论守门**（llm_worker + tests/unit/test_claim_guard.py）：远程题
+   （有 start_info/help/运行环境 note）工具循环 REMOTE_NUDGE_AT=5 轮
+   0 次 arena_http → 注入 REMOTE_NUDGE；0 次 arena_http 却声称
+   "靶机未启动/不可达" → UNREACHABLE_GUARD 拒收重写一次（不消耗契约
+   重试预算），二次放行留痕。有 arena_http 证据的不可达结论不拦。
+
+验证：421 passed / 1 skipped（+7：守门 4 + 接线 3 + golden 接入改写
+stub）。无真环境（用户确认），比赛协议 v2 的开局探针阶段为下一优先级。

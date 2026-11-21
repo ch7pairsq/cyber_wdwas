@@ -1,0 +1,20 @@
+{
+  "source": "2026-11-21 正式赛平台环境快照（stdout [env] 行）：ARENA_BASE_URL/ARENA_NETWORK_CIDR 平台不注入；NO_PROXY 只豁免 model-proxy 短名；靶机只经 model-proxy 的 socks/http-proxy 隧道端口可达。减法环境测试用：测试环境变量集合必须 ⊆ 此快照。",
+  "protocol": "v1-arena",
+  "env_subset_of_production": {
+    "ARENA_BASE_URL": null,
+    "ARENA_SOLVER_TOKEN": null,
+    "ARENA_PROXY": null,
+    "ARENA_NETWORK_CIDR": null,
+    "ALL_PROXY": null,
+    "HTTP_PROXY": null,
+    "HTTPS_PROXY": null,
+    "NO_PROXY": "model-proxy,.svc,.cluster.local"
+  },
+  "k8s_service_env_present_in_production": [
+    "MODEL_PROXY_SERVICE_HOST",
+    "MODEL_PROXY_SERVICE_PORT_CHALLENGES",
+    "MODEL_PROXY_SERVICE_PORT_SOCKS",
+    "MODEL_PROXY_SERVICE_PORT_HTTP_PROXY"
+  ]
+}

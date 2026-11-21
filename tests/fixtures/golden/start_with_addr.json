@@ -1,0 +1,9 @@
+{
+  "source": "2026-11-21 正式赛 static_file_server start 响应（569B）仅观测到大小，字段未确认；此处为字段推断形状——container_addr 字段名按平台文档/常规命名假设。每次真环境观测后应回填真实字节。",
+  "protocol": "v1-arena",
+  "confidence": "shape-inferred",
+  "response": {
+    "started": true,
+    "container_addr": "10.201.0.201:3000"
+  }
+}

@@ -10,6 +10,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
+from tests.framework_golden import golden_response
 from ctf_ext.harness.arena import ArenaHarnessAdapter, ArenaProtocolError
 from ctf_ext.harness.schema import Submission, parse_challenge
 
@@ -102,16 +103,13 @@ class _StubArena(BaseHTTPRequestHandler):
                     return self._json({"status": "ACCEPTED"})
                 return self._json({"status": "REJECTED", "detail": "flag mismatch"})
             if payload.get("flag") == "flag{arena_stub_1}":
-                # 2026-11-21 正式赛实测回执（143B/145B）：布尔 correct + 计分字段，
-                # 不携带 status/result 字符串协议。
-                return self._json({"correct": True, "awarded": 100,
-                                   "cumulative_score": 100, "correct_flag_count": 1,
-                                   "total_flag_count": 1, "matched_flag_index": 0,
-                                   "is_completed": True})
-            return self._json({"correct": False, "awarded": 0,
-                               "cumulative_score": 100, "correct_flag_count": 0,
-                               "total_flag_count": 1, "matched_flag_index": None,
-                               "is_completed": False})
+                # 2026-11-21 正式赛实测回执形状（fixtures/golden）：布尔 correct
+                # + 计分字段；数值按 stub 题分（100）调整。
+                receipt = dict(golden_response("submit_correct"),
+                               awarded=100, cumulative_score=100)
+                return self._json(receipt)
+            return self._json(dict(golden_response("submit_wrong"),
+                                   cumulative_score=100))
         if self.path.startswith("/openapi/v1/challenges/finish"):
             _StubArena.finished.append(payload)
             return self._json({"finished": True})
@@ -126,7 +124,7 @@ def arena_url():
     _StubArena.extra_challenges = False
     _StubArena.help_failures_remaining = 0
     _StubArena.legacy_submit = set()
-    _StubArena.start_payload = {"started": True}
+    _StubArena.start_payload = golden_response("start_no_addr")
     server = HTTPServer(("127.0.0.1", 0), _StubArena)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -389,7 +387,7 @@ def test_env_note_guides_arena_http_with_container_addr(arena_url):
     """正式赛教训（2026-11-21）：模型不知道靶机访问约定，40 轮只用 python_exec。
     env_note 必须把 arena_http 访问方式写进模型唯一可读面。"""
     import os
-    _StubArena.start_payload = {"started": True, "container_addr": "10.201.0.201:3000"}
+    _StubArena.start_payload = golden_response("start_with_addr")
     old = os.environ.get("ARENA_NETWORK_CIDR")
     os.environ["ARENA_NETWORK_CIDR"] = "10.201.0.0/16"
     try:
@@ -413,7 +411,7 @@ def test_env_note_without_container_addr_warns_model(arena_url):
     描述必须显式告知模型缺地址 + 给出推导与工具路径，而不是让模型
     自己得出"靶机未启动"的错误结论。"""
     import os
-    _StubArena.start_payload = {"started": True}  # 无 container_addr
+    _StubArena.start_payload = golden_response("start_no_addr")
     old = os.environ.get("ARENA_NETWORK_CIDR")
     try:
         os.environ.pop("ARENA_NETWORK_CIDR", None)
@@ -436,7 +434,8 @@ def test_start_diag_prints_container_addr(arena_url, capsys):
     import sys
     from contextlib import redirect_stderr
     import io
-    _StubArena.start_payload = {"started": True, "container_addr": "10.201.0.9:80"}
+    _StubArena.start_payload = dict(golden_response("start_with_addr"),
+                                    container_addr="10.201.0.9:80")
     ad = _adapter(arena_url, env_policy="on_demand")
     ad.startup()
     buf = io.StringIO()
@@ -470,7 +469,7 @@ def test_ensure_environment_refreshes_note_after_start_returns_addr(arena_url):
     靶机地址"note，ensure_environment 幂等 early return 导致 start 真拿到的
     container_addr 永远进不了模型描述。必须刷新为最新地址。"""
     import os
-    _StubArena.start_payload = {"started": True, "container_addr": "10.201.0.201:3000"}
+    _StubArena.start_payload = golden_response("start_with_addr")
     old = os.environ.get("ARENA_NETWORK_CIDR")
     os.environ["ARENA_NETWORK_CIDR"] = "10.201.0.0/16"
     try:

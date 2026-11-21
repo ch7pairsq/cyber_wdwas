@@ -1,0 +1,8 @@
+{
+  "source": "2026-11-20/21 平台实测：start 响应可能不携带 container_addr（静态文件题疑似形态）。agent 必须以\"平台未返回靶机地址\"提示模型，不得误报已启动。",
+  "protocol": "v1-arena",
+  "confidence": "shape-observed",
+  "response": {
+    "started": true
+  }
+}

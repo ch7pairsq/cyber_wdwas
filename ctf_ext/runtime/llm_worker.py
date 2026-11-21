@@ -40,6 +40,26 @@ TOOL_ROUNDS_EXHAUSTED = ("工具轮次已用尽。忽略本次工具调用请求
                          "输出附录 B.2 的最终 JSON 对象，不再调用任何工具；"
                          "candidate_answer 仅在有 evidence_id 支撑且形如 flag{...} 时非空，"
                          "否则置 null。")
+# 远程题主动提示（结论守门第一道）：有靶机信息但工具循环前 N 轮从未调用
+# arena_http 时注入（限 1 次）。正式赛教训：模型 40 轮只用 python_exec，
+# 网络探测失败后自行得出"靶机未启动"错误结论。
+REMOTE_NUDGE_AT = 5
+REMOTE_NUDGE = ("本题需要访问远程靶机：靶机只经平台隧道可达，python 直连与通用 HTTP 代理"
+                "都不可靠，探测失败不代表靶机未启动。请改用 arena_http 工具实际请求"
+                "题目服务地址（见题目描述与 arena_help），基于工具返回作答。")
+# 不可达结论守卫（第二道）：远程题从未调用 arena_http 却在总结里声称
+# "靶机未启动/不可达"类结论时拒绝接收，要求先取得工具证据再下结论。
+# 限 1 次：二次仍坚持则放行（诚实原则——不无限阻塞，但日志留痕）。
+UNREACHABLE_GUARD = ("你没有调用过 arena_http 工具，\"靶机未启动/不可达\"的结论没有"
+                     "证据支撑：靶机只经平台隧道可达，python 直连/通用代理的探测失败"
+                     "不能作为依据。请改用 arena_http 实际请求题目服务后再给出结论；"
+                     "确实无法访问时，结论必须引用 arena_http 返回的具体 DENY/超时信息。")
+# 判定"不可达类"结论的关键词（中英，覆盖模型常见措辞）。
+UNREACHABLE_MARKERS = (
+    "未启动", "没有启动", "未能启动", "无法访问", "不可达", "无响应", "连接失败",
+    "连接不上", "无法连接", "不可用", "unreachable", "not reachable", "not started",
+    "connection refused", "no response", "cannot connect", "can't connect",
+)
 FENCE = chr(96) * 3
 
 
@@ -65,6 +85,30 @@ def _last_message_head(messages, limit: int = 200) -> str:
                               sanitize_lesson_text(str(content), limit))
     except Exception:
         return "?"
+
+
+def _challenge_text_blob(payload) -> str:
+    """把 Worker 输出里的人写文本（summary/facts/attempt）拼成单串供关键词检查。"""
+    parts = []
+    summary = payload.get("summary")
+    if isinstance(summary, list):
+        parts.extend(str(x) for x in summary)
+    else:
+        parts.append(str(summary or ""))
+    for fact in payload.get("facts") or []:
+        if isinstance(fact, dict):
+            parts.append(str(fact.get("statement") or ""))
+    attempt = payload.get("attempt") or {}
+    if isinstance(attempt, dict):
+        parts.append(str(attempt.get("failure_reason") or ""))
+        parts.append(str(attempt.get("outcome") or ""))
+    return " ".join(parts).lower()
+
+
+def _claims_unreachable(payload) -> bool:
+    """模型总结是否声称"靶机未启动/不可达"类结论（结论守门用）。"""
+    blob = _challenge_text_blob(payload)
+    return any(marker in blob for marker in UNREACHABLE_MARKERS)
 
 
 def _parse_json(text: str) -> Optional[Dict[str, Any]]:
@@ -151,6 +195,14 @@ class LlmWorker:
         if prompt_path:
             with open(prompt_path, "r", encoding="utf-8") as fh:
                 self._system = fh.read().strip() or DEFAULT_SYSTEM
+
+    @staticmethod
+    def _is_remote_challenge(challenge: Dict[str, Any]) -> bool:
+        """是否远程/需要靶机交互的题：有 start_info、运行环境 note 或平台 help。"""
+        arena = (challenge.get("metadata") or {}).get("arena") or {}
+        if arena.get("start_info") or arena.get("help"):
+            return True
+        return "[Arena 运行环境]" in str(challenge.get("description") or "")
 
     # ------------------------------------------------------------------ public
     def _thinking_budget(self, claim: Claim) -> int:
@@ -243,6 +295,11 @@ class LlmWorker:
         contract_attempts = 0
         hint_sent = False
         tool_name_retried = False  # 幻觉工具名的 in-claim 纠正重试，每 claim 限 1 次
+        # 结论守门：远程题全程 0 次 arena_http 调用时，主动提示 + 拒收
+        # "靶机未启动/不可达"类结论（各限 1 次，不无限阻塞）。
+        arena_http_calls = 0
+        remote_nudge_sent = False
+        unreachable_guard_used = False
         while True:
             provider = None  # 仅在本轮 complete 前赋值；异常时区分是否 Pro 回退
             thinking_used = 0  # 本轮思考预算；网关拒绝时粘滞关闭并重试
@@ -369,6 +426,8 @@ class LlmWorker:
                 result_blocks = []
                 for call in response.tool_calls:
                     tool_calls += 1
+                    if str(call.get("name") or "") == "arena_http":
+                        arena_http_calls += 1
                     result = self._tools.execute_arguments(
                         str(call.get("name") or ""), call.get("input") or {},
                         cwd=tool_cwd, control=control)
@@ -379,6 +438,13 @@ class LlmWorker:
                     })
                 messages.append({"role": "user", "content": result_blocks})
                 tool_rounds += 1
+                if (self._is_remote_challenge(challenge) and arena_http_calls == 0
+                        and tool_rounds == REMOTE_NUDGE_AT and not remote_nudge_sent):
+                    # 第一道门：远程题前 N 轮从未用靶机工具，主动拉回 arena_http。
+                    remote_nudge_sent = True
+                    print("[llm] remote nudge: {} rounds without arena_http".format(
+                        tool_rounds), file=sys.stderr, flush=True)
+                    messages.append({"role": "user", "content": REMOTE_NUDGE})
                 continue
             payload = _parse_json(response.text)
             if payload is None:
@@ -396,6 +462,21 @@ class LlmWorker:
                         contract_attempts + 1, "; ".join(errors[:4])),
                         file=sys.stderr, flush=True)
                 else:
+                    if (self._is_remote_challenge(challenge) and arena_http_calls == 0
+                            and not unreachable_guard_used
+                            and _claims_unreachable(payload)):
+                        # 第二道门：从未调用 arena_http 却声称靶机不可达——
+                        # 拒收一次，要求先拿工具证据；二次仍坚持则放行并留痕。
+                        unreachable_guard_used = True
+                        print("[llm] unreachable-claim guard: refusing conclusion "
+                              "without arena_http evidence", file=sys.stderr, flush=True)
+                        messages.append({"role": "assistant", "content": response.text})
+                        messages.append({"role": "user", "content": UNREACHABLE_GUARD})
+                        errors = []
+                        continue
+                    if unreachable_guard_used:
+                        print("[llm] unreachable-claim guard: second conclusion kept "
+                              "(audit flag)", file=sys.stderr, flush=True)
                     print("[llm] contract ok (attempt {}), finishing claim".format(
                         contract_attempts + 1), file=sys.stderr, flush=True)
                     return self._result(claim, payload, started, tokens, skills_loaded, tool_calls, skills_indexed)

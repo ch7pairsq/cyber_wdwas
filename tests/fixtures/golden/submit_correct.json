@@ -1,0 +1,13 @@
+{
+  "source": "2026-11-21 正式赛实测回执（143B）：weak-password 提交正确 flag 的平台响应",
+  "protocol": "v1-arena",
+  "response": {
+    "correct": true,
+    "awarded": 1000,
+    "cumulative_score": 1000,
+    "correct_flag_count": 1,
+    "total_flag_count": 1,
+    "matched_flag_index": 0,
+    "is_completed": true
+  }
+}
