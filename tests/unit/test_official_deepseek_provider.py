@@ -122,9 +122,12 @@ def test_thinking_budget_maps_to_official_fields():
     payload = session.calls[0][1]["json"]
     assert payload["thinking"] == {"type": "enabled"}
     assert "reasoning_effort" not in payload
-    # 侦察档（0/未传）：不下发思考字段。
+    # 侦察档（0/未传）：显式 disabled（官方默认 enabled+effort=high，不关
+    # 则非攻坚轮照常思考挤占 max_tokens——v27）。
     _, session = invoke()
-    assert "thinking" not in session.calls[0][1]["json"]
+    assert session.calls[0][1]["json"]["thinking"] == {"type": "disabled"}
+    _, session = invoke(thinking_budget=0)
+    assert session.calls[0][1]["json"]["thinking"] == {"type": "disabled"}
     assert "reasoning_effort" not in session.calls[0][1]["json"]
 
 

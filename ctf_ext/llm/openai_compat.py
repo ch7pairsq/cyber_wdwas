@@ -14,7 +14,10 @@
   OpenAI 线上格式，工具循环不需要感知协议差异；
 - 思考预算：公司网关通道用 Anthropic 风格 thinking.budget_tokens；本通道按
   官方 OpenAI 格式映射为 thinking: {"type": "enabled"}（官方示例口径），
-  攻坚档预算（>=8000）额外带 reasoning_effort=high；0/未传不下发。
+  攻坚档预算（>=8000）额外带 reasoning_effort=high；0/未传显式下发
+  {"type": "disabled"}——官方文档明确 thinking 默认开启（默认 effort=high），
+  不显式关闭时非攻坚轮仍会思考：11-21 实测 thinking 未下发的请求 reasoning
+  7865 tokens 吃满 8192 上限，tool args 截断报废整轮（v27）。
 切换属于显式配置变更，须同步平台出口白名单覆盖 api.deepseek.com。
 """
 from __future__ import annotations
@@ -285,7 +288,9 @@ class DeepSeekOfficialProvider(ModelProvider):
 
         thinking_budget 沿用 Worker 的阶段预算入参（公司网关通道为
         Anthropic 风格 budget_tokens）；本通道按官方 OpenAI 格式映射：
-        >0 → thinking enabled；攻坚档（>=8000）追加 reasoning_effort=high。
+        >0 → thinking enabled；攻坚档（>=8000）追加 reasoning_effort=high；
+        0/未传 → thinking disabled（官方默认开启，不关则非攻坚轮照常思考，
+        reasoning 挤占 max_tokens 造成 tool args 截断——v27 实测修复）。
         """
         if not self._api_key:
             raise ProviderConfigError("official DeepSeek API key is not configured")
@@ -295,11 +300,14 @@ class DeepSeekOfficialProvider(ModelProvider):
         openai_messages = _translate_messages(messages)
         payload = {"model": self._model, "messages": openai_messages,
                    "max_tokens": max_tokens, "stream": False}
-        # 官方示例口径：thinking: {"type": "enabled"}；攻坚档映射 reasoning_effort。
+        # 官方示例口径：thinking: {"type": "enabled"}；攻坚档映射 reasoning_effort；
+        # 0/未传显式 disabled（官方默认 enabled+effort=high，v27 见模块 docstring）。
         if int(thinking_budget or 0) > 0:
             payload["thinking"] = {"type": "enabled"}
             if int(thinking_budget) >= 8000:
                 payload["reasoning_effort"] = "high"
+        else:
+            payload["thinking"] = {"type": "disabled"}
         if safe_tools:
             payload["tools"] = [_to_openai_tool(tool) for tool in safe_tools]
         instruction = system or ""
