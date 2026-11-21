@@ -548,5 +548,101 @@
     "file": "misc.quantum.md",
     "pivot": ["misc.pt.zipfile", "crypto.encoding"],
     "source": {"type": "internal"}
+  },
+  {
+    "name": "web.xss",
+    "domain": "web",
+    "trigger": "XSS：反射/存储/DOM 回显点闭合与外带确认",
+    "keywords": ["xss", "script", "reflection", "dom", "cookie", "csp", "bot"],
+    "prerequisites": ["arena_http", "python_exec"],
+    "tokens_hint": 600,
+    "risk": "read",
+    "file": "web.xss.md",
+    "pivot": ["web.sqlinjection", "web.ssti", "web.xsleak"],
+    "source": {"type": "internal"}
+  },
+  {
+    "name": "web.xxe",
+    "domain": "web",
+    "trigger": "XXE：XML/DTD 实体读文件与报错注入",
+    "keywords": ["xxe", "xml", "dtd", "entity", "external", "soap"],
+    "prerequisites": ["arena_http", "python_exec"],
+    "tokens_hint": 600,
+    "risk": "read",
+    "file": "web.xxe.md",
+    "pivot": ["web.upload", "web.pathtraversal"],
+    "source": {"type": "internal"}
+  },
+  {
+    "name": "web.upload",
+    "domain": "web",
+    "trigger": "上传绕过：校验分层与解析确认",
+    "keywords": ["upload", "mime", "extension", "webshell", "multipart"],
+    "prerequisites": ["arena_http", "python_exec"],
+    "tokens_hint": 600,
+    "risk": "read",
+    "file": "web.upload.md",
+    "pivot": ["web.pathtraversal", "web.php"],
+    "source": {"type": "internal"}
+  },
+  {
+    "name": "pwn.format_string",
+    "domain": "pwn",
+    "trigger": "格式化字符串：栈枚举与 %n 任意写",
+    "keywords": ["format", "string", "printf", "fmtstr", "pointer"],
+    "prerequisites": ["checksec", "disassemble", "python_exec"],
+    "tokens_hint": 700,
+    "risk": "read",
+    "file": "pwn.format_string.md",
+    "pivot": ["pwn.stack.recon", "pwn.ret2libc"],
+    "source": {"type": "internal"}
+  },
+  {
+    "name": "pwn.ret2libc",
+    "domain": "pwn",
+    "trigger": "ret2libc：泄露 got 计算基址构造 system 链",
+    "keywords": ["ret2libc", "libc", "system", "binsh", "got", "plt", "base"],
+    "prerequisites": ["checksec", "rop_gadgets", "python_exec"],
+    "tokens_hint": 700,
+    "risk": "read",
+    "file": "pwn.ret2libc.md",
+    "pivot": ["pwn.stack.recon", "pwn.seccomp.rop"],
+    "source": {"type": "internal"}
+  },
+  {
+    "name": "reverse.go",
+    "domain": "reverse",
+    "trigger": "Go 二进制：pclntab 恢复与寄存器传参还原",
+    "keywords": ["golang", "pclntab", "gopclntab", "runtime", "coroutine", "goroutine"],
+    "prerequisites": ["file_info", "strings", "python_exec"],
+    "tokens_hint": 650,
+    "risk": "read",
+    "file": "reverse.go.md",
+    "pivot": ["reverse.elf.static", "reverse.vm.custom"],
+    "source": {"type": "internal"}
+  },
+  {
+    "name": "misc.unicode",
+    "domain": "misc",
+    "trigger": "Unicode：同形字/零宽/归一化/双重编码",
+    "keywords": ["unicode", "utf", "homoglyph", "normalization", "surrogate", "zero"],
+    "prerequisites": ["python_exec", "hexdump"],
+    "tokens_hint": 600,
+    "risk": "read",
+    "file": "misc.unicode.md",
+    "pivot": ["crypto.encoding", "forensics.stego.image"],
+    "source": {"type": "internal"}
+  },
+  {
+    "name": "crypto.aes.nonce_reuse",
+    "domain": "crypto",
+    "trigger": "AES 流模式 nonce 复用：crib-drag 恢复密钥流",
+    "keywords": ["aes", "nonce", "ctr", "gcm", "reuse", "keystream", "iv"],
+    "prerequisites": ["python_exec"],
+    "tokens_hint": 750,
+    "risk": "compute",
+    "file": "crypto.aes.nonce_reuse.md",
+    "pivot": ["crypto.encoding", "crypto.rsa.small_e"],
+    "source": {"type": "internal"}
   }
 ]

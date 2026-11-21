@@ -482,6 +482,26 @@ build 中间层每轮 ~1.5GB，失败重试前必须 prune（本轮清理后 82%
 预算口径、平台环境数据问题都只在长跑暴露；supervisor 的"活性"与
 "推进"必须分开度量，存活不等于前进。
 
+## 第十轮（v23，2026-11-22 工具包扩展）：只读工具 24→30 与技能 8 条
+
+实测复盘（pcap/EXE/流量题反复用 python_exec 手写 tshark/反汇编逻辑，40 轮磨满
+仍 partial）后扩展专用工具面：
+
+- 新增 6 个只读固定 argv 工具：pcap_summary(tshark io,phs)、
+  wasm_translate(wasm2wat)、java_decompile(procyon)、media_probe(ffprobe)、
+  disk_partitions(mmls)、disk_files(fls，offset 定位分区)；
+- policy command_allowlist 补 tshark/wasm2wat/ffprobe（procyon/mmls/fls 原有）；
+  全部 risk_level=read 不触发沙箱审批；
+- toolchain.json：tshark/ffmpeg/wabt allowlist=true（镜像层默认安装）；
+- skills index 新增 8 条（web.xss/xxe/upload、pwn.format_string/ret2libc、
+  reverse.go、misc.unicode、crypto.aes.nonce_reuse），sections/*.md 全部落盘；
+- 测试：test_readonly_tool_pack.py ×8（镜像内全激活）。
+
+日志复核修正：v22 轮曾将"tool_round_limit 收尾轮 tool_calls"判为实际发生——
+复核确认该 ok 行（p=38945）与收尾调用（chars=104660→p≈5 万+）不匹配，属并行
+题交织误配对；pcap 题实际成功走完收尾（partial）。v22 纠正修复保留为防御性。
+transport failed ×3 同瞬报废与 TOOL_BUSY 实锤不变。
+
 ## 第九轮（v22，2026-11-22 实测日志两缺口）：传输瞬态与收尾轮纠正
 
 实测日志（三并行 worker 同时 transport failed + pcap 题 tool_round_limit 收尾轮

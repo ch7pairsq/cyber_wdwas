@@ -157,6 +157,10 @@ def _schema(*names: str) -> Dict[str, Any]:
         elif name == "passphrase":
             properties[name] = {"type": "string", "maxLength": 128,
                                 "description": "隐写口令；先用空串，再试题目提示词", "default": ""}
+        elif name == "offset":
+            properties[name] = {"type": "integer", "minimum": 0, "maximum": 4294967295,
+                                "default": 0,
+                                "description": "分区起始扇区（disk_partitions 输出的 Start），0=整盘或无分区表"}
     return {"type": "object", "properties": properties, "required": ["path"],
             "additionalProperties": False}
 
@@ -371,8 +375,43 @@ def _git_history_argv(arguments, work_root):
     return argv
 
 
+def _pcap_summary_argv(arguments, work_root):
+    """tshark 固定 argv：协议分层统计，只读输入文件，不做任何网络请求。"""
+    return ["tshark", "-r", _resolve_path(arguments, work_root), "-q", "-z", "io,phs"]
+
+
+def _wasm_translate_argv(arguments, work_root):
+    """wasm2wat 固定 argv：WebAssembly 二进制转 WAT 文本输出到 stdout。"""
+    return ["wasm2wat", _resolve_path(arguments, work_root)]
+
+
+def _java_decompile_argv(arguments, work_root):
+    """procyon 固定 argv：class/jar 反编译源码输出到 stdout（不落盘）。"""
+    return ["procyon", _resolve_path(arguments, work_root)]
+
+
+def _media_probe_argv(arguments, work_root):
+    """ffprobe 固定 argv：容器/流元数据 JSON，不解码媒体内容。"""
+    return ["ffprobe", "-v", "error", "-show_format", "-show_streams",
+            "-print_format", "json", _resolve_path(arguments, work_root)]
+
+
+def _disk_partitions_argv(arguments, work_root):
+    """mmls 固定 argv：列出磁盘镜像分区表（含起始扇区）。"""
+    return ["mmls", _resolve_path(arguments, work_root)]
+
+
+def _disk_files_argv(arguments, work_root):
+    """fls 固定 argv：递归列出文件系统镜像内路径；分区镜像用 offset 定位文件系统。"""
+    offset = _positive_int(arguments, "offset", 0, 0, 4294967295)
+    argv = ["fls", "-r", "-p"]
+    if offset:
+        argv += ["-o", str(offset)]
+    return argv + [_resolve_path(arguments, work_root)]
+
+
 def default_specs() -> List[ToolSpec]:
-    """内建工具目录：24 个只读/受控工具，全部绑定固定主命令与白名单参数。"""
+    """内建工具目录：30 个只读/受控工具，全部绑定固定主命令与白名单参数。"""
     return [
         _spec("ocr_text", "识别图片中的文字（tesseract，中英文）。截图、扫描件、题面图片先用它取文本。",
               "tesseract", _ocr_text_argv, _OCR_TEXT_SCHEMA,
@@ -427,6 +466,23 @@ def default_specs() -> List[ToolSpec]:
               _schema_bytes()),
         _spec("git_history", "只读读取工作区 Git 仓库历史。mode=log 列全分支提交与每提交文件变动（找删除/改名）；mode=fsck 列悬空与不可达对象（amend/reset 残留）；mode=show+rev 读取对象内容（commit:path 取回被删文件）。", "python3", _git_history_argv, _GIT_HISTORY_SCHEMA,
               timeout=60.0, max_output_bytes=200_000),
+        _spec("pcap_summary", "汇总 pcap/pcapng 的协议分层统计与包计数（io,phs）。先看链路类型与可疑协议占比，再针对协议用 python_exec 深挖；只读本地文件，不发网络请求。",
+              "tshark", _pcap_summary_argv, _schema(),
+              timeout=60.0, max_output_bytes=200_000),
+        _spec("wasm_translate", "把 WebAssembly 二进制转成 WAT 文本（stdout），供静态阅读；先 file_info 确认魔数再转。",
+              "wasm2wat", _wasm_translate_argv, _schema(),
+              timeout=60.0),
+        _spec("java_decompile", "反编译 Java class/jar 到 stdout（源码文本）。jar 先用 archive_extract 解包，再按 class 逐个反编译。",
+              "procyon", _java_decompile_argv, _schema(),
+              timeout=120.0, max_output_bytes=300_000),
+        _spec("media_probe", "输出音频/视频容器元数据 JSON：封装格式、时长、编码、流列表；不解码媒体内容。",
+              "ffprobe", _media_probe_argv, _schema(),
+              max_output_bytes=100_000),
+        _spec("disk_partitions", "列出磁盘镜像分区表与各分区起始扇区（供 disk_files 的 offset 参数）。",
+              "mmls", _disk_partitions_argv, _schema()),
+        _spec("disk_files", "递归列出文件系统镜像内的文件路径（含删除项标记）。分区镜像先用 disk_partitions 找起始扇区作 offset。",
+              "fls", _disk_files_argv, _schema("offset"),
+              timeout=60.0, max_output_bytes=300_000),
     ]
 
 

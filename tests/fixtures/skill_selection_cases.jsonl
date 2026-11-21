@@ -8,3 +8,11 @@
 {"id":"forensics_pcap","domain":"forensics","query":"pcap packet capture network traffic","expect":["forensics.pcap.triage"],"forbid":["crypto.rsa.small_e"]}
 {"id":"forensics_stego","domain":"stego","query":"png steghide lsb","expect":["forensics.stego.image"]}
 {"id":"misc_qr","domain":"misc","query":"qr barcode scan image","expect":["misc.qr"]}
+{"id":"web_xss","domain":"web","query":"xss reflected script cookie bot","expect":["web.xss"],"forbid":["web.xxe"]}
+{"id":"web_xxe","domain":"web","query":"xml dtd entity external soap xxe","expect":["web.xxe"]}
+{"id":"web_upload","domain":"web","query":"file upload webshell mime extension multipart","expect":["web.upload"]}
+{"id":"pwn_format_string","domain":"pwn","query":"format string printf stack pointer write","expect":["pwn.format_string"]}
+{"id":"pwn_ret2libc","domain":"pwn","query":"ret2libc puts got libc base system","expect":["pwn.ret2libc"],"forbid":["pwn.format_string"]}
+{"id":"reverse_go","domain":"reverse","query":"golang pclntab goroutine runtime stripped","expect":["reverse.go"],"forbid":["reverse.bytecode.python"]}
+{"id":"misc_unicode","domain":"misc","query":"unicode utf homoglyph normalization zero width","expect":["misc.unicode"],"forbid":["misc.qr"]}
+{"id":"crypto_nonce_reuse","domain":"crypto","query":"aes ctr nonce reuse keystream gcm","expect":["crypto.aes.nonce_reuse"],"forbid":["crypto.dh.degenerate"]}

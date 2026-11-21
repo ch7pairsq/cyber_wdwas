@@ -80,6 +80,9 @@ policy:
     - apktool
     - go
     - gofmt
+    - tshark
+    - wasm2wat
+    - ffprobe
 
 model:
   # 2026-11-20 起主通道为 DeepSeek 官方 API（OpenAI Chat Completions 兼容）。

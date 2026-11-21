@@ -597,10 +597,10 @@
       ],
       "tier": "ctf",
       "installed_by_default": true,
-      "allowlist": false,
+      "allowlist": true,
       "risk": "read",
       "license": "GPL-2.0-or-later",
-      "notes": "pcap 解析；python_exec 内调用，只读本地文件，不抓包不联网"
+      "notes": "pcap 解析；注册为 pcap_summary（-r 读文件 + io,phs 统计），只读本地文件，不抓包不联网"
     },
     {
       "name": "ffmpeg",
@@ -612,10 +612,10 @@
       ],
       "tier": "ctf",
       "installed_by_default": true,
-      "allowlist": false,
+      "allowlist": true,
       "risk": "execute",
       "license": "GPL-2.0-or-later",
-      "notes": "音视频解码/频谱图/抽帧；python_exec 内调用，仅本地文件"
+      "notes": "音视频解码/频谱图/抽帧；仅 ffprobe 注册为 media_probe（元数据 JSON）并进 config 白名单，ffmpeg 本体仍不注册；仅本地文件"
     },
     {
       "name": "wabt",
@@ -626,10 +626,10 @@
       ],
       "tier": "ctf",
       "installed_by_default": true,
-      "allowlist": false,
+      "allowlist": true,
       "risk": "read",
       "license": "Apache-2.0",
-      "notes": "WebAssembly 工具集（wasm2wat 反汇编为文本）"
+      "notes": "WebAssembly 工具集（wasm2wat 反汇编为文本）；注册为 wasm_translate（stdout）"
     },
     {
       "name": "john",
