@@ -437,6 +437,15 @@ def main(argv=None) -> int:
     # subreaper 后由后台线程回收；失败只记日志（非 Linux/旧内核 fail-open）。
     from .runtime.reaper import install_subreaper
     print("[run] subreaper: {}".format(install_subreaper()), file=sys.stderr, flush=True)
+    # 卡死归因通道（2026-11-22 实战：11 分钟零请求无从定位卡点）：SIGUSR2
+    # 触发全部线程栈 dump 到 stderr（supervisor 杀进程前先发信号）。
+    import faulthandler
+    import signal as _signal
+    try:
+        faulthandler.register(_signal.SIGUSR2, file=sys.stderr)
+        print("[run] faulthandler: SIGUSR2 dump registered", file=sys.stderr, flush=True)
+    except (AttributeError, ValueError, OSError):
+        pass  # 非 POSIX/信号受限环境 fail-open
     orch = build_runtime(args.db, args.evidence, mode=args.mode, config_path=args.config,
                          heartbeat_path=args.heartbeat_file,
                          claim_timeout_seconds=args.claim_timeout)

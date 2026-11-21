@@ -44,9 +44,19 @@ def should_restart(returncode, stale, restarts, max_restarts):
     return restarts < max_restarts
 
 
-def terminate(proc, grace=5.0):
+def terminate(proc, grace=5.0, dump_stack=False):
     if proc.poll() is not None:
         return
+    if dump_stack:
+        # SIGUSR2 → faulthandler dump 全部线程栈（stderr → agent.log）：
+        # "活着但不推进"的卡点归因靠猜不如靠栈。等 1s 让落盘完成再杀。
+        try:
+            os.killpg(proc.pid, signal.SIGUSR2)
+        except ProcessLookupError:
+            return
+        time.sleep(1.0)
+        if proc.poll() is not None:
+            return
     try:
         os.killpg(proc.pid, signal.SIGTERM)
     except ProcessLookupError:
@@ -149,18 +159,23 @@ def run(command, heartbeat=None, stale_seconds=180.0, max_restarts=3, backoff=2.
                 age = heartbeat_age(heartbeat)
                 if age is None or age > stale_seconds:
                     stale = True
-                    terminate(proc)
+                    terminate(proc, dump_stack=True)
                     break
             # 推进卡死：progress 文件已存在（有过真实活动）但停更超过
             # progress_stale_seconds——进程活着但解题无前进。文件缺失视为
             # 未启用/尚未产生首个推进，不判（启动阶段无文件属正常）。
             if progress and progress_stale_seconds > 0:
                 age = heartbeat_age(progress)
-                if age is not None and age > progress_stale_seconds:
+                # 预热期（2026-11-22 实战教训）：progress 文件是跨重启持久的，
+                # 上次卡死留下的旧 mtime 会让新进程在启动后几秒内被判死——
+                # 660/662/664s 三次重启 10 秒烧光，新进程从未获得机会。
+                # 运行超过 progress_stale_seconds 仍无推进才判卡。
+                if (age is not None and age > progress_stale_seconds
+                        and time.monotonic() - started > progress_stale_seconds):
                     stale = True
                     stale_reason = "stale progress ({}s, threshold {}s)".format(
                         int(age), int(progress_stale_seconds))
-                    terminate(proc)
+                    terminate(proc, dump_stack=True)
                     break
             time.sleep(min(0.5, max(0.05, stale_seconds / 10)))
         returncode = proc.poll()

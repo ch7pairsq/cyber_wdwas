@@ -423,6 +423,10 @@ class LlmWorker:
                 thinking_used = self._thinking_budget(claim)
                 if thinking_used > 0:
                     request["thinking_budget"] = thinking_used
+                    # reasoning 生成耗时远超默认 120s（8000 budget 实测 200-400s），
+                    # read timeout 不放大会误杀慢响应烧掉整个 attempt。上限必须
+                    # 小于 supervisor progress_stale(600s) 减去单次工具超时(30s)。
+                    request["timeout"] = max(timeout, min(455.0, 180.0 + thinking_used / 20.0))
                 provider = self._select_provider(claim)
                 prompt_chars = sum(len(str(m.get("content") or "")) for m in messages)
                 print("[llm] call model={} thinking={} mt={} t={} round={} msgs={} "
@@ -520,6 +524,18 @@ class LlmWorker:
                 except BudgetExceeded:
                     return self._failure(claim, "blocked", OUTCOME_ERROR, "budget_exceeded", started, tokens, skills_loaded, tool_calls, skills_indexed)
             if response.tool_calls:
+                # 截断的工具调用（2026-11-22 实战：stage2 reasoning 吃掉
+                # 7865/8192，python_exec 的 args 以 data[ 结尾被 max_tokens
+                # 掐断）：解析层会抛 invalid-JSON ProviderError，但响应侧先
+                # 在这里拦截更便宜——注入精简提示重试一轮（限 1 次），不让
+                # 残缺参数进入执行路径。
+                if (str(getattr(response, "stop_reason", "") or "").lower()
+                        in ("length", "max_tokens") and not truncation_retried):
+                    truncation_retried = True
+                    print("[llm] tool_calls truncated by max_tokens; retrying compact",
+                          file=sys.stderr, flush=True)
+                    messages.append({"role": "user", "content": TRUNCATION_CORRECTION})
+                    continue
                 if self._tools is None:
                     return self._failure(claim, "failed", OUTCOME_ERROR, "tool_unavailable", started, tokens, skills_loaded, tool_calls, skills_indexed)
                 if tool_rounds >= self._max_tool_rounds:

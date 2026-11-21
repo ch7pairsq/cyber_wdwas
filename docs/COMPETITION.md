@@ -482,6 +482,32 @@ build 中间层每轮 ~1.5GB，失败重试前必须 prune（本轮清理后 82%
 预算口径、平台环境数据问题都只在长跑暴露；supervisor 的"活性"与
 "推进"必须分开度量，存活不等于前进。
 
+## 第十三轮（v26，2026-11-22 平台日志归因）：reasoning 截断卡死与重启循环
+
+平台侧数据还原故障链（23:30:57 → 23:42）：最后一次模型调用 stage2
+reasoning 吃掉 7865/8192 tokens，python_exec 的 args 以 data[ 结尾被
+max_tokens 掐断（finish_reason=length）；此后 11 分钟零模型请求（卡点
+无栈可查，pod 回收后日志丢失）；supervisor 判 stale progress 660s 重启
+3 次（660/662/664s）——重启间隔仅 2s，新进程从未获得机会，exit 241
+（SIGTERM -15 无符号透传）。
+
+- 修 A（supervisor 预热期，实锤）：progress 文件跨重启持久，旧 mtime 让
+  新进程启动几秒内被判死。改为运行超过 progress_stale_seconds 仍无推进
+  才判卡——重启后获得完整 600s 预热。
+- 修 B（栈 dump 归因）：supervisor terminate 前先发 SIGUSR2，agent 入口
+  faulthandler.register(SIGUSR2) 把全部线程栈 dump 到 stderr → agent.log。
+  "活着但不推进"的卡点从猜测变成看栈。
+- 修 C（截断 tool_calls 拦截）：stop_reason=length 且带 tool_calls 时注入
+  TRUNCATION_CORRECTION in-claim 重试（限 1 次），不让残缺 args 进执行路径。
+- 修 D（thinking 降档）：thinking_by_stage [0,4000,8000,0,0] →
+  [0,3000,5500,0,0]（mt=8192 硬上限下 stage2=8000 只给 args 剩 192 tokens，
+  必然截断）；thinking 轮 request timeout 联动放大（180+thinking/20，
+  上限 455s < progress_stale 600s - 工具超时 30s）。
+- v25 的退出码修复（solved==tasks 才 0）与本事故独立但同批交付。
+
+教训：慢响应/截断/卡死三类问题的归因都依赖"死前的栈"——faulthandler
+信号 dump 是比日志更根本的观测面。
+
 ## 第十二轮（v25，2026-11-22 实战"5/8 题解出后容器提前死亡"）：退出码与日志落盘
 
 实战现象：解出 5 题（总题数>5）后容器退出、无日志、剩余约 10 分钟模型零调用。

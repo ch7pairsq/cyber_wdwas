@@ -149,7 +149,7 @@ model:
   pro_from_stage: 2
   # 思考模式按步数路线阶段分配预算（token），0=关：侦察不开思考、攻坚多想；
   # 官方通道映射为 thinking: {"type": "enabled"}（攻坚档 reasoning_effort=high）。
-  thinking_by_stage: [0, 4000, 8000, 0, 0]
+  thinking_by_stage: [0, 3000, 5500, 0, 0]  # 2026-11-22 实战：stage2=8000 + mt=8192 只给 tool args 剩 192 tokens，reasoning 7865 后 args 被截断；降档给 args/JSON 留 ≥2.6k 余量
 
 storage:
   db_path: data/official.db
