@@ -366,3 +366,31 @@ static_file_server status='pending'+expires_at=None（拉起中）。
 pytest 423 passed；无凭据 rc=1（token from: none 明确报错）；
 push portus dev manifest PUT → 201；内容级对账 PASS（user/
 entrypoint/cmd/env/RootFS 层数含顺序全一致）。
+
+## 2026-11-21 第四场复盘 + v18 交付
+
+第四场 2/2 全解（累计 2000 分，attempt 01a1fc6a）。亮点：round 17
+首次出现 arena_http 调用（remote nudge 后第 12 轮）——守门机制
+首次引发模型行为改变；随后模型回退 python_exec 并解出。
+
+两个交付级问题（16bbffa）：
+1. **v17 P2 落点错误**：生产系统提示是 ctf_ext/prompts/worker.md
+   （2952 chars，PROMPT_PATH 加载），DEFAULT_SYSTEM（496 chars）
+   只是无 prompt_path 时的回退——数组格式提示打在回退文件上，
+   对生产无效，契约违规照旧。教训：改系统提示必须先确认生产
+   加载路径；覆盖核查要包含"修改是否真的到达生效路径"。
+2. **版本不可考**：四场日志 system_chars 恒 2952 与版本无关，
+   无法归因某场跑的哪个镜像。修复：仓库根 VERSION 文件（与
+   镜像 tag 对应）+ run_official.sh 首行打印 image_version。
+
+v18 修复：worker.md 输出契约段补类型约束（preconditions/actions/
+ruled_out 必须 JSON 字符串数组；strategy_key 恰好三段
+domain.technique.variant）+ VERSION 版本横幅。423 passed。
+
+**v18 交付**（镜像 db7686a0a8d3 = 7b4b7af+16bbffa）：镜像内
+pytest 423 passed；无凭据 rc=1；push manifest PUT → 201；对账
+PASS（六项全 OK）。下次日志首行 [run_official] image_version=v18
+即可归因版本。
+
+注：第四场无法确定跑的是 v16 还是 v17（env_note pending 提示
+是否已生效未知）；v18 起版本可归因。v18 已包含 v17 全部修复。
