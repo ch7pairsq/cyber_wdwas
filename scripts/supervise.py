@@ -75,9 +75,39 @@ def set_seconds(command, value):
     return out + ['--seconds', str(value)]
 
 
+def _tee_streams(proc, log_fh):
+    """后台线程把子进程 stdout/stderr 透传的同时落盘（容器退出后可查）。
+
+    平台只收集容器 stdout/stderr，pod 回收后日志即失；agent 每轮收尾/重启
+    的关键输出（run loop finished / supervisor: restart / traceback）必须
+    有独立副本。读线程随进程结束自然退出，fail-open 不影响主流程。
+    """
+    import threading
+
+    def _pump(stream, forward):
+        try:
+            for line in iter(stream.readline, b""):
+                forward(line)
+                log_fh.write(line)
+                log_fh.flush()
+        except Exception:
+            pass
+        finally:
+            try:
+                stream.close()
+            except Exception:
+                pass
+
+    t_out = threading.Thread(target=_pump, args=(proc.stdout, sys.stdout.buffer.write), daemon=True)
+    t_err = threading.Thread(target=_pump, args=(proc.stderr, sys.stderr.buffer.write), daemon=True)
+    t_out.start()
+    t_err.start()
+    return t_out, t_err
+
+
 def run(command, heartbeat=None, stale_seconds=180.0, max_restarts=3, backoff=2.0,
         deadline_seconds=None, min_remaining=90.0,
-        progress=None, progress_stale_seconds=600.0):
+        progress=None, progress_stale_seconds=600.0, log_file=None):
     # 正式赛一次性窗口：deadline_seconds 从 supervisor 启动起算的总墙钟。
     # 每次启动/重启都把子进程 --seconds 收缩为剩余时间；剩余不足
     # min_remaining 时不再重启（不够完成一次有意义的恢复）。
@@ -90,8 +120,25 @@ def run(command, heartbeat=None, stale_seconds=180.0, max_restarts=3, backoff=2.
             if remaining <= 0:
                 return 0  # 总窗口耗尽：不再启动新进程
             cmd = set_seconds(cmd, remaining)
+        if log_file:
+            try:
+                with open(log_file, "a", encoding="utf-8") as fh:
+                    fh.write("\n===== supervisor launch {} =====\n".format(
+                        time.strftime("%Y-%m-%d %H:%M:%S")))
+            except OSError:
+                pass
         started = time.monotonic()
-        proc = subprocess.Popen(cmd, start_new_session=True)
+        popen_kw = {"start_new_session": True}
+        log_fh = None
+        if log_file:
+            try:
+                log_fh = open(log_file, "ab")
+                popen_kw.update(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            except OSError:
+                log_fh = None  # 落盘失败不阻断：保持平台直采路径
+        proc = subprocess.Popen(cmd, **popen_kw)
+        if log_fh is not None:
+            _tee_streams(proc, log_fh)
         stale = False
         stale_reason = "stale heartbeat"
         while True:
@@ -138,6 +185,9 @@ def main(argv=None):
     parser.add_argument("--progress", default=None,
                         help="推进心跳文件路径（模型调用/工具完成时刷新）；"
                              "停更超过 --progress-stale-seconds 视为解题卡死")
+    parser.add_argument("--log-file", default=None,
+                        help="子进程 stdout/stderr 透传的同时追加写入该文件"
+                             "（容器/pod 回收后平台日志丢失时的独立副本）")
     parser.add_argument("--progress-stale-seconds", type=float, default=600.0,
                         help="推进停更阈值；需大于单次模型超时+单次工具超时之和")
     parser.add_argument("--stale-seconds", type=float, default=180.0)
@@ -166,7 +216,8 @@ def main(argv=None):
     return run(command, heartbeat=args.heartbeat, stale_seconds=args.stale_seconds,
                max_restarts=max(0, args.max_restarts), backoff=args.backoff,
                deadline_seconds=args.deadline_seconds, min_remaining=args.min_remaining,
-               progress=args.progress, progress_stale_seconds=args.progress_stale_seconds)
+               progress=args.progress, progress_stale_seconds=args.progress_stale_seconds,
+               log_file=args.log_file)
 
 
 if __name__ == "__main__":

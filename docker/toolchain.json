@@ -808,6 +808,65 @@
       "risk": "compute",
       "license": "MIT",
       "notes": "PyJWT；web.jwt 场景的令牌构造/校验"
+    },
+    {
+      "name": "python3-requests",
+      "package": "python3-requests",
+      "source": "apt",
+      "bins": [],
+      "modules": ["requests"],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": false,
+      "risk": "compute",
+      "license": "Apache-2.0",
+      "notes": "requests（系统解释器层）；jwt_tool 依赖"
+    },
+    {
+      "name": "python3-termcolor",
+      "package": "python3-termcolor",
+      "source": "apt",
+      "bins": [],
+      "modules": ["termcolor"],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": false,
+      "risk": "compute",
+      "license": "MIT",
+      "notes": "termcolor；jwt_tool 输出着色依赖"
+    },
+    {
+      "name": "ysoserial",
+      "source": "manual",
+      "bins": ["ysoserial"],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": true,
+      "risk": "execute",
+      "license": "MIT",
+      "notes": "Java 反序列化 payload 生成器 v0.0.6（构建期 fetch_cairn_assets.py 落盘，wrapper 输出 base64）；web.java.deser 配套"
+    },
+    {
+      "name": "jwt_tool",
+      "source": "manual",
+      "bins": ["jwt_tool"],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": true,
+      "risk": "execute",
+      "license": "GPL-3.0",
+      "notes": "JWT 弱点利用工具（构建期落盘；依赖 apt python3-jwt/requests/termcolor）；web.jwt 配套"
+    },
+    {
+      "name": "jdwp-shellifier",
+      "source": "manual",
+      "bins": ["jdwp-shellifier"],
+      "tier": "ctf",
+      "installed_by_default": true,
+      "allowlist": true,
+      "risk": "execute",
+      "license": "MIT",
+      "notes": "JDWP 调试协议利用脚本（stdlib 实现）；Java 调试口暴露场景"
     }
   ]
 }

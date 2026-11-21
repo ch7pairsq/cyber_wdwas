@@ -17,6 +17,7 @@
 - token 无签名段可能是自定义编码，转 crypto.encoding；接口存在模板渲染转 web.ssti。
 
 ## 踩坑
+- 本地武器：python_exec 跑 /usr/local/bin/jwt_tool（PyJWT/requests 已就绪）批量测 alg 混淆与弱密钥。
 - kid 参数可注入时注意路径穿越与空值变体。
 - 爆破字典用题面线索（用户名/题名/日期），不要全表盲跑。
 

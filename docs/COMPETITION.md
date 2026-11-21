@@ -482,6 +482,22 @@ build 中间层每轮 ~1.5GB，失败重试前必须 prune（本轮清理后 82%
 预算口径、平台环境数据问题都只在长跑暴露；supervisor 的"活性"与
 "推进"必须分开度量，存活不等于前进。
 
+## 第十二轮（v25，2026-11-22 实战"5/8 题解出后容器提前死亡"）：退出码与日志落盘
+
+实战现象：解出 5 题（总题数>5）后容器退出、无日志、剩余约 10 分钟模型零调用。
+
+- 根因一（实锤）：main() 退出码旧语义 `0 if solved else 3`——部分解出后的
+  任何退场（worker 全止损/intent 终态/异常）都 rc=0，supervisor 对 rc=0
+  无条件放行不重启 → 容器提前死亡。解得越多越容易提前死亡且无救援。
+  修复：solved==tasks 才 0；部分解出提前结束返回 3 → supervisor 有限重启
+  续跑（deadline 与 min_remaining 兜底不超比赛窗口）。
+- 根因二（代价放大器）： supervise.py 无日志落盘——平台 pod 回收后日志
+  随之丢失（"没有日志"），退场前的异常类型无法归因。修复：supervisor
+  --log-file 把子进程 stdout/stderr 透传平台的同时追加写
+  RUN_DIR/agent.log，含每次 launch 分隔行。
+- 待日志确认：worker 全退的异常类型（三线程各自 3 连异常止损？intent
+  全终态空转？）——日志到位后针对性加固。
+
 ## 第十一轮（v24，2026-11-21 镜像工具补齐）：wasm2wat/ffprobe/procyon 落镜像
 
 v23 镜像实测 which 验证 tshark/mmls/fls OK，但 wasm2wat/ffprobe/procyon

@@ -83,6 +83,9 @@ policy:
     - tshark
     - wasm2wat
     - ffprobe
+    - ysoserial
+    - jwt_tool
+    - jdwp-shellifier
 
 model:
   # 2026-11-20 起主通道为 DeepSeek 官方 API（OpenAI Chat Completions 兼容）。

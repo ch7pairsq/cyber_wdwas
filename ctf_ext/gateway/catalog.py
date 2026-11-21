@@ -274,6 +274,27 @@ def _python_exec_argv(arguments, root):
             os.path.join(os.path.dirname(os.path.abspath(__file__)), "python_exec.py")]
 
 
+def _gdb_batch_argv(arguments: Dict[str, Any], work_root: Optional[Path]) -> Sequence[str]:
+    """gdb_batch：gdb --batch 从 stdin 读命令脚本，脚本化量偏移/内存布局，非交互。"""
+    return ["gdb", "--batch", "-q", _resolve_path(arguments, work_root)]
+
+
+def _ysoserial_argv(arguments: Dict[str, Any], work_root: Optional[Path]) -> Sequence[str]:
+    """ysoserial：本地 jar 生成反序列化 payload（wrapper 输出 base64）。"""
+    chain = _bounded_str(arguments, "chain", "URLDNS", pattern=r"[A-Za-z0-9_.-]{1,64}")
+    cmd = _bounded_str(arguments, "cmd", "id", pattern=r"[A-Za-z0-9_@%+=,./:~-]{1,200}")
+    return ["ysoserial", chain, cmd]
+
+
+_YSOSERIAL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "chain": {"type": "string", "description": "gadget 链名（URLDNS/CommonsCollections*/CommonsBeanutils1 等，按目标依赖选）", "default": "URLDNS"},
+        "cmd": {"type": "string", "description": "目标侧执行的命令；URLDNS 链传探测 URL", "default": "id"},
+    },
+}
+
+
 _PYTHON_EXEC_SCHEMA = {
     "type": "object",
     "properties": {
@@ -475,6 +496,13 @@ def default_specs() -> List[ToolSpec]:
         _spec("java_decompile", "反编译 Java class/jar 到 stdout（源码文本）。jar 先用 archive_extract 解包，再按 class 逐个反编译。",
               "procyon", _java_decompile_argv, _schema(),
               timeout=120.0, max_output_bytes=300_000),
+        _spec("ysoserial", "Java 反序列化 payload 生成（本地 jar，输出 base64）。链名按目标依赖选（URLDNS 先验证解析），cmd 为目标侧命令；payload 知识库 /opt/knowledge/PayloadsAllTheThings 可用 python_exec 检索。",
+              "ysoserial", _ysoserial_argv, _YSOSERIAL_SCHEMA,
+              risk_level="execute", idempotent=False, timeout=120.0, max_output_bytes=50_000),
+        _spec("gdb_batch", "gdb 批处理：stdin 传 gdb 命令脚本（x/gx $rsp、info proc mappings、断点+continue 后打印），脚本化量偏移与内存布局，非交互。",
+              "gdb", _gdb_batch_argv, _schema(),
+              risk_level="execute", idempotent=False, timeout=60.0, max_output_bytes=200_000,
+              stdin_argument="script", stdin_max_bytes=4000),
         _spec("media_probe", "输出音频/视频容器元数据 JSON：封装格式、时长、编码、流列表；不解码媒体内容。",
               "ffprobe", _media_probe_argv, _schema(),
               max_output_bytes=100_000),

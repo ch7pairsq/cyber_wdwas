@@ -13,8 +13,11 @@ ENV PATH="/opt/venv/bin:$PATH" \
     HOME=/tmp
 
 # 仅构建阶段联网安装，启动命令中不得安装依赖。
-COPY docker/toolchain.json docker/install_toolchain.py /app/docker/
-RUN python /app/docker/install_toolchain.py --tier "${TOOLCHAIN_TIER}" \
+COPY docker/toolchain.json docker/install_toolchain.py docker/fetch_cairn_assets.py /app/docker/
+# cairn 容器同款解题资产：构建期落盘（ysoserial/jwt_tool/jdwp-shellifier/知识库），
+# 必须先于 install_toolchain 执行——manual 条目的 verify 依赖 wrapper 已存在。
+RUN python /app/docker/fetch_cairn_assets.py \
+    && python /app/docker/install_toolchain.py --tier "${TOOLCHAIN_TIER}" \
     && rm -rf /var/lib/apt/lists/* \
     && python -m venv /opt/venv \
     && groupadd --gid 10001 agent \

@@ -396,6 +396,20 @@ def _emit(out, report):
             json.dump(out, fh, ensure_ascii=False, indent=1)
 
 
+def _exit_code(out: dict) -> int:
+    """退出码约定：0=全部题目受理（真完成）；3=仍有未解题却结束（异常退场）。
+
+    2026-11-22 实战教训：旧语义"有提交受理即 0"——解出 5/8 题后 worker
+    提前退场也返回 0，supervisor 对 rc=0 无条件放行不重启，容器提前死亡，
+    剩余比赛时间全部浪费。改为只有 solved==tasks 才是 0；部分解出提前
+    结束返回 3，supervisor 有限重启续跑（deadline 与 min_remaining 兜底，
+    不会超过比赛窗口）。
+    """
+    solved = len(out.get("solved") or [])
+    tasks = int(out.get("tasks") or 0)
+    return 0 if tasks > 0 and solved == tasks else 3
+
+
 def main(argv=None) -> int:
     """CLI 主入口：解析参数 → build_runtime → 编排一轮 → 报告/看板/退出码。
 
@@ -438,7 +452,7 @@ def main(argv=None) -> int:
         write_dashboard(conn, args.dashboard, bench_path=args.bench, db_path=args.db)
         conn.close()
     print(json.dumps(out, ensure_ascii=False, indent=1))
-    return 0 if out["solved"] else 3
+    return _exit_code(out)
 
 
 if __name__ == "__main__":

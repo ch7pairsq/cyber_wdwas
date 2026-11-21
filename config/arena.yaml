@@ -98,6 +98,9 @@ policy:
   - tshark
   - wasm2wat
   - ffprobe
+  - ysoserial
+  - jwt_tool
+  - jdwp-shellifier
   authorized_arena_targets:
   - 10.201.0.0/16
 model:

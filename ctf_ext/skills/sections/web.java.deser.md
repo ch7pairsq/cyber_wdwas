@@ -18,6 +18,7 @@
 
 ## 踩坑
 - 大而全 payload 易触发防护，按依赖版本裁剪链路。
+- 可用链直接 tool=ysoserial 出 payload（输出 base64）；URLDNS 先验证解析。
 - 无出网时 DNS 探测也会失败，先判网段策略再下结论。
 
 ## 来源/边界

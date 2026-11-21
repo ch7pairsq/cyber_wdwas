@@ -16,3 +16,13 @@
 {"id":"reverse_go","domain":"reverse","query":"golang pclntab goroutine runtime stripped","expect":["reverse.go"],"forbid":["reverse.bytecode.python"]}
 {"id":"misc_unicode","domain":"misc","query":"unicode utf homoglyph normalization zero width","expect":["misc.unicode"],"forbid":["misc.qr"]}
 {"id":"crypto_nonce_reuse","domain":"crypto","query":"aes ctr nonce reuse keystream gcm","expect":["crypto.aes.nonce_reuse"],"forbid":["crypto.dh.degenerate"]}
+{"id":"web_file_write","domain":"web","query":"file write webshell htaccess writable primitive","expect":["web.file_write"]}
+{"id":"forensics_stego_audio","domain":"forensics","query":"wav audio lsb spectrogram morse hidden","expect":["forensics.stego.audio"]}
+{"id":"web_intranet_relay","domain":"渗透","query":"intranet pivot relay hop tunnel lateral","expect":["web.intranet.relay"],"forbid":["web.ssrf"]}
+{"id":"web_java_supplychain","domain":"web","query":"war jar web-inf lib dependency cve servlet","expect":["web.java.supplychain"]}
+{"id":"web_cgi","domain":"web","query":"cgi shellshock perl bash header probe","expect":["web.cgi.rce"]}
+{"id":"reverse_native_so","domain":"reverse","query":"jni native library preload patchelf hook","expect":["reverse.native.so"]}
+{"id":"reverse_pe_exe","domain":"reverse","query":"exe dll windows binary import table","expect":["reverse.pe.exe"]}
+{"id":"reverse_java","domain":"reverse","query":"jar class decompile obfuscation main manifest","expect":["reverse.java"]}
+{"id":"reverse_bin_triage","domain":"reverse","query":"unknown bin blob entropy raw data","expect":["reverse.bin.triage"]}
+{"id":"reverse_protobufc","domain":"reverse","query":"protobuf c parse member uaf overflow descriptor","expect":["reverse.protobufc"]}

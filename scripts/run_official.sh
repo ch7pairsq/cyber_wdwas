@@ -35,6 +35,7 @@ export CTF_PROGRESS_HEARTBEAT="$RUN_DIR/agent.progress"
 
 exec python3 "$ROOT/scripts/supervise.py" \
   --heartbeat "$RUN_DIR/agent.heartbeat" \
+  --log-file "$RUN_DIR/agent.log" \
   --stale-seconds 180 \
   --progress "$RUN_DIR/agent.progress" \
   --progress-stale-seconds 600 \
