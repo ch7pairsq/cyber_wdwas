@@ -482,6 +482,23 @@ build 中间层每轮 ~1.5GB，失败重试前必须 prune（本轮清理后 82%
 预算口径、平台环境数据问题都只在长跑暴露；supervisor 的"活性"与
 "推进"必须分开度量，存活不等于前进。
 
+## 第十一轮（v24，2026-11-21 镜像工具补齐）：wasm2wat/ffprobe/procyon 落镜像
+
+v23 镜像实测 which 验证 tshark/mmls/fls OK，但 wasm2wat/ffprobe/procyon
+MISSING——toolchain.json 声明不等于安装，三个工具不在 deb 闭包（bookworm/trixie
+无 wabt/procyon 包）。补齐路线：
+
+- ffmpeg：devbox 内网镜像 mirrors.dev.in.chaitin.net/debian 可达，trixie 容器
+  换源 --download-only 拉 ffmpeg 闭包 281 deb 并入 debs/（447 个）；
+- wasm2wat：wabt 1.0.34 release 静态 ELF（4.8MB）→ opt/wabt/，Dockerfile
+  symlink /usr/local/bin；
+- procyon：mstrobel v0.6.0 jar（2MB）→ opt/procyon/，java -jar wrapper
+  （java-jdk 已装）；
+- overlay.Dockerfile 增 USER root RUN 装配层（v23 tool binaries 标记），build
+  时自检三命令版本输出。
+
+教训：镜像工具验证必须 which + 实跑，不能只看 toolchain.json。
+
 ## 第十轮（v23，2026-11-22 工具包扩展）：只读工具 24→30 与技能 8 条
 
 实测复盘（pcap/EXE/流量题反复用 python_exec 手写 tshark/反汇编逻辑，40 轮磨满
