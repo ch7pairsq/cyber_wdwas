@@ -394,3 +394,21 @@ PASS（六项全 OK）。下次日志首行 [run_official] image_version=v18
 
 注：第四场无法确定跑的是 v16 还是 v17（env_note pending 提示
 是否已生效未知）；v18 起版本可归因。v18 已包含 v17 全部修复。
+
+## 2026-11-21 第五场：v18 全项生效验证（2/2 全解）
+
+attempt 01a1fc7b。三项 v18 修复实测生效：
+1. `[run_official] image_version=v18`——版本归因根治；
+2. `system_chars=3117`（此前恒 2952）——worker.md 修改到达
+   生产路径；weak-password `contract ok (attempt 1)` 一次通过，
+   **首场零契约违规**（前四场每题浪费一次修复调用）；
+3. weak-password 2 轮解决（前几场 3 轮 + 违规修复）——prompt
+   约束直接收益。
+
+static_file_server 第三次稳定复现 pending+expires_at=None 形态；
+remote nudge round 5 正常触发；30+ 轮全 python_exec 无 arena_http
+仍解出（python_exec + 平台 HTTP_PROXY 隧道路径稳定可用）。结局
+用户确认解出，2/2（累计再 +2000）。
+
+结论：v18 无回归，连续三场 2/2，修复链稳定。正式考（19 题/4h）
+前无需新改动；待观察项只剩 19 题场景的预算口径与 endgame 实战。
