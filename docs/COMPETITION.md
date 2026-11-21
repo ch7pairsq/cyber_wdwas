@@ -342,3 +342,27 @@ RootFS 层数含顺序全一致；Id 不同系 containerd image store 正常现�
 留观项：remote nudge / unreachable guard 触发情况、container_status
 实测值、ClaimTimeout 频度（如频现先回调 claim_timeout）、正式考题数
 是否 19 以验证预算口径。
+
+## 2026-11-21 第三场复盘 + v17 交付
+
+第三场 2/2 全解（v16 首战，attempt 01a1fc4f）。v16 四项修复实测生效：
+预算 4500/1800（[run] budget/[orch] 行确认）、client_timeout=90s
+（**立功**：static_file_server start 实测 40.63s，40s 上限必超）、
+start 诊断新字段拿到真实值、remote nudge round 5 正常触发。
+
+新契约发现：**start 返回 ≠ 容器就绪**——weak-password
+status='available'+expires_at 有值（约 start+30min 租期）；
+static_file_server status='pending'+expires_at=None（拉起中）。
+本次成功靠模型先分析附件拖过拉起窗口；正式赛开局即请求靶机有
+"未就绪→探测失败→误判未启动"重演风险。
+
+修复（7b4b7af，纯信息增量不改控制流——重复 start 幂等性未知，
+轮询不做）：env_note 写入容器状态（非就绪提示"等 30-60s 重试，
+不要判未启动"）与租期；DEFAULT_SYSTEM 补 JSON 数组格式要求
+（两题各浪费一次 preconditions 契约修复调用）；golden 回填两态
+实测；+2 测试。423 passed。
+
+**v17 交付**（镜像 943a094227f7 = 8504d45+7b4b7af）：镜像内
+pytest 423 passed；无凭据 rc=1（token from: none 明确报错）；
+push portus dev manifest PUT → 201；内容级对账 PASS（user/
+entrypoint/cmd/env/RootFS 层数含顺序全一致）。
