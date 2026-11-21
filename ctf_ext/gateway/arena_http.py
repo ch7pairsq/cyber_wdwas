@@ -94,11 +94,12 @@ def main():
     cidr_raw = os.environ.get("ARENA_NETWORK_CIDR", "")
     if not cidr_raw:
         sys.exit("DENY: ARENA_NETWORK_CIDR is required")
+    # 支持逗号分隔多网段（授权配置与平台注入的 CIDR 可能多个）。
     try:
-        net = ipaddress.ip_network(cidr_raw)
+        nets = [ipaddress.ip_network(c.strip()) for c in cidr_raw.split(",") if c.strip()]
     except ValueError:
         sys.exit("DENY: ARENA_NETWORK_CIDR invalid")
-    if ip not in net:
+    if not nets or not any(ip in net for net in nets):
         sys.exit("DENY: target outside attempt network")
     # 平台 API 对模型工具只读：submit 走网关（gate/幂等/对账治理），
     # start/finish 属管理操作由 harness 适配器执行。防止模型绕过治理

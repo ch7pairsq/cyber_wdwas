@@ -174,6 +174,13 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
         # 适配器构造后再导出隧道变量：客户端保持"直连优先+回退"阶梯，
         # 网关工具与模型调用（urllib 读环境）则拿到平台隧道。
         tunnel_actions = setup_platform_network_env()
+        # 正式赛教训（2026-11-21）：平台不注入 ARENA_NETWORK_CIDR，而
+        # arena_http 工具缺它直接 DENY——整个比赛网关工具形同虚设。
+        # 把配置的授权靶机网段（authorized_arena_targets）同步为 CIDR。
+        arena_cidr = ",".join(tuple(policy_cfg.get("authorized_arena_targets") or ()))
+        if arena_cidr and not os.environ.get("ARENA_NETWORK_CIDR"):
+            os.environ["ARENA_NETWORK_CIDR"] = arena_cidr
+            tunnel_actions.append("ARENA_NETWORK_CIDR=" + arena_cidr)
         if tunnel_actions:
             print("[arena] platform tunnel env exported: {}".format(
                 "; ".join(tunnel_actions)), file=sys.stderr, flush=True)

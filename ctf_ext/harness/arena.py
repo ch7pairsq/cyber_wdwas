@@ -753,7 +753,13 @@ class ArenaHarnessAdapter(HarnessAdapter):
         return list(self._tasks)
 
     def _env_note(self, info: Dict[str, Any], has_files: bool) -> str:
-        """运行环境说明（附加到题目描述）；info 为空且无附件时返回空串。"""
+        """运行环境说明（附加到题目描述）；info 为空且无附件时返回空串。
+
+        2026-11-21 正式赛教训（static_file_server 40 轮只用 python_exec、
+        判定"靶机未启动"）：模型不知道靶机访问约定（arena_http + 隧道），
+        也不知道 python 直连/通用代理不可靠。这里必须把访问方式写死在
+        模型唯一可读面（description）里，无论 start 是否返回地址。
+        """
         # container_addr 可能是字符串或列表（多端口）；统一成逗号分隔字符串。
         raw_addr = info.get("container_addr")
         if isinstance(raw_addr, (list, tuple)):
@@ -762,48 +768,68 @@ class ArenaHarnessAdapter(HarnessAdapter):
         parts = []
         if addr:
             parts.append("题目服务地址: http://" + addr
-                         + "（用 arena_http 工具访问，host 填 IP 部分）")
+                         + "（必须用 arena_http 工具访问，host 填 IP 部分；"
+                           "python/requests 直连或经通用 HTTP 代理都不可靠，不要用）")
+        else:
+            parts.append("平台未返回靶机地址：若题目需要远程服务，从题目描述/附件推导"
+                         "目标 host:port，并用 arena_http 工具发起请求；"
+                         "工具被 DENY 时把原因原样记录进结果 summary")
         cidr = os.environ.get("ARENA_NETWORK_CIDR", "")
         if cidr:
             parts.append("允许访问的目标网段: " + cidr + "（网段之外一律拒绝）")
         if has_files:
             parts.append("题目附件已物化到工作区 handouts/ 目录，可直接用 file_info/strings/archive_extract 处理")
-        if not parts:
-            return ""
         return "[Arena 运行环境] " + "；".join(parts)
+
+    def _refresh_description(self, unique_code: str, info: Dict[str, Any]) -> None:
+        """把最新 start_info 对应的环境说明刷新进题目描述（幂等替换旧 note）。
+
+        2026-11-21 正式赛教训：on_demand 模式下 read_tasks 先用空 start_info
+        写了"平台未返回靶机地址"note，ensure_environment 的幂等分支 early
+        return 后，即使 start 实际返回了 container_addr 模型也永远看不到——
+        这里改为旧 note 剥离后重写，保证最新地址始终可达。
+        """
+        for task in self._tasks:
+            if task.challenge_id != unique_code:
+                continue
+            task.metadata["start_info"] = info
+            desc = task.description or ""
+            marker = "\n\n[Arena 运行环境]"
+            if marker in desc:
+                desc = desc.split(marker)[0]
+            note = self._env_note(info, bool(task.metadata.get("arena_files")))
+            if note:
+                desc = desc + "\n\n" + note
+            task.description = desc
+            break
 
     def ensure_environment(self, unique_code: str):
         """按需拉起题目环境（env_policy=on_demand 时由编排层在每个意图前调用）。
 
         返回 start_info（新建成功时）或 None（已启动/并发发起中）；409
         duplicate/already 视为环境仍在运行；environment_limit 向上抛，由
-        编排层记事件，意图快速失败后等槽位回收再重试。
+        编排层记事件，意图快速失败后等槽位回收再重试。已启动/重复发起
+        的题同样刷新描述（幂等），保证最新 start_info 可达模型。
         """
         with self._env_lock:
-            if unique_code in self._started:
-                return None
-        try:
-            self._ensure_started(unique_code)
-        except ArenaProtocolError as exc:
-            text = str(exc)
-            if "duplicate" in text.lower() or "already" in text.lower():
-                with self._env_lock:
-                    self._started.add(unique_code)  # 已有环境在跑，幂等收编
-                return None
-            raise
+            already = unique_code in self._started
+        if not already:
+            try:
+                self._ensure_started(unique_code)
+            except ArenaProtocolError as exc:
+                text = str(exc)
+                if "duplicate" in text.lower() or "already" in text.lower():
+                    with self._env_lock:
+                        self._started.add(unique_code)  # 已有环境在跑，幂等收编
+                else:
+                    raise
         with self._env_lock:
             if unique_code not in self._started:
                 # 并发发起者失败落地：本次按"未启动"返回，意图会快速失败重试。
                 return None
             info = self._start_info.get(unique_code) or {}
-            for task in self._tasks:
-                if task.challenge_id == unique_code:
-                    task.metadata["start_info"] = info
-                    note = self._env_note(info, bool(task.metadata.get("arena_files")))
-                    if note and "[Arena 运行环境]" not in (task.description or ""):
-                        task.description = (task.description or "") + "\n\n" + note
-                    break
-            return info
+        self._refresh_description(unique_code, info)
+        return info
 
     def task_description(self, challenge_id: str):
         """返回该题最新描述（含运行环境附注）；未知题返回 None。"""
@@ -840,6 +866,12 @@ class ArenaHarnessAdapter(HarnessAdapter):
                     resp_dump = json.dumps(resp, ensure_ascii=False)
                 except (TypeError, ValueError):
                     resp_dump = str(resp)
+                # 诊断关键项单独打全量（2026-11-21 正式赛：desc 占满截断窗口，
+                # container_addr 是否存在无法从 stdout 判断）。
+                keys = sorted(resp.keys()) if isinstance(resp, dict) else type(resp).__name__
+                addr = resp.get("container_addr") if isinstance(resp, dict) else None
+                print("[arena] start {} keys={} container_addr={!r}".format(
+                    unique_code, keys, addr), file=sys.stderr, flush=True)
                 print("[arena] start {} -> {}".format(unique_code, resp_dump[:300]),
                       file=sys.stderr, flush=True)
 

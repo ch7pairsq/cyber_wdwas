@@ -29,6 +29,8 @@ class _StubArena(BaseHTTPRequestHandler):
     # 旧协议模拟：集合内的题目提交返回字符串 status/result（默认空 = 全部
     # 用 2026-11-21 平台实测 schema：布尔 correct + 计分字段）。
     legacy_submit: set = set()
+    # start 响应可配置：测试 env_note 的 container_addr 有/无两种分支。
+    start_payload: dict = {"started": True}
 
     def log_message(self, *args):  # 静默
         pass
@@ -85,7 +87,7 @@ class _StubArena(BaseHTTPRequestHandler):
             if code in _StubArena.started:
                 return self._json({"error": "duplicate"}, 409)
             _StubArena.started.add(code)
-            return self._json({"started": True})
+            return self._json(dict(_StubArena.start_payload))
         if self.path.startswith("/openapi/v1/challenges/submit"):
             code = self.path.split("unique_code=")[-1].split("&")[0]
             if code in _StubArena.invalid_state:
@@ -124,6 +126,7 @@ def arena_url():
     _StubArena.extra_challenges = False
     _StubArena.help_failures_remaining = 0
     _StubArena.legacy_submit = set()
+    _StubArena.start_payload = {"started": True}
     server = HTTPServer(("127.0.0.1", 0), _StubArena)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -286,7 +289,9 @@ def test_on_demand_policy_skips_prewarm_and_starts_lazily(arena_url):
     info = ad.ensure_environment("CH-1")
     assert "CH-1" in _StubArena.started  # 意图执行前按需拉起
     assert info.get("started") is True
-    assert ad.ensure_environment("CH-1") is None  # 幂等：已启动不再发请求
+    # 幂等：已启动不再发请求（started 集合不变），但仍返回已存 start_info
+    # 并刷新描述（2026-11-21 正式赛：early return 曾让地址永远进不了描述）。
+    assert ad.ensure_environment("CH-1") == info
 
 
 def test_ensure_environment_tolerates_duplicate_409(arena_url):
@@ -298,7 +303,9 @@ def test_ensure_environment_tolerates_duplicate_409(arena_url):
     second = _adapter(arena_url, env_policy="on_demand")
     second.startup()
     second.read_tasks()
-    assert second.ensure_environment("CH-1") is None  # duplicate 被收编，不抛
+    # duplicate 被收编，不抛；返回本进程已知的 start_info（可能为空 dict），
+    # 描述同步刷新（无地址时写明"平台未返回靶机地址"，不误报已启动）。
+    assert second.ensure_environment("CH-1") == {}
 
 
 def test_ensure_environment_raises_on_environment_limit(arena_url):
@@ -376,3 +383,109 @@ def test_submit_legacy_status_schema_still_supported(arena_url):
                                       idempotency_key="k-legacy-bad"))
     assert ok.status == "ACCEPTED"
     assert bad.status == "REJECTED"
+
+
+def test_env_note_guides_arena_http_with_container_addr(arena_url):
+    """正式赛教训（2026-11-21）：模型不知道靶机访问约定，40 轮只用 python_exec。
+    env_note 必须把 arena_http 访问方式写进模型唯一可读面。"""
+    import os
+    _StubArena.start_payload = {"started": True, "container_addr": "10.201.0.201:3000"}
+    old = os.environ.get("ARENA_NETWORK_CIDR")
+    os.environ["ARENA_NETWORK_CIDR"] = "10.201.0.0/16"
+    try:
+        ad = _adapter(arena_url, env_policy="on_demand")
+        ad.startup()
+        ad.read_tasks()  # 正式赛由编排层调用；此处补齐 _tasks 供 note append
+        ad.ensure_environment("CH-1")
+        desc = ad.task_description("CH-1")
+        assert "题目服务地址: http://10.201.0.201:3000" in desc
+        assert "必须用 arena_http 工具" in desc
+        assert "允许访问的目标网段" in desc
+    finally:
+        if old is None:
+            os.environ.pop("ARENA_NETWORK_CIDR", None)
+        else:
+            os.environ["ARENA_NETWORK_CIDR"] = old
+
+
+def test_env_note_without_container_addr_warns_model(arena_url):
+    """start 响应无 container_addr（正式赛 static_file_server 疑似形态）：
+    描述必须显式告知模型缺地址 + 给出推导与工具路径，而不是让模型
+    自己得出"靶机未启动"的错误结论。"""
+    import os
+    _StubArena.start_payload = {"started": True}  # 无 container_addr
+    old = os.environ.get("ARENA_NETWORK_CIDR")
+    try:
+        os.environ.pop("ARENA_NETWORK_CIDR", None)
+        ad = _adapter(arena_url, env_policy="on_demand")
+        ad.startup()
+        ad.read_tasks()  # 正式赛由编排层调用；此处补齐 _tasks 供 note append
+        ad.ensure_environment("CH-1")
+        desc = ad.task_description("CH-1")
+        assert "平台未返回靶机地址" in desc
+        assert "arena_http" in desc
+        assert "允许访问的目标网段" not in desc  # CIDR unset 时不写该节
+    finally:
+        if old is not None:
+            os.environ["ARENA_NETWORK_CIDR"] = old
+
+
+def test_start_diag_prints_container_addr(arena_url, capsys):
+    """start 诊断必须单独打印 keys 与 container_addr（stdout 是比赛唯一
+    可观测面；desc 占满截断窗口导致地址是否存在无法判断）。"""
+    import sys
+    from contextlib import redirect_stderr
+    import io
+    _StubArena.start_payload = {"started": True, "container_addr": "10.201.0.9:80"}
+    ad = _adapter(arena_url, env_policy="on_demand")
+    ad.startup()
+    buf = io.StringIO()
+    with redirect_stderr(buf):
+        ad.ensure_environment("CH-1")
+    out = buf.getvalue()
+    assert "container_addr='10.201.0.9:80'" in out
+    assert "keys=" in out
+
+
+def test_arena_http_accepts_multi_cidr_targets():
+    """正式赛 ARENA_NETWORK_CIDR unset 曾让 arena_http 全程 DENY。
+    多网段逗号分隔必须支持；网段外仍拒绝。"""
+    import os
+    import subprocess
+    import sys
+    tool = "ctf_ext/gateway/arena_http.py"
+    env = dict(os.environ)
+    env["ARENA_PROXY"] = "socks5://127.0.0.1:1"  # 不存在的代理：网段校验通过后死在连接
+    env["ARENA_NETWORK_CIDR"] = "10.201.0.0/16,192.168.0.0/16"
+    inside = subprocess.run([sys.executable, tool, "--host", "192.168.5.5", "--port", "80"],
+                            capture_output=True, text=True, timeout=30, env=env)
+    assert "target outside" not in inside.stdout + inside.stderr
+    outside = subprocess.run([sys.executable, tool, "--host", "8.8.8.8", "--port", "80"],
+                             capture_output=True, text=True, timeout=30, env=env)
+    assert "DENY: target outside attempt network" in outside.stdout + outside.stderr
+
+
+def test_ensure_environment_refreshes_note_after_start_returns_addr(arena_url):
+    """正式赛 bug 回归（2026-11-21）：on_demand 下 read_tasks 先写"平台未返回
+    靶机地址"note，ensure_environment 幂等 early return 导致 start 真拿到的
+    container_addr 永远进不了模型描述。必须刷新为最新地址。"""
+    import os
+    _StubArena.start_payload = {"started": True, "container_addr": "10.201.0.201:3000"}
+    old = os.environ.get("ARENA_NETWORK_CIDR")
+    os.environ["ARENA_NETWORK_CIDR"] = "10.201.0.0/16"
+    try:
+        ad = _adapter(arena_url, env_policy="on_demand")
+        ad.startup()
+        ad.read_tasks()
+        first = ad.task_description("CH-1")
+        assert "平台未返回靶机地址" in first          # read_tasks 时还没有 start_info
+        ad.ensure_environment("CH-1")                  # start 成功返回地址 → 必须刷新
+        desc = ad.task_description("CH-1")
+        assert "题目服务地址: http://10.201.0.201:3000" in desc
+        assert "平台未返回靶机地址" not in desc        # 旧 note 已被替换
+        assert desc.count("[Arena 运行环境]") == 1     # 幂等：不重复叠加
+    finally:
+        if old is None:
+            os.environ.pop("ARENA_NETWORK_CIDR", None)
+        else:
+            os.environ["ARENA_NETWORK_CIDR"] = old
