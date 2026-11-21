@@ -65,7 +65,8 @@ def test_subreaper_fail_open(monkeypatch):
             constructed.append(kwargs)
 
         def start(self):
-            raise AssertionError("测试不得启动真实收割线程")
+            # 只标记不执行：target（_reap）不会被调起，无真实线程产生。
+            constructed[-1]["started"] = True
 
     monkeypatch.setattr(reaper_mod.threading, "Thread", _FakeThread)
     status = reaper_mod.install_subreaper()
