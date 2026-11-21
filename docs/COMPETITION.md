@@ -312,3 +312,33 @@ docker run --rm --network none --read-only --cap-drop ALL \
 
 验证：421 passed / 1 skipped（+7：守门 4 + 接线 3 + golden 接入改写
 stub）。无真环境（用户确认），比赛协议 v2 的开局探针阶段为下一优先级。
+
+## 2026-11-21 第二场复盘 + v16 交付
+
+第二场（2 题）v15 镜像 2/2 全解（weak-password ACCEPTED 1000 分；
+static_file_server 前 25 轮零 arena_http 全 python_exec 仍解出）。
+三事实与修复（commit 8504d45）：
+
+1. **契约谜底**：start 响应 `container_addr=[]` 空数组（两题皆然）——
+   平台不返回地址，模型靠 v15 注入的 arena_help + 题面占位符推导成功。
+2. **认知修正**：python requests/httpx 默认走平台预置 HTTP_PROXY(18082)
+   隧道可达；真正不可靠的是手写 socket/禁用代理直连。v15"python 网络
+   请求不可靠"措辞过度保守 → env_note/DEFAULT_SYSTEM/NUDGES 改三分类
+   （requests 环境代理可用 / socket 直连不可达 / arena_http 最可靠优先）。
+3. **险情**：start 拉容器实测 32.75s vs client_timeout=40s 贴线 → 90s。
+
+start 诊断补 container_status/expires_at；golden 回填实测形状。
+预算校准（740e07e）：per_challenge_seconds 12000→4500、claim_timeout
+3600→1800（19 题/4h 口径，全链覆盖核查含 supervise.py --seconds 注入、
+热更字段、三处 3 环境一致、run_official.sh 注释漂移修正、arena.yaml
+死配置同步）。
+
+**v16 交付**（镜像 1191b877be42 = 5f982ec+6cd3dc7+740e07e+8504d45）：
+镜像内 pytest 421 passed / 1 skipped；无凭据 rc=1 fail-closed（token
+from: none 明确报错）；push portus dev manifest PUT → 201；内容级对账
+PASS（user=10001:10001、entrypoint=[bash, /app/scripts/run_official.sh]、
+RootFS 层数含顺序全一致；Id 不同系 containerd image store 正常现象）。
+
+留观项：remote nudge / unreachable guard 触发情况、container_status
+实测值、ClaimTimeout 频度（如频现先回调 claim_timeout）、正式考题数
+是否 19 以验证预算口径。
