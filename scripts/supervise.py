@@ -1,10 +1,18 @@
 #!/usr/bin/env python3
-"""外部进程 supervisor：心跳卡死则杀进程组并有限重启。
+"""外部进程 supervisor：心跳/推进卡死则杀进程组并有限重启。
 
 只负责进程生命周期，不修改 SQLite、证据或提交状态；重启后的恢复由
 Orchestrator/看门狗完成。示例：
   python3 scripts/supervise.py --heartbeat data/heartbeat --stale-seconds 180 \
+      --progress data/progress --progress-stale-seconds 600 \
       --max-restarts 3 -- python3 -m ctf_ext run --mode llm --heartbeat-file data/heartbeat
+
+两级信号：
+- 心跳（heartbeat）：进程存活，由主 pump 维持——空转时也在刷；
+- 推进（progress）：真实解题活动（模型调用/工具完成/结果落库），只在
+  有前进动作时刷新。2026-11-21 第 19 题正式赛：worker 卡在 fork 阻塞，
+  心跳活着但 35 分钟无模型调用（claim_timeout 30 分钟才打断一次，
+  重开后又卡）——progress 停更可提前发现这种“活着但不推进”的卡死。
 
 正式赛一次性窗口：加 --deadline-seconds 13800，重启时自动把子进程
 --seconds 收缩为剩余时间，总墙钟不超过窗口。
@@ -68,7 +76,8 @@ def set_seconds(command, value):
 
 
 def run(command, heartbeat=None, stale_seconds=180.0, max_restarts=3, backoff=2.0,
-        deadline_seconds=None, min_remaining=90.0):
+        deadline_seconds=None, min_remaining=90.0,
+        progress=None, progress_stale_seconds=600.0):
     # 正式赛一次性窗口：deadline_seconds 从 supervisor 启动起算的总墙钟。
     # 每次启动/重启都把子进程 --seconds 收缩为剩余时间；剩余不足
     # min_remaining 时不再重启（不够完成一次有意义的恢复）。
@@ -84,6 +93,7 @@ def run(command, heartbeat=None, stale_seconds=180.0, max_restarts=3, backoff=2.
         started = time.monotonic()
         proc = subprocess.Popen(cmd, start_new_session=True)
         stale = False
+        stale_reason = "stale heartbeat"
         while True:
             returncode = proc.poll()
             if returncode is not None:
@@ -92,6 +102,17 @@ def run(command, heartbeat=None, stale_seconds=180.0, max_restarts=3, backoff=2.
                 age = heartbeat_age(heartbeat)
                 if age is None or age > stale_seconds:
                     stale = True
+                    terminate(proc)
+                    break
+            # 推进卡死：progress 文件已存在（有过真实活动）但停更超过
+            # progress_stale_seconds——进程活着但解题无前进。文件缺失视为
+            # 未启用/尚未产生首个推进，不判（启动阶段无文件属正常）。
+            if progress and progress_stale_seconds > 0:
+                age = heartbeat_age(progress)
+                if age is not None and age > progress_stale_seconds:
+                    stale = True
+                    stale_reason = "stale progress ({}s, threshold {}s)".format(
+                        int(age), int(progress_stale_seconds))
                     terminate(proc)
                     break
             time.sleep(min(0.5, max(0.05, stale_seconds / 10)))
@@ -106,7 +127,7 @@ def run(command, heartbeat=None, stale_seconds=180.0, max_restarts=3, backoff=2.
             return returncode if returncode is not None else 1
         restarts += 1
         print("supervisor: restart {}/{} after {}".format(
-            restarts, max_restarts, "stale heartbeat" if stale else "exit " + str(returncode)),
+            restarts, max_restarts, stale_reason if stale else "exit " + str(returncode)),
             file=sys.stderr)
         time.sleep(max(0.0, backoff))
 
@@ -114,6 +135,11 @@ def run(command, heartbeat=None, stale_seconds=180.0, max_restarts=3, backoff=2.
 def main(argv=None):
     parser = argparse.ArgumentParser(description="心跳卡死时有限重启 ctf_ext")
     parser.add_argument("--heartbeat", default=None)
+    parser.add_argument("--progress", default=None,
+                        help="推进心跳文件路径（模型调用/工具完成时刷新）；"
+                             "停更超过 --progress-stale-seconds 视为解题卡死")
+    parser.add_argument("--progress-stale-seconds", type=float, default=600.0,
+                        help="推进停更阈值；需大于单次模型超时+单次工具超时之和")
     parser.add_argument("--stale-seconds", type=float, default=180.0)
     parser.add_argument("--max-restarts", type=int, default=3)
     parser.add_argument("--backoff", type=float, default=2.0)
@@ -131,13 +157,16 @@ def main(argv=None):
         parser.error("a command is required after --")
     if args.stale_seconds <= 0:
         parser.error("--stale-seconds must be positive")
+    if args.progress_stale_seconds < 0:
+        parser.error("--progress-stale-seconds must be non-negative")
     if args.deadline_seconds is not None and args.deadline_seconds <= 0:
         parser.error("--deadline-seconds must be positive")
     if args.min_remaining < 0:
         parser.error("--min-remaining must be non-negative")
     return run(command, heartbeat=args.heartbeat, stale_seconds=args.stale_seconds,
                max_restarts=max(0, args.max_restarts), backoff=args.backoff,
-               deadline_seconds=args.deadline_seconds, min_remaining=args.min_remaining)
+               deadline_seconds=args.deadline_seconds, min_remaining=args.min_remaining,
+               progress=args.progress, progress_stale_seconds=args.progress_stale_seconds)
 
 
 if __name__ == "__main__":

@@ -415,6 +415,11 @@ def main(argv=None) -> int:
     if args.command != "run":
         parser.print_help()
         return 2
+    # 孤儿收割（2026-11-21 第 19 题正式赛 fork EAGAIN 根因治理）：解题脚本
+    # spawn 的孙进程退出后成孤儿僵尸，PID1 不收割会耗尽进程表。设
+    # subreaper 后由后台线程回收；失败只记日志（非 Linux/旧内核 fail-open）。
+    from .runtime.reaper import install_subreaper
+    print("[run] subreaper: {}".format(install_subreaper()), file=sys.stderr, flush=True)
     orch = build_runtime(args.db, args.evidence, mode=args.mode, config_path=args.config,
                          heartbeat_path=args.heartbeat_file,
                          claim_timeout_seconds=args.claim_timeout)

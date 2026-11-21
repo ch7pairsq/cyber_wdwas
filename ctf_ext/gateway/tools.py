@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict, Optional, Sequence
 from .policy import REQUIRE_APPROVAL, Decision, PolicyDenied, PolicyEngine
 from .sandbox import run_command
 from ..runtime.control import BudgetExceeded, LoopDetected
+from ..runtime.progress import touch_progress
 
 @dataclass
 class ToolSpec:
@@ -216,6 +217,9 @@ class ToolRegistry:
             return ToolResult(status="error", error_code=type(exc).__name__, retryable=spec.idempotent)
         finally:
             sem.release()
+            # 工具完成也是真实推进：fork 阻塞/子进程 hang 时不会执行到这里，
+            # 推进心跳停更，supervisor 可与模型调用停更一起判定卡死。
+            touch_progress()
 
     def _record_command(self, spec: ToolSpec, argv, cwd, evidence_id, cache_key, complete,
                         returncode, control) -> Optional[str]:

@@ -27,10 +27,17 @@ echo "[run_official] total_wall=${TOTAL_SECONDS}s run_dir=${RUN_DIR}"
 # 版本横幅：四场正式赛无法从日志判断镜像版本（system_chars 相同），
 # 每次交付前更新 VERSION 与镜像 tag 对应，日志首行即可归因。
 echo "[run_official] image_version=$(cat "$ROOT/VERSION" 2>/dev/null || echo unknown)"
+# 推进心跳（v20）：真实解题活动（模型调用/工具完成/结果落库）才刷新，
+# 与存活心跳分离。supervisor 停更 600s 判定"活着但不推进"并重启
+# （2026-11-21 第 19 题正式赛：worker 卡 fork 阻塞，35 分钟无模型调用
+# 而 claim_timeout 30 分钟才打断一次、重开后又卡，supervisor 无感知）。
+export CTF_PROGRESS_HEARTBEAT="$RUN_DIR/agent.progress"
 
 exec python3 "$ROOT/scripts/supervise.py" \
   --heartbeat "$RUN_DIR/agent.heartbeat" \
   --stale-seconds 180 \
+  --progress "$RUN_DIR/agent.progress" \
+  --progress-stale-seconds 600 \
   --max-restarts 3 \
   --deadline-seconds "$TOTAL_SECONDS" \
   --min-remaining 120 \

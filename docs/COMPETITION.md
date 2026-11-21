@@ -452,3 +452,32 @@ ruby-dev 闭包 + gcc 风险大）、CFR 反编译 jar（下载失败）、JNDIM
 全被掩盖）；b) 版本对齐必须先实测基础镜像发行版（trixie vs bookworm 差
 一个世代，闭包混装被 breaks 拦截）；c) devbox 磁盘 40G 是硬约束——
 build 中间层每轮 ~1.5GB，失败重试前必须 prune（本轮清理后 82%→73%）。
+
+## 2026-11-21 第七轮：第 19 题正式赛复盘与 v20 稳定性修复
+
+19 题/4h 正式赛（用户中途主动停止）：解 6 错 4，35 分钟无模型调用。
+日志复盘确认三层故障叠加，均为 2 题小场从未触发的长跑缺陷：
+
+1. **fork EAGAIN 根因**：python_exec 解题脚本 spawn 的孙进程（qemu/JVM）
+   退出后成孤儿僵尸，容器 PID1（bash）不收割 → 进程表耗尽 → fork 阻塞
+   （BlockingIOError）→ 工具层持续 TOOL_BUSY → worker 全卡。
+2. **发现层盲区**：supervisor 只判存活心跳（pump 空转时也在刷），而
+   claim_timeout(SIGALRM)=1800s 要 30 分钟才打断一次卡死 worker，打断后
+   重开 intent 又卡——"35 分钟无模型调用"与 30 分钟硬杀线精确吻合。
+3. **预算浪费主凶**：max_tokens=4096 截断（finish_reason=length）8 次，
+   worker 无 in-claim 重试直接报废 attempt，同题 3 连败
+   provider_error_exhausted blocked；平台环境问题（container_addr 未返回、
+   ${challenge_host} 占位符未展开、附件缺失）另烧多题 blocked。
+
+**v20 修复**（430 passed 1 skipped，较 v19 基线 +7 个新测试）：
+- `runtime/progress.py` 推进心跳：模型调用/工具完成/结果落库才刷新，
+  与存活心跳分离；`supervise.py --progress --progress-stale-seconds 600`
+  停更即重启（"活着但不推进"兜底，任何未知卡死分钟级可发现）；
+- `runtime/reaper.py` PR_SET_CHILD_SUBREAPER + waitpid 轮询线程：收养并
+  收割孤儿僵尸，治 fork EAGAIN 根因（macOS fail-open 返回 unavailable）；
+- max_tokens 4096→8192 + worker 截断精简重试（限 1 次，防循环烧 attempt）；
+- blocked 调度设计复查：intent 级熔断 + planner 终态不扩展已健全，不改。
+
+**教训**：长跑正式赛（19 题/4h）是独立于小场 2/2 的测试面——资源累积、
+预算口径、平台环境数据问题都只在长跑暴露；supervisor 的"活性"与
+"推进"必须分开度量，存活不等于前进。

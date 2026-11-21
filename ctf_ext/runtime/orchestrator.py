@@ -26,6 +26,7 @@ from .heartbeat import HeartbeatFile
 from .lease import LeaseHeartbeat
 from .metrics import Metrics, framework_metrics
 from .planner import IntentPlanner
+from .progress import touch_progress
 from .watchdog import ClaimTimeout, DeadlineGuard, recover_expired_leases
 
 
@@ -343,6 +344,8 @@ class Orchestrator:
             result.failure_reason or "-"), file=sys.stderr, flush=True)
         self._validate_contract(claim, result)
         self._record_usage(result)
+        # 结果落库也是真实推进：调度层完成一个 claim 的完整链路。
+        touch_progress()
         decision = self._evaluate_candidate(claim, result, started)
         receipt, write_error, submission_keys = self._persist_result(claim, result, decision)
         if receipt is None:

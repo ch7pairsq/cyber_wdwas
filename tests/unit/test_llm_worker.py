@@ -133,3 +133,32 @@ def test_prompt_file_is_used_as_system_prompt():
     worker = LlmWorker(provider, prompt_path=path, evidence_check=ev.verify)
     worker.work(claim, {})
     assert provider.calls[0]["kwargs"]["system"] == "自定义系统提示"
+
+
+def _truncation_error():
+    from ctf_ext.llm.provider import ProviderError
+    return ProviderError("empty model response (finish_reason=length, completion_tokens=4096)")
+
+
+def test_truncated_output_retried_with_compact_hint():
+    """finish_reason=length 空响应：注入精简提示 in-claim 重试一次（v20）。
+
+    2026-11-21 第 19 题正式赛 8 次截断每次都直接报废 attempt，同题 3 连败
+    进入 provider_error_exhausted blocked。"""
+    board, ev, claim, sha = _setup()
+    provider = FakeProvider([_truncation_error(), _resp(_payload(sha))])
+    result = LlmWorker(provider, evidence_check=ev.verify).work(claim, {})
+    assert result.status == "completed" and result.outcome == "success"
+    assert len(provider.calls) == 2
+    last_user = [m for m in provider.calls[1]["messages"] if m.get("role") == "user"][-1]
+    assert "max_tokens" in last_user["content"]  # 截断纠正提示已注入
+
+
+def test_truncation_retry_only_once_then_fails():
+    """第二次截断不再重试：attempt 可重试失败（防 in-claim 循环绕过熔断）。"""
+    board, ev, claim, sha = _setup()
+    provider = FakeProvider([_truncation_error(), _truncation_error()])
+    result = LlmWorker(provider, evidence_check=ev.verify).work(claim, {})
+    assert result.status == "failed" and result.outcome == "error"
+    assert result.failure_reason == "ProviderError"
+    assert len(provider.calls) == 2  # 重试恰一次

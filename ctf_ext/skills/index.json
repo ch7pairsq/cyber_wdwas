@@ -456,7 +456,7 @@
   {
     "name": "crypto.csidh",
     "domain": "crypto",
-    "trigger": "CSIDH 同源：可行性判断与 oracle 饭复",
+    "trigger": "CSIDH 同源：可行性判断与 oracle 恢复",
     "keywords": ["csidh", "sidh", "isogeny", "supersingular", "class", "group", "ideal", "oracle"],
     "prerequisites": ["python_exec"],
     "tokens_hint": 700,

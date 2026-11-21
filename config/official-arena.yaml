@@ -132,7 +132,10 @@ model:
   base_url: https://api.deepseek.com
   model: deepseek-flash
   api_key_env: BAIZHI_API_KEY   # 注入名不变；值为 DeepSeek 官方 API key
-  max_tokens: 4096
+  # 2026-11-21 v20：4096 在工具循环多轮后的 B.2 大 JSON 上频繁截断
+  # （finish_reason=length 8 次，每次都报废一个 attempt），提到 8192；
+  # worker 层另有截断精简重试独兑（限 1 次）。
+  max_tokens: 8192
   tools_enabled: true
   # 双模型换挡：stage>=pro_from_stage 的换路径回合与提交前评审路由到 Pro
   # （同一官方端点同一凭据）；调用失败/每题次数超限自动回退主模型（fail-open）。

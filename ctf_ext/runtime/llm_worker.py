@@ -20,6 +20,7 @@ from ..llm.provider import (
 from ..llm.compress import tool_output_preview
 from ..skills.loader import SkillLoader
 from ..store.blackboard import Claim, WorkerResult
+from .progress import touch_progress
 from .control import BudgetExceeded, LoopDetected
 
 DEFAULT_SYSTEM = (
@@ -66,6 +67,13 @@ UNREACHABLE_MARKERS = (
     "connection refused", "no response", "cannot connect", "can't connect",
 )
 FENCE = chr(96) * 3
+
+# 输出截断的 in-claim 重试提示（限 1 次）：finish_reason=length 的空响应
+# 是 max_tokens 上限截断 JSON 所致（2026-11-21 第 19 题正式赛 8 次，
+# 每次 flirt 4096），不加干预时同 prompt 重试大概率同样截断。
+TRUNCATION_CORRECTION = ("上一次输出因达到 max_tokens 上限被截断，没有产出有效 JSON。"
+                         "请减少推理叙述，直接输出紧凑的附录 B.2 JSON 对象；"
+                         "summary/attempt 列表每项一句话，不要在输出里贴大段工具结果。")
 
 
 def _last_message_head(messages, limit: int = 200) -> str:
@@ -300,12 +308,16 @@ class LlmWorker:
         contract_attempts = 0
         hint_sent = False
         tool_name_retried = False  # 幻觉工具名的 in-claim 纠正重试，每 claim 限 1 次
+        truncation_retried = False  # 输出截断（finish_reason=length）的精简重试，每 claim 限 1 次
         # 结论守门：远程题全程 0 次 arena_http 调用时，主动提示 + 拒收
         # "靶机未启动/不可达"类结论（各限 1 次，不无限阻塞）。
         arena_http_calls = 0
         remote_nudge_sent = False
         unreachable_guard_used = False
         while True:
+            # 推进心跳：每轮模型调用前刷新。卡在 provider.complete 或工具
+            # fork 阻塞时停更，supervisor 据此发现"活着但不推进"的卡死。
+            touch_progress()
             provider = None  # 仅在本轮 complete 前赋值；异常时区分是否 Pro 回退
             thinking_used = 0  # 本轮思考预算；网关拒绝时粘滞关闭并重试
             try:
@@ -378,6 +390,16 @@ class LlmWorker:
                     print("[llm] hallucinated tool name; retrying with correction",
                           file=sys.stderr, flush=True)
                     messages.append({"role": "user", "content": TOOL_NAME_CORRECTION})
+                    continue
+                if ("empty model response" in str(exc)
+                        and "finish_reason=length" in str(exc) and not truncation_retried):
+                    # 输出被 max_tokens 截断（JSON 未闭合）：直接报废 attempt 会
+                    # 让同题 3 连败进入 provider_error_exhausted blocked（2026-11-21
+                    # 第 19 题正式赛实测）。注入精简提示 in-claim 重试一轮。
+                    truncation_retried = True
+                    print("[llm] output truncated by max_tokens; retrying compact",
+                          file=sys.stderr, flush=True)
+                    messages.append({"role": "user", "content": TRUNCATION_CORRECTION})
                     continue
                 if thinking_used > 0 and not self._thinking_down:
                     self._thinking_down = True
