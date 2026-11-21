@@ -98,6 +98,9 @@ class Orchestrator:
         self._endgame_min_seconds = max(0.0, float(endgame_min_seconds))
         self._endgame: Dict[str, float] = {}
         self._endgame_granted: set = set()
+        # 平台 REJECTED 后的重试序号：strategy_key 唯一化（misc.flagretry.N），
+        # 内存态即可——重启后新回执从 1 重新编号，attempt_key 去重兜底。
+        self._flag_retry_seq: Dict[str, int] = {}
         factory = getattr(worker, "_control_factory", None)
         if callable(factory):
             factory.endgame = self._endgame
@@ -547,11 +550,70 @@ class Orchestrator:
         return self._board.accepted_challenge_ids()
 
     def _collect_submissions(self, events):
-        """把提交网关回执转成指标/延迟观测。"""
+        """把提交网关回执转成指标/延迟观测；REJECTED 触发题目重开续解。"""
         for event in events:
             status = event.get("status", "unknown")
             self._metrics.incr("submissions." + str(status).lower())
             self._metrics.observe("submissions.latency_seconds", float(event.get("latency_seconds") or 0))
+            if status == "REJECTED":
+                try:
+                    self._plan_flag_retry(event)
+                except Exception as exc:
+                    # 重开失败只记事件：回执本身已落库，不能拖垮 pump 主流程。
+                    self._board.append_event("flag_retry_failed", str(event.get("challenge_id") or ""),
+                                             {"error": type(exc).__name__})
+
+    def _plan_flag_retry(self, event) -> None:
+        """平台判 REJECTED 后重开题目并规划换路 followup。
+
+        Gate 三门确认 ≠ 平台真值（2026-11-21 正式赛第 2 题错旗通过三门却被
+        平台判错的教训）；错旗提交不能把会话永久钉死在 confirmed——调度器
+        排除 confirmed 题目、SessionControl 对 confirmed/stopped 抛
+        'session closed'，必须显式复位。重开 = 会话回 ready + 新步数窗口 +
+        misc.flagretry.N 意图。被拒 flag 原文放 intent params：lessons 层
+        脱敏会抹掉 flag（flag{redacted}），Worker 需要原文才能避开重提。
+        """
+        challenge_id = str(event.get("challenge_id") or "")
+        if not challenge_id or self._state is None:
+            return
+        if challenge_id in self._board.accepted_challenge_ids():
+            return  # 回执竞态：平台终态以 ACCEPTED 为准，不重开
+        def _reopen(s):
+            if s.get("status") in ("confirmed", "stopped"):
+                s["status"] = "ready"
+        self._state.patch(challenge_id, _reopen)
+        from .control import reset_intent_window
+        reset_intent_window(self._state, challenge_id, revive_stopped=True)
+        count = self._board.count_intents(challenge_id)
+        limit = int(getattr(self._planner, "max_intents_per_challenge", 4) or 4)
+        if count >= limit:
+            self._board.append_event("planner_cap_reached", "", {
+                "challenge_id": challenge_id, "intents": count,
+                "max_intents_per_challenge": limit})
+            return
+        seq = self._flag_retry_seq.get(challenge_id, 0) + 1
+        self._flag_retry_seq[challenge_id] = seq
+        strategy_key = "misc.flagretry.{}".format(seq)
+        rejected_flag = str(event.get("answer") or "")
+        draft = IntentDraft(
+            challenge_id=challenge_id,
+            strategy_key=strategy_key,
+            params={
+                "phase": "flag_retry",
+                "reason": "platform_rejected",
+                "rejected_flag": rejected_flag,
+                "instruction": "平台判定上次提交的 flag 错误（correct=false，原文见 rejected_flag）。"
+                               "不要重复提交同一答案；回到题目环境核对该 flag 的来源"
+                               "（文件版本/服务状态可能已变化），换证据路径重新定位真实 flag。",
+            },
+            est_tokens=2000)
+        try:
+            intent_id = self._board.add_intent(draft)
+        except DuplicateStrategy:
+            return  # 已有同名意图在排队；会话重开已生效
+        self._board.append_event("flag_retry_planned", intent_id, {
+            "challenge_id": challenge_id, "strategy_key": strategy_key,
+            "rejected_flag": rejected_flag})
 
     def _drain_gateway(self) -> None:
         """运行收尾：有界宽限内排空在途提交，然后关网关。

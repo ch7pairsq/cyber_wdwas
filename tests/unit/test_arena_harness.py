@@ -26,6 +26,9 @@ class _StubArena(BaseHTTPRequestHandler):
     extra_challenges: bool = False
     # startup 重试模拟：前 N 次 help 返回 503 resource_unavailable。
     help_failures_remaining: int = 0
+    # 旧协议模拟：集合内的题目提交返回字符串 status/result（默认空 = 全部
+    # 用 2026-11-21 平台实测 schema：布尔 correct + 计分字段）。
+    legacy_submit: set = set()
 
     def log_message(self, *args):  # 静默
         pass
@@ -92,9 +95,21 @@ class _StubArena(BaseHTTPRequestHandler):
             if code not in _StubArena.started:
                 return self._json({"error": "challenge_not_started"}, 409)
             _StubArena.submissions.append(payload)
+            if code in _StubArena.legacy_submit:
+                if payload.get("flag") == "flag{arena_stub_1}":
+                    return self._json({"status": "ACCEPTED"})
+                return self._json({"status": "REJECTED", "detail": "flag mismatch"})
             if payload.get("flag") == "flag{arena_stub_1}":
-                return self._json({"status": "ACCEPTED"})
-            return self._json({"status": "REJECTED", "detail": "flag mismatch"})
+                # 2026-11-21 正式赛实测回执（143B/145B）：布尔 correct + 计分字段，
+                # 不携带 status/result 字符串协议。
+                return self._json({"correct": True, "awarded": 100,
+                                   "cumulative_score": 100, "correct_flag_count": 1,
+                                   "total_flag_count": 1, "matched_flag_index": 0,
+                                   "is_completed": True})
+            return self._json({"correct": False, "awarded": 0,
+                               "cumulative_score": 100, "correct_flag_count": 0,
+                               "total_flag_count": 1, "matched_flag_index": None,
+                               "is_completed": False})
         if self.path.startswith("/openapi/v1/challenges/finish"):
             _StubArena.finished.append(payload)
             return self._json({"finished": True})
@@ -108,6 +123,7 @@ def arena_url():
     _StubArena.finished = []
     _StubArena.extra_challenges = False
     _StubArena.help_failures_remaining = 0
+    _StubArena.legacy_submit = set()
     server = HTTPServer(("127.0.0.1", 0), _StubArena)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -316,3 +332,47 @@ def test_submit_invalid_state_without_completion_stays_unknown(arena_url):
     receipt = ad.submit_answer(sub)
     assert receipt.status == "UNKNOWN"
     assert "invalid_state" in receipt.detail
+
+
+def test_submit_platform_correct_schema_accepted(arena_url):
+    # 平台真实回执（布尔 correct + 计分字段）必须解析为 ACCEPTED：v11 正式赛
+    # 第 1 题 correct=true 已计 1000 分，仍因旧解析只认 status/result 字符串
+    # 落 UNKNOWN 的教训。detail 带计分字段供 [submit] 日志观测。
+    ad = _adapter(arena_url)
+    ad.startup()
+    ad.read_tasks()
+    sub = Submission(challenge_id="CH-1", answer="flag{arena_stub_1}",
+                     idempotency_key="k-new-ok")
+    receipt = ad.submit_answer(sub)
+    assert receipt.status == "ACCEPTED"
+    assert "awarded=100" in receipt.detail
+    assert "cumulative_score=100" in receipt.detail
+    assert "is_completed=True" in receipt.detail
+
+
+def test_submit_platform_correct_schema_rejected(arena_url):
+    # correct=false 必须落 REJECTED（不得像 v11 那样丢进 UNKNOWN——REJECTED
+    # 语义驱动编排层重开题目续解）。
+    ad = _adapter(arena_url)
+    ad.startup()
+    ad.read_tasks()
+    sub = Submission(challenge_id="CH-1", answer="flag{wrong_flag_x9}",
+                     idempotency_key="k-new-bad")
+    receipt = ad.submit_answer(sub)
+    assert receipt.status == "REJECTED"
+    assert "awarded=0" in receipt.detail
+    assert "correct_flag_count=0" in receipt.detail
+
+
+def test_submit_legacy_status_schema_still_supported(arena_url):
+    # 旧协议（字符串 status/result）兼容保留：练习平台或降级版本可能仍返回。
+    _StubArena.legacy_submit.add("CH-1")
+    ad = _adapter(arena_url)
+    ad.startup()
+    ad.read_tasks()
+    ok = ad.submit_answer(Submission(challenge_id="CH-1", answer="flag{arena_stub_1}",
+                                     idempotency_key="k-legacy-ok"))
+    bad = ad.submit_answer(Submission(challenge_id="CH-1", answer="flag{wrong_flag_x9}",
+                                      idempotency_key="k-legacy-bad"))
+    assert ok.status == "ACCEPTED"
+    assert bad.status == "REJECTED"

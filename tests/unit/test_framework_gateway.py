@@ -150,6 +150,56 @@ def test_D03_committed_draft_survives_gateway_restart():
             recovered.close()
 
 
+def test_rejected_allows_new_answer_but_dedups_same_flag():
+    # 2026-11-21 正式赛第 2 题错旗教训：REJECTED 后题目不能永久关闭——
+    # 不同答案的新候选必须能重新入队；同一答案重复被拒不重发；
+    # 回执未定（DRAFT/SENDING/UNKNOWN）与已 ACCEPTED 仍保持去重。
+    with fixture() as store:
+        adapter = Adapter(SubmitReceipt('REJECTED', detail='flag mismatch'))
+        gateway = SubmitGateway(store, adapter)
+        try:
+            first = enqueue(store, gateway, proof(store))
+            gateway.flush(5)
+            assert len(adapter.calls) == 1
+            # 同一 flag 再次确认 → 沿用旧键，不重发
+            assert enqueue(store, gateway, proof(store)) == first
+            # 不同答案的新候选 → 新键入队并重发；回执事件携带 answer 原文
+            other = 'flag{retry_91c4e2}'
+            second = enqueue(store, gateway, proof(store, output=other, declared=other))
+            assert second != first
+            completed = gateway.flush(5)
+            assert len(adapter.calls) == 2
+            assert adapter.calls[1].answer == other
+            rejected_events = [e for e in completed if e['status'] == 'REJECTED']
+            assert rejected_events and rejected_events[-1]['answer'] == other
+            assert store.db.execute('SELECT COUNT(*) FROM submissions').fetchone()[0] == 2
+            # 第二个候选也被拒后再提交同答案 → 去重；换新答案 → 放行
+            assert enqueue(store, gateway, proof(store, output=other, declared=other)) == second
+            third = 'flag{retry_44f0b7}'
+            assert enqueue(store, gateway, proof(store, output=third, declared=third)) not in (first, second)
+        finally:
+            gateway.close()
+
+
+def test_pending_or_accepted_submission_still_dedups_new_candidates():
+    # 回执未定（DRAFT）时不同答案的新候选沿用旧键（test_D03 覆盖）；
+    # 这里锁定已 ACCEPTED 后：同答案/新答案都不再入队。
+    with fixture() as store:
+        adapter = Adapter()
+        gateway = SubmitGateway(store, adapter)
+        try:
+            key = enqueue(store, gateway, proof(store))
+            gateway.flush(5)  # → ACCEPTED
+            assert len(adapter.calls) == 1
+            other = 'flag{pending_5d2e8}'
+            assert enqueue(store, gateway, proof(store)) == key
+            assert enqueue(store, gateway, proof(store, output=other, declared=other)) == key
+            assert len(adapter.calls) == 1
+            assert store.db.execute('SELECT COUNT(*) FROM submissions').fetchone()[0] == 1
+        finally:
+            gateway.close()
+
+
 def test_A03_unconfirmed_candidate_cannot_enter_outbox():
     with fixture() as store:
         gateway = SubmitGateway(store, Adapter())

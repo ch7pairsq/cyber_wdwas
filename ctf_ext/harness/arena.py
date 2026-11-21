@@ -541,6 +541,13 @@ def _safe_float(v):
         return 0.0
 
 
+def _receipt_truthy(correct) -> bool:
+    """平台回执 correct 字段的真值判定：布尔直读，字符串/数字宽松转写。"""
+    if isinstance(correct, bool):
+        return correct
+    return str(correct).strip().lower() in ("true", "1", "yes")
+
+
 class ArenaHarnessAdapter(HarnessAdapter):
     """协议版本 v1-arena；端点默认值对应 Arena /openapi/v1 约定，可由配置覆盖。"""
 
@@ -921,12 +928,30 @@ class ArenaHarnessAdapter(HarnessAdapter):
                                          detail="invalid_state without completion confirmation; reconcile manually")
                 return SubmitReceipt(status="REJECTED", detail=text[:300])
         status = ""
+        platform_detail = ""
         if isinstance(resp, dict):
-            status = str(resp.get("status") or resp.get("result") or "").lower()
+            correct = resp.get("correct")
+            if correct is not None:
+                # arena 平台真实回执（2026-11-21 实测 143B/145B）：{'correct': bool,
+                # awarded, cumulative_score, correct_flag_count, total_flag_count,
+                # matched_flag_index, is_completed}——布尔字段，不携带 status/result
+                # 字符串协议（v11 正式赛第 1 题平台已判对并计 1000 分，仍因本处
+                # 只认字符串而落 UNKNOWN 的教训）。accepted/rejected 的字符串
+                # 匹配保留：兼容旧协议与布尔转写的 "true"/"false"。
+                status = "true" if _receipt_truthy(correct) else "false"
+            else:
+                status = str(resp.get("status") or resp.get("result") or "").lower()
+            platform_detail = " ".join(
+                "{}={}".format(k, resp[k]) for k in
+                ("awarded", "cumulative_score", "is_completed",
+                 "correct_flag_count", "total_flag_count", "matched_flag_index")
+                if k in resp)
         if status in ("accepted", "correct", "success", "ok", "true"):
-            return SubmitReceipt(status="ACCEPTED", receipt_id=str(resp.get("receipt") or key[:8]))
+            return SubmitReceipt(status="ACCEPTED", receipt_id=str(resp.get("receipt") or key[:8]),
+                                 detail=platform_detail or "accepted")
         if status in ("rejected", "incorrect", "wrong", "false"):
-            return SubmitReceipt(status="REJECTED", detail=str(resp.get("detail") or "")[:300])
+            detail = platform_detail or str(resp.get("detail") or "")[:300]
+            return SubmitReceipt(status="REJECTED", detail=detail[:300])
         return SubmitReceipt(status="UNKNOWN", detail=str(resp)[:300])
 
     def get_receipt(self, idempotency_key: str) -> Optional[SubmitReceipt]:

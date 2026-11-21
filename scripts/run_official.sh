@@ -35,5 +35,7 @@ exec python3 "$ROOT/scripts/supervise.py" \
     --db "$RUN_DIR/official.db" \
     --evidence "$RUN_DIR/evidence" \
     --heartbeat-file "$RUN_DIR/agent.heartbeat" \
-    --claim-timeout 1200 \
     --report "$RUN_DIR/report.json"
+# claim 超时不传 CLI：official-arena.yaml budget.claim_timeout_seconds=3600 是
+# 唯一事实源（v11 硬编码 --claim-timeout 1200 与配置打架，[run] 打印 1200、
+# [orch] 热配置覆盖成 3600，排查时两处对不上）。

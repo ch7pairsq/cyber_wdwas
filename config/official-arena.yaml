@@ -128,14 +128,19 @@ controller:
   # 与 arena.yaml 2026-11-21 校准一致：步数窗口按意图重置
   # （reset_intent_window），旧阈值 [30,50,70,100] 导致 pro 档永远触达
   # 不了，全程 stage0 盲试。前移后：8 步轻思考、16 步启用 pro 换路径、
-  # 24 步深水、32 步心跳止损。
+  # 24 步深水。
+  # v11.5 教训（2026-11-21 正式赛 static_file_server）：心跳止损曾设在
+  # 32 步——每轮 ≈2 步（1 模型预留 + 1 工具预留），16 轮即踩线，探索型
+  # 题目首轮被 stage4（active_slots=0）硬杀。心跳线必须放到单个 attempt
+  # 的 max_tool_rounds=40（≈80-100 步）之外：96 步 ≈ 48 轮，attempt 能
+  # 自然收尾；防死循环由 stall_steps/repeat_limit/预算三重兜底。
   thresholds:
   - 8
   - 16
   - 24
-  - 32
-  # 与 max_tool_rounds=40 对齐：stage4 在 32-40 步区间停止新增调用。
-  max_steps: 40
+  - 96
+  # 步数硬上限需大于心跳阈值（96），否则步数墙先于心跳触发。
+  max_steps: 120
   # 跨题并行 worker 数：对齐平台 3 环境上限（题内串行见 concurrency）。
   parallel_acceptance: true
   parallel_agents: 3

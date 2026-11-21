@@ -120,14 +120,18 @@ controller:
   # 预算（1500s/600k tokens）实测仅够 20-26 步——旧阈值 [30,50,70,100]
   # 导致 pro 档（stage2=50 步）永远触达不了，全程 stage0 盲试（正式赛
   # static_file_server 三次尝试 46 步未进 stage1 的教训）。前移后：
-  # 8 步轻思考、16 步启用 pro 换路径、24 步深水、32 步心跳止损。
+  # 8 步轻思考、16 步启用 pro 换路径、24 步深水。
+  # v11.5 教训：心跳止损曾设在 32 步——每轮 ≈2 步（1 模型预留 + 1 工具
+  # 预留），16 轮即踩线被 stage4 硬杀（与 official-arena.yaml 同步修正）。
+  # 心跳线放到 max_tool_rounds=40（≈80-100 步）之外；防死循环由
+  # stall/repeat/预算兜底。
   thresholds:
   - 8
   - 16
   - 24
-  - 32
-  # 与 max_tool_rounds=40 对齐：stage4 在 32-40 步区间停止新增调用
-  max_steps: 40
+  - 96
+  # 步数硬上限需大于心跳阈值（96），否则步数墙先于心跳触发。
+  max_steps: 120
   # 跨题并行 worker 数：对齐平台 3 环境上限（题内串行见 concurrency）。
   # 2026-11-19 用户验收"单引擎验收"通过：三题并行、题内 intent 串行，
   # 以 parallel_acceptance 显式放行（config.py 校验闸门）。

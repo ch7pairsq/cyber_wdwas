@@ -1,6 +1,8 @@
 """持久化提交 Outbox：主线程持有 SQLite，守护线程只执行网络调用。
 
-DRAFT 才允许 POST；SENDING/UNKNOWN 重启后只查询。同题确认后不接收第二候选。
+DRAFT 才允许 POST；SENDING/UNKNOWN 重启后只查询。同题去重按状态分级：
+回执未定（DRAFT/SENDING/UNKNOWN）或已 ACCEPTED 不接收第二候选；
+平台判 REJECTED 后允许不同答案的新候选入队（错旗续解）。
 正式 Harness 必须自行提供有界网络超时；停机不等待可能卡死的供应商调用。
 """
 from __future__ import annotations
@@ -43,9 +45,30 @@ class SubmitGateway:
         if not gate or gate['status'] != 'confirmed' or json.loads(gate['payload'])['declaration_hash'] != decision.declaration_hash:
             raise ValueError('recorded gate decision required')
         key = self.key(decision.challenge_id, decision.answer)
-        previous = db.execute('SELECT idempotency_key FROM submissions WHERE challenge_id=? ORDER BY sent_at LIMIT 1', (decision.challenge_id,)).fetchone()
-        if previous:
-            return previous['idempotency_key']
+        rows = db.execute(
+            'SELECT idempotency_key,answer,status FROM submissions WHERE challenge_id=?'
+            ' ORDER BY updated_at, rowid', (decision.challenge_id,)).fetchall()
+        if rows:
+            # 同题去重按状态分级（2026-11-21 正式赛第 2 题错旗教训：REJECTED
+            # 后题目被判永久关闭，无法用新答案续解）：
+            # - 已 ACCEPTED：题目完成，不再入队任何新候选；
+            # - DRAFT/SENDING/UNKNOWN：回执未知，等查询对账，不并发重发；
+            # - REJECTED/BLOCKED：允许"不同答案"的新候选入队；同一答案重复
+            #   被拒 → 沿用旧键去重，避免无意义重发。
+            for row in rows:
+                if row['status'] == 'ACCEPTED':
+                    return row['idempotency_key']
+            last = rows[-1]
+            if last['status'] in ('DRAFT', 'SENDING', 'UNKNOWN'):
+                return last['idempotency_key']
+            try:
+                same = any(row['status'] in ('REJECTED', 'BLOCKED')
+                           and normalized_flag(decision.answer) == normalized_flag(row['answer'])
+                           for row in rows)
+            except (ValueError, TypeError):
+                same = True  # 答案格式异常时保守处理：不重复提交
+            if same:
+                return last['idempotency_key']
         db.execute('INSERT INTO submissions(idempotency_key,challenge_id,answer,status,evidence_ids,updated_at) VALUES(?,?,?,?,?,?)',
                    (key, decision.challenge_id, decision.answer, 'DRAFT', json.dumps(decision.evidence_ids), self.clock()))
         db.execute('INSERT INTO submission_jobs VALUES(?,?,?,?)', (key, decision.id, 0, self.clock()))
@@ -126,6 +149,7 @@ class SubmitGateway:
                     self._correct_once(db, row, receipt)
             event = {'challenge_id': row['challenge_id'], 'status': receipt.status,
                      'receipt_id': receipt.receipt_id, 'idempotency_key': key,
+                     'answer': row['answer'],
                      'latency_seconds': max(0, self.clock() - row['created_at'])}
             self.store.board.append_event('submission', row['challenge_id'], event)
             if receipt.status == 'REJECTED':
