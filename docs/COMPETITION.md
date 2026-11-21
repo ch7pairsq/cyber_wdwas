@@ -412,3 +412,43 @@ remote nudge round 5 正常触发；30+ 轮全 python_exec 无 arena_http
 
 结论：v18 无回归，连续三场 2/2，修复链稳定。正式考（19 题/4h）
 前无需新改动；待观察项只剩 19 题场景的预算口径与 endgame 实战。
+
+## 2026-11-21 第六轮：v19 工具补齐交付（对照参考工程清单审计）
+
+用户对照两份其他工程参考清单要求审计工程缺口。以 v18 镜像逐项实测为准
+（两份清单互相矛盾且不完全对应当前镜像；清单来源确认为"其他工程参考"）。
+
+**v18 镜像审计结果**：24 个注册工具的外部命令 20/21 OK、41 个 Python 库
+15 OK；git 实际存在（清单说无是错的）。缺口分级：P0 = tesseract 缺失
+（ocr_text 已注册但主命令不存在，调用必败；且默认 lang='eng+chi_sim' 必须
+连中文语言包一起装）；P1 = skills 已承诺场景缺弹药（pwn.mips64/
+reverse.riscv.firmware 的 qemu 多架构/gdb-multiarch/unsquashfs，
+forensics.pcap.triage 的 tshark，crypto.lattice.lll 的 fpylll，
+web.java.deser 的 Java 环境）；P2 = 纯 Python 库（ecdsa/py_ecc/bs4/lxml/
+httpx/scapy/pefile/primefac/qiling/LIEF/cysignals）。用户确认 P0+P1+P2 全修。
+
+**v19 交付**（镜像 87dfcd2e92ae）：纯环境增量，零代码改动（唯一代码变更是
+预埋测试 test_ocr_pdf_tools 的接线修复：渲染子进程 SYSTEM_PY→sys.executable
+——PIL 在 /opt/venv 而系统 python3 没有，v18 时该测试因 tesseract 缺失
+被 skip 掩盖）。基础镜像实为 Debian trixie（deb13），v12 构建时删除了
+apt/dpkg 二进制——deb 安装采用"trixie 容器清空 status 全量闭包收集
+（262 deb，314MB）+ ar 引导 dpkg + dpkg 三连跑（--force-depends + configure -a）"
+离线方案。工具矩阵 32/32 OK（tesseract+chi_sim/eng、gdb-multiarch、
+qemu-x86_64/aarch64/mipsel/riscv64、unsquashfs、tshark、java/javac、ruby、
+one_gadget）；新增 Python 库 import 11/11 OK；site-packages 清单对比
+关键库 13/13 SAME 零移除（unicorn/capstone/pyelftools/pycryptodome/sympy/
+z3/gmpy2/pwntools/requests/numpy/scipy/pillow/pyyaml——契约防御真绿灯，
+注意 venv 无 pip 模块，freeze 比对是空对空假绿灯，必须用目录清单比对）；
+镜像内 pytest 424 passed（423 基线 + OCR 端到端激活通过）；无凭据 rc=1。
+
+**跳过项（P3 待办）**：seccomp-tools（racc gem 需 native 编译链，
+ruby-dev 闭包 + gcc 风险大）、CFR 反编译 jar（下载失败）、JNDIMap（repo
+未定位）、qilingrootfs（rootfs 资源未下载，qiling 本体已装）、fpylll
+（无 cp312 wheel）、hashpumpy（C 扩展无 wheel，python_exec 可手写替代）；
+反编译器（Ghidra headless/radare2）需要 catalog 新增工具 spec，另行开发。
+
+**本轮教训**：a) Dockerfile RUN 链尾部的 `|| true` 会吞掉全链失败
+（首版 build "成功"但 apt/pip/gem 全没装——bash 无此文件、无 apt 二进制
+全被掩盖）；b) 版本对齐必须先实测基础镜像发行版（trixie vs bookworm 差
+一个世代，闭包混装被 breaks 拦截）；c) devbox 磁盘 40G 是硬约束——
+build 中间层每轮 ~1.5GB，失败重试前必须 prune（本轮清理后 82%→73%）。

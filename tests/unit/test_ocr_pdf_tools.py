@@ -105,7 +105,7 @@ def test_pdf_images_list_and_extract_end_to_end(tmp_path):
 
 @pytest.mark.skipif(not HAS_OCR_STACK, reason="镜像无 tesseract 时跳过真实 OCR")
 def test_ocr_text_real_end_to_end(tmp_path):
-    """用系统 Python + PIL 渲染含文字 PNG，走 registry 全链路识别（只验证接线与可运行）。"""
+    """用运行时 Python（venv，带 PIL）渲染含文字 PNG，走 registry 全链路识别。"""
     script = (
         "from PIL import Image, ImageDraw, ImageFont\n"
         "img = Image.new('RGB', (320, 96), 'white')\n"
@@ -117,7 +117,8 @@ def test_ocr_text_real_end_to_end(tmp_path):
         "d.text((16, 16), 'OK', fill='black', font=font)\n"
         "img.save({!r})\n".format(str(tmp_path / "shot.png"))
     )
-    proc = subprocess.run([str(SYSTEM_PY), "-c", script], capture_output=True, timeout=60)
+    # PIL 在 /opt/venv，渲染子进程必须用当前解释器；SYSTEM_PY 无 PIL（v19 镜像实测）。
+    proc = subprocess.run([sys.executable, "-c", script], capture_output=True, timeout=60)
     assert proc.returncode == 0, proc.stderr.decode()
     result = _registry(str(tmp_path)).execute_arguments(
         "ocr_text", {"path": "shot.png", "lang": "eng"}, cwd=str(tmp_path))
