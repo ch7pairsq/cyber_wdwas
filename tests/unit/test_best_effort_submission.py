@@ -121,7 +121,7 @@ def test_endgame_grants_capped_ready_challenge():
         orch._scheduler = SimpleNamespace(has_waiting_work=lambda: False)
         orch._endgame_bonus = 1.0
         orch._endgame_min_seconds = 0
-        orch._endgame_granted = set()
+        orch._endgame_granted = {}  # cid -> 授权时刻（冷却循环）
         orch._endgame = {}
         orch._endgame_max_grants = 0
         orch._parallel_agents = 1
@@ -149,7 +149,7 @@ def test_endgame_skips_uncapped_ready_challenge():
         orch._scheduler = SimpleNamespace(has_waiting_work=lambda: False)
         orch._endgame_bonus = 1.0
         orch._endgame_min_seconds = 0
-        orch._endgame_granted = set()
+        orch._endgame_granted = {}  # cid -> 授权时刻（冷却循环）
         orch._endgame = {}
         orch._endgame_max_grants = 0
         orch._parallel_agents = 1
@@ -171,7 +171,10 @@ def test_official_arena_config_enables_new_knobs():
     assert validate_config(cfg) == []
     runtime = cfg.get("runtime") or {}
     submission = cfg.get("submission") or {}
-    assert int(runtime.get("max_intents_per_challenge") or 0) == 12
+    # 2026-11-22 模拟赛：12 意图中段烧完 → 50 持续供给 + endgame 冷却循环
+    assert int(runtime.get("max_intents_per_challenge") or 0) == 50
+    budget_cfg = cfg.get("budget") or {}
+    assert float(budget_cfg.get("endgame_cooldown_seconds") or 0) == 900.0
     assert submission.get("best_effort_on_reject") is True
     # practice 入口模式不变：best-effort 仅由 submission 键控制，不动 app.mode
     assert (cfg.get("app") or {}).get("mode") == "practice"

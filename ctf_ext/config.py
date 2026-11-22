@@ -141,8 +141,10 @@ def _validate_config(cfg):
     max_intents = _num(cfg, "runtime", "max_intents_per_challenge", 4)
     if max_intents < 1 or max_intents != int(max_intents):
         errors.append("runtime.max_intents_per_challenge must be a positive integer")
-    elif max_intents > 20:
-        errors.append("runtime.max_intents_per_challenge must be <= 20")
+    elif max_intents > 100:
+        # 2026-11-22 模拟赛：12 意图中段烧完后题进入静默——上限放宽到
+        # 100（official 配置 50），供给由 token/时间预算墙兜底。
+        errors.append("runtime.max_intents_per_challenge must be <= 100")
 
     per_intent = _num(cfg, "budget", "per_intent_seconds", 0)
     per_challenge = _num(cfg, "budget", "per_challenge_seconds", 0)

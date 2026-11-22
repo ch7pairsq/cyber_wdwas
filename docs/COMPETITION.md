@@ -482,6 +482,57 @@ build 中间层每轮 ~1.5GB，失败重试前必须 prune（本轮清理后 82%
 预算口径、平台环境数据问题都只在长跑暴露；supervisor 的"活性"与
 "推进"必须分开度量，存活不等于前进。
 
+## 第十七轮（v30，2026-11-22 模拟赛日志复盘：flag 前缀通用化与 4 小时持续在途）
+
+**背景：模拟赛（2026-11-22）跑不满 4 小时的归因**。用户定调：不是解题不行，
+是 agent 设计跑不完 4 小时、被各种限制打断。日志复盘（20+ 无时间戳 llm/orch
+流）三条根因：
+
+1. **提交错误 = 我们的规则毁掉正确答案**。blocked reason 里明确显示
+   `0xfun{...}`／`csawctf{...}` 前缀被硬编码 `flag{` 模板拒收/改写（
+   TLSB、1black0white 等 5 道提交错误题中至少 3 道因此错失）——worker.md
+   提交纪律段“必须形如 flag{...}”“硬凑格式禁令”是模型 blocked 的直接
+   指令来源，契约层 FLAG_RE 与 gate 层 FLAG_PATTERN 同罪。
+2. **吞吐衰减 = 单 claim 轮次过深上下文滚雪球**。round≥30 出现 126 次、
+   msgs=48、单请求上行 22-54K token、P99 28.9 秒；budget_exceeded 仅 1 次
+   ——不是预算掊的。
+3. **意图供给枯竭**：max_intents_per_challenge=12 中段烧完后题进入静默，
+   剩余数小时无意图在途；endgame 授权一次后 pass2 再 blocked 就永久作废。
+
+**改动一：flag 前缀通用化（匹配宽松 + 提交保真）**。
+
+- 匹配层（FLAG_PATTERN/EVIDENCE_PATTERN/契约 FLAG_RE）：任意 CTF 前缀
+  `<pre>{...}`（首字符字母数字 + 字母数字连字符，总长 1-31）+
+  IGNORECASE（大写 FLAG{ 形态照识别）；**排除“以 flag 结尾的拼贴前缀”**
+  （K01 对抗案例 prefixflag{...}：错前缀提交会被平台判 REJECTED 关闭
+  题目，宁可漏提取也不提交错前缀）。
+- 提交层（normalized_flag）：前缀与大小写逐字保留（case_mode='preserve'
+  语义落到归一层）——旧版硬写成 flag{ 并 casefold 会把正确答案改错。
+- 命中判定/幂等去重换新函数 flag_identity：方括号包装归一为花括号 +
+  casefold（C03 语义不变：大小写/包装变体走 L2 审阅而非直接拒收；同源
+  变体幂等键一致防重复提交）。
+- gateway 4 处比对/幂等键（key、同答去重、反篡改声明比对、平台格式修正
+  比对）全部换 flag_identity；worker.md 提交纪律与第 4 条命中规则改为
+  任意前缀逐字保留、禁止改写前缀。
+- 不变量三确认：C03 变体仍需全票 L2；C01 缺证据仍 L4；幂等键同源同键。
+
+**改动二：endgame 从“一次作废”改“冷却循环”**。
+
+- _endgame_granted 由 set 改 Dict[cid→授权时刻]，同题两次授权最小间隔
+  900s（budget.endgame_cooldown_seconds 热配置可调）；冷却期内跳过、
+  期满重新纳入候选（pass2 消费完的 intent 不占 attempt_key，blackboard
+  只拦 READY/RUNNING/FAILED_RETRYABLE——已验证）。DuplicateStrategy 分支
+  用 setdefault 保留更早的真实授权时刻。4 小时内题不再永久静默。
+- max_intents_per_challenge 12→50（config.py 校验上限 20→100）：短
+  followup 成本低，配合 best-effort 提交 + REJECTED 重开 + endgame 冷却
+  形成持续意图供给；token/时间预算墙仍兑底。
+
+全量 462 passed 4 skipped（新增 test_flag_prefix_generalized、
+test_endgame_cooldown_allows_regrant；K01/C03 等框架测试在双分支正则与
+identity 拆分后全部原生通过）。遗留（赛后项）：单 claim 上下文膨胀治理
+（接力机制细化）、prewarm/files 清单并行拉取、镜像瘦身、crypto 技能卡补
+AMM 纯 Python r-th root 片段（sqrt163 类题靠 gmpy2+sympy，不装 sage）。
+
 ## 第十六轮（v29，2026-11-22 技能别名审计：泛词挤槽修复与中文触发词落地）
 
 **技能卡中文别名机制（63 卡 aliases + 域归一）审计落地**。打分链：题面

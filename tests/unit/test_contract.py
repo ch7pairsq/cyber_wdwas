@@ -89,3 +89,32 @@ def test_strategy_key_allows_hyphen():
         raise AssertionError("expected ContractViolation")
     except ContractViolation as exc:
         assert any("strategy_key" in e for e in exc.errors)
+
+
+def test_flag_prefix_generalized():
+    """前缀通用化（2026-11-22 模拟赛日志）：平台真值前缀随题而异。
+
+    TLSB（0xfun{...}）与 1black0white（csawctf{...}）的"提交错误"根因：
+    旧 FLAG_RE/normalized_flag 硬编码 flag{ 并 casefold，正确前缀被改写
+    或拒收。锁定行为：任意 CTF 前缀逐字保留，大小写不改。
+    """
+    from ctf_ext.harness.contract import FLAG_RE, extract_flag
+    from ctf_ext.harness.flag_gate import FLAG_PATTERN, normalized_flag
+    for raw in ("csawctf{a1B2c3}", "0xfun{AbC-dEf}", "flag{lower_case}",
+                "ctf{Up1}", "sasec2024{x.y_z}"):
+        assert FLAG_RE.fullmatch(raw), raw
+        assert FLAG_PATTERN.fullmatch(raw), raw
+        assert normalized_flag(raw) == raw, raw  # 前缀与大小写原样保留
+    # 大小写敏感平台：casefold 会毁掉真值
+    assert normalized_flag("csawctf{A1b2}") != normalized_flag("csawctf{a1b2}")
+    assert extract_flag("... found csawctf{the_real} ...") == "csawctf{the_real}"
+    # 旧格式回归：flag{...} 仍通过
+    assert normalized_flag("flag{ok}") == "flag{ok}"
+    # 非法格式仍拒：空体、花括号嵌套、前缀含特殊符号
+    for bad in ("flag{}", "csawctf{a{b}c}", "csaw ctF{a}", "{naked}", "csawctf{a b}"):
+        assert not FLAG_RE.fullmatch(bad), bad
+        try:
+            normalized_flag(bad)
+            raise AssertionError(bad)
+        except ValueError:
+            pass

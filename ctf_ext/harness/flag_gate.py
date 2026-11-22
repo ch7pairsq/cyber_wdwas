@@ -1,4 +1,11 @@
-"""声明式 FLAG 与三门校验：L1 使用确定性快路径，L2 必须完成模型审阅。"""
+"""声明式 FLAG 与三门校验：L1 使用确定性快路径，L2 必须完成模型审阅。
+
+前缀通用化（2026-11-22 模拟赛日志）：平台真值前缀随题而异（0xfun{、
+csawctf{……），硬编码 flag{ 会把正确前缀改写/拒收——TLSB、1black0white
+的“提交错误”即此因。前缀规则：首字符字母或数字 + 字母数字连字符，
+总长 1-31；但排除“以 flag 结尾的拼贴前缀”（K01 对抗案例 prefixflag{…}：
+错前缀提交会被平台判 REJECTED 关闭题目，宁可漏提取也不提交错前缀）。
+"""
 from __future__ import annotations
 
 import hashlib
@@ -10,14 +17,34 @@ import time
 import uuid
 from dataclasses import asdict, dataclass, field
 
-FLAG_PATTERN = re.compile(r'(?<![\w{])flag\{[^{}\s]{1,200}\}(?![\w}])', re.IGNORECASE)
-EVIDENCE_PATTERN = re.compile(r'(?<![\w{\[])flag(?:\{[^{}\s]{1,200}\}|\[[^\[\]\s]{1,200}\])(?![\w}\]])', re.IGNORECASE)
+FLAG_PATTERN = re.compile(
+    r'(?<![\w{])flag\{[^{}\s]{1,200}\}(?![\w}])'
+    r'|(?<![\w{])[A-Za-z0-9][A-Za-z0-9-]{0,30}(?<!flag)\{[^{}\s]{1,200}\}(?![\w}])',
+    re.IGNORECASE)
+EVIDENCE_PATTERN = re.compile(
+    r'(?<![\w{\[])flag(?:\{[^{}\s]{1,200}\}|\[[^\[\]\s]{1,200}\])(?![\w}\]])'
+    r'|(?<![\w{\[])[A-Za-z0-9][A-Za-z0-9-]{0,30}(?<!flag)(?:\{[^{}\s]{1,200}\}|\[[^\[\]\s]{1,200}\])(?![\w}\]])',
+    re.IGNORECASE)
 
 def normalized_flag(value):
-    """FLAG 归一化：校验格式并 casefold 花括号内内容；非法格式直接拒绝。"""
+    """FLAG 归一化：校验格式；前缀与大小写原样保留。
+
+    旧版把前缀硬写成 flag{ 并 casefold 内容——平台对前缀和大小写敏感时
+    会把正确答案改错（case_mode='preserve' 的语义落到归一层）。
+    命中判定/幂等去重不要用本函数，用 flag_identity（大小写身份）。
+    """
     if not EVIDENCE_PATTERN.fullmatch(value):
         raise ValueError('unsupported flag format')
-    return 'flag{' + value[5:-1].casefold() + '}'
+    return value
+
+def flag_identity(value):
+    """命中与幂等的身份比较：方括号包装归一为花括号 + casefold。
+
+    证据输出与声明的同源变体（FLAG{A} vs flag{a} vs FLAG[A]）算同一
+    flag，进 L2 审阅而非直接拒收（C03 语义）；提交串大小写由 case_mode
+    决定。
+    """
+    return value.replace('[', '{').replace(']', '}').casefold()
 DECOY = re.compile(r'session[-_ ]?id|request[-_ ]?id|decoy|example|dummy|fake|诱饵|示例', re.IGNORECASE)
 
 
@@ -100,7 +127,7 @@ class FlagGate:
                     continue
                 matches = list(EVIDENCE_PATTERN.finditer(output))
                 for match in matches:
-                    if normalized_flag(match.group()) != normalized_flag(declared):
+                    if flag_identity(match.group()) != flag_identity(declared):
                         continue
                     line = output[output.rfind('\n', 0, match.start()) + 1:output.find('\n', match.end()) if '\n' in output[match.end():] else len(output)]
                     if DECOY.search(line) or len(matches) != 1:

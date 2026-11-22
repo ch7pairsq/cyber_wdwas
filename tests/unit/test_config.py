@@ -91,7 +91,7 @@ def test_planner_limit_and_competition_sandbox_are_validated():
     assert any("sandbox_required" in e for e in validate_config(cfg))
     cfg["policy"]["sandbox_required"] = True
     assert validate_config(cfg) == []
-    for value in (0, -1, 1.5, 21):
+    for value in (0, -1, 1.5, 101):  # 上限 2026-11-22 放宽到 100
         bad = _base()
         bad["runtime"]["max_intents_per_challenge"] = value
         assert any("max_intents_per_challenge" in e for e in validate_config(bad)), value

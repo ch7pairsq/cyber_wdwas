@@ -95,14 +95,16 @@ class Orchestrator:
         self._pump_lock = threading.Lock()
         # 终局加时：全部可解题做完仍有剩余时间时，给预算耗尽的题一次追加授权。
         # 授权记录（factory.endgame）是内存态：重启丢失可重授——累计记账仍诚实，
-        # 全局预算仍兜底；每题每轮运行只授权一次（_endgame_granted）。
+        # 全局预算仍兜底；同一题授权后冷却（_endgame_cooldown）再可重授。
         self._endgame_bonus = max(0.0, float(endgame_token_bonus))
         self._endgame_min_seconds = max(0.0, float(endgame_min_seconds))
         # 每轮加时最多授权几道题：0 = 自动（= 调度器空闲槽位）。终局槽位有限，
         # 一次抬升十几题等于白抬；显式配置用于压测/回滚到旧的全量授权行为。
         self._endgame_max_grants = max(0, int(endgame_max_grants))
         self._endgame: Dict[str, float] = {}
-        self._endgame_granted: set = set()
+        # cid -> 上次授权时刻；冷却期满可再次授权（4 小时持续在途，不再一次作废）。
+        self._endgame_granted: Dict[str, float] = {}
+        self._endgame_cooldown = 900.0
         # 平台 REJECTED 后的重试序号：strategy_key 唯一化（misc.flagretry.N），
         # 内存态即可——重启后新回执从 1 重新编号，attempt_key 去重兜底。
         self._flag_retry_seq: Dict[str, int] = {}
@@ -139,6 +141,8 @@ class Orchestrator:
             self._endgame_bonus = max(0.0, float(budget["endgame_token_bonus"]))
         if budget.get("endgame_max_grants") is not None:
             self._endgame_max_grants = max(0, int(budget["endgame_max_grants"]))
+        if budget.get("endgame_cooldown_seconds") is not None:
+            self._endgame_cooldown = max(0.0, float(budget["endgame_cooldown_seconds"]))
         controller = cfg.get("controller") or {}
         if controller.get("parallel_agents"):
             self._parallel_agents = max(1, int(controller["parallel_agents"]))
@@ -955,11 +959,14 @@ class Orchestrator:
                 pass  # 记忆功能 fail-open：不能影响主循环
 
     def _grant_endgame(self, tasks, solved, deadline) -> bool:
-        """终局加时：可解题做完且时间富余时，给预算耗尽的题授权一次追加额度。
+        """终局加时：可解题做完且时间富余时，给预算耗尽的题授权追加额度。
 
-        只对会话已 stopped（预算/步数/停滞耗尽）且未授权过的题生效；授权 =
-        factory.endgame 提高上限 + 新增 misc.endgame.pass2 意图。返回是否发生
-        了新授权（调用方据此继续循环）。
+        只对会话已 stopped（预算/步数/停滞耗尽）的题生效；授权 =
+        factory.endgame 提高上限 + 新增 misc.endgame.pass2 意图。同一题
+        授权后进入冷却（默认 15 分钟），冷却期满可再次授权——长赛中
+        pass2 也可能失败，一次作废会让题在剩余几小时里永久静默
+        （2026-11-22 模拟赛：endgame 授权 1 次后 pass2 blocked，题不再有任何意图）。
+        返回是否发生了新授权（调用方据此继续循环）。
         """
         if self._endgame_bonus <= 0 or self._state is None or self._clock() >= deadline:
             return False
@@ -990,10 +997,12 @@ class Orchestrator:
                     challenge_id=cid, strategy_key="misc.endgame.pass2",
                     params={"phase": "endgame"}, est_tokens=2000))
             except DuplicateStrategy:
-                self._endgame_granted.add(cid)  # 已有终局意图在排队，不再重复授权
+                # pass2 意图还在排队/执行：视作已授权，冷却从本轮起算（setdefault
+                # 保留更早的真实授权时刻），冷却期内不再重复授权。
+                self._endgame_granted.setdefault(cid, self._clock())
                 continue
             grants[cid] = self._endgame_bonus
-            self._endgame_granted.add(cid)
+            self._endgame_granted[cid] = self._clock()
             # 授权必须复位会话：否则调度器把 stopped 的题永久排除，
             # pass2 意图永远 READY 无人认领（endgame 失效的根因）。
             try:
@@ -1032,8 +1041,13 @@ class Orchestrator:
         """
         out = []
         for cid in ids:
-            if cid in solved or cid in self._endgame_granted:
-                continue
+            granted_at = self._endgame_granted.get(cid)
+            if cid in solved or (
+                    granted_at is not None
+                    and self._clock() - granted_at < self._endgame_cooldown):
+                continue  # 已解，或授权后未过冷却期
+            # 冷却期满的题重新参与候选：上一轮 pass2 已终态（消费完的 intent
+            # 不再占用 attempt_key），可再次授权接力。
             try:
                 _, st = self._state.load(cid)
             except Exception:

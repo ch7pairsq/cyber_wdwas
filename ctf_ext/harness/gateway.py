@@ -13,7 +13,7 @@ import queue
 import threading
 import time
 
-from .flag_gate import FLAG_PATTERN, FlagGate, normalized_flag
+from .flag_gate import FLAG_PATTERN, FlagGate, flag_identity
 from .schema import Submission, SubmitReceipt
 
 
@@ -34,8 +34,8 @@ class SubmitGateway:
 
     @staticmethod
     def key(challenge_id, answer):
-        """幂等键：sha256(challenge_id|normalized_flag)，同题同答同键。"""
-        return 'sub-' + hashlib.sha256((challenge_id + '|' + normalized_flag(answer)).encode()).hexdigest()
+        """幂等键：sha256(challenge_id|flag_identity)，同题同源同键（大小写变体算同答）。"""
+        return 'sub-' + hashlib.sha256((challenge_id + '|' + flag_identity(answer)).encode()).hexdigest()
 
     def enqueue(self, db, decision, best_effort=False):
         """与结果、校验记录在同一事务调用；不执行任何网络操作。
@@ -77,7 +77,7 @@ class SubmitGateway:
                 return last['idempotency_key']
             try:
                 same = any(row['status'] in ('REJECTED', 'BLOCKED')
-                           and normalized_flag(decision.answer) == normalized_flag(row['answer'])
+                           and flag_identity(decision.answer) == flag_identity(row['answer'])
                            for row in rows)
             except (ValueError, TypeError):
                 same = True  # 答案格式异常时保守处理：不重复提交
@@ -130,7 +130,7 @@ class SubmitGateway:
             return False
         try:
             declared, digest = FlagGate.declaration(self.store.workspace(row['challenge_id']))
-            if digest != data['declaration_hash'] or normalized_flag(declared) != normalized_flag(row['answer']):
+            if digest != data['declaration_hash'] or flag_identity(declared) != flag_identity(row['answer']):
                 return False
             with self.store.board.read_view() as db:
                 command = db.execute('SELECT * FROM command_log WHERE id=? AND challenge_id=? AND complete=1 AND returncode=0',
@@ -148,7 +148,7 @@ class SubmitGateway:
             return
         # 只接受平台结构化给出的格式修正；禁止把错误文本猜成新答案。
         try:
-            if normalized_flag(corrected) != normalized_flag(row['answer']):
+            if flag_identity(corrected) != flag_identity(row['answer']):
                 return
         except (ValueError, TypeError):
             return

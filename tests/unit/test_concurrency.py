@@ -279,3 +279,43 @@ def test_endgame_grants_capped_by_free_slots_and_handed_to_best_score(two_challe
     # 显式配置可覆盖自动槽位（0 = 自动）
     orch._endgame_max_grants = 2
     assert orch._endgame_grant_limit() == 2
+
+
+def test_endgame_cooldown_allows_regrant(two_challenge_orch):
+    """endgame 冷却循环：pass2 消费完 + 冷却期满 → 同题可再次接力。
+
+    2026-11-22 模拟赛：授权一次后 pass2 blocked，题在剩余数小时里永久
+    静默。改为冷却（默认 900s）后可重新授权，4 小时内持续有意图在途。
+    """
+    from ctf_ext.runtime.control import SessionControl
+    orch = two_challenge_orch
+    orch.bootstrap()
+    factory = orch._worker._control_factory
+    factory.deadline = orch._clock() + 2000
+    orch._endgame_bonus = 0.5
+    orch._endgame_min_seconds = 10
+    cid = "ch-mock-1"
+    SessionControl(orch._state, cid)
+    orch._state.patch(cid, lambda s: s.update(status="stopped"))
+    with orch._board.transaction() as db:
+        db.execute("UPDATE intents_ext SET status='FAILED' "
+                   "WHERE status IN ('READY','FAILED_RETRYABLE')")
+    tasks = {cid: {"challenge_id": cid}}
+    assert orch._grant_endgame(tasks, set(), orch._clock() + 1500) is True
+    first_granted_at = orch._endgame_granted[cid]
+    assert isinstance(first_granted_at, float)
+    # pass2 消费完（终态）：attempt_key 不再占用
+    with orch._board.transaction() as db:
+        db.execute("UPDATE intents_ext SET status='BLOCKED' "
+                   "WHERE strategy_key='misc.endgame.pass2'")
+    # 冷却期内：不重复授权（时间戳未变）
+    assert orch._grant_endgame(tasks, set(), orch._clock() + 1500) is False
+    assert orch._endgame_granted[cid] == first_granted_at
+    # 时钟拨过冷却期（授权时刻回拨 901s）：再次授权成功，新 pass2 入队
+    orch._endgame_granted[cid] = first_granted_at - 901
+    assert orch._grant_endgame(tasks, set(), orch._clock() + 1500) is True
+    row = orch._board._db.execute(
+        "SELECT COUNT(*) FROM intents_ext WHERE strategy_key='misc.endgame.pass2' "
+        "AND status='READY'").fetchone()[0]
+    assert row == 1
+    assert orch._endgame_granted[cid] > first_granted_at  # 记录新的授权时刻

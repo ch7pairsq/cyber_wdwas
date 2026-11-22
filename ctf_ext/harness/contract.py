@@ -13,7 +13,14 @@ OUTCOMES = ("success", "no_signal", "error", "timeout")
 # web.flaglang.signed-cookie-deny-bypass），旧正则误拒导致整轮 failed_contract。
 STRATEGY_RE = re.compile(r"^[a-z0-9_-]+(\.[a-z0-9_-]+){2,}$")
 MAX_SUMMARY_ITEMS = 5
-FLAG_RE = re.compile(r"flag\{[^}\s]{1,200}\}", re.IGNORECASE)
+# 前缀通用化（2026-11-22 模拟赛日志）：平台真值前缀随题而异（csawctf{、
+# 0xfun{……），硬编码 flag{ 会在契约层拒收正确前缀、修复轮又强制模型
+# 改写 —— TLSB/1black0white 的 blocked 与提交错误即此因。与
+# flag_gate.FLAG_PATTERN 同规则。
+FLAG_RE = re.compile(
+    r"(?<![\w{])flag\{[^{}\s]{1,200}\}(?![\w}])"
+    r"|(?<![\w{])[A-Za-z0-9][A-Za-z0-9-]{0,30}(?<!flag)\{[^{}\s]{1,200}\}(?![\w}])",
+    re.IGNORECASE)
 
 
 class ContractViolation(Exception):
@@ -99,8 +106,9 @@ def validate_worker_output(payload: Dict[str, Any], evidence_check=None) -> Dict
     if answer is not None:
         _error(errors, isinstance(answer, str) and bool(answer.strip()),
                "candidate_answer must be a non-empty string or null")
-        # 平台提交与证据匹配都只接受 flag{...}（见 flag_gate.normalized_flag）；
-        # 在契约层拦截格式错误，可让它进入修复轮而不是到 Gate 才静默拒绝。
+        # 平台提交与证据匹配接受任意 CTF 前缀 <pre>{...}（见 flag_gate
+        # .normalized_flag 与 FLAG_RE）；在契约层拦截格式错误，可让它进入
+        # 修复轮而不是到 Gate 才静默拒绝。
         _error(errors, isinstance(answer, str) and bool(FLAG_RE.fullmatch(answer.strip())),
                "candidate_answer must look like flag{...}")
         _error(errors, bool(evidence_ids),
@@ -116,6 +124,6 @@ def validate_worker_output(payload: Dict[str, Any], evidence_check=None) -> Dict
 
 
 def extract_flag(text: str) -> Optional[str]:
-    """从文本中提取第一个 flag{...}（无则返回 None）。"""
+    """从文本中提取第一个 <前缀>{...}（任意 CTF 前缀；无则返回 None）。"""
     match = FLAG_RE.search(text or "")
     return match.group(0) if match else None

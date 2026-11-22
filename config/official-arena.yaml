@@ -52,6 +52,9 @@ budget:
   # 11 题的抬升等于没发生，还占住槽位让长跑线无法正常收尾。按槽位封顶后
   # 抬升节奏与真实吞吐一致，多余的题等槽位回收后由监控线程补授。
   endgame_max_grants: 0
+  # 同一题两次 endgame 授权的最小间隔（秒）：pass2 也可能失败，冷却期满
+  # 可再次接力（4 小时持续在途）；0 语义不变（grants 封顶）。
+  endgame_cooldown_seconds: 900
   # Pro（换挡模型）每题调用硬上限：防烧穿全局预算；Pro/Flash 走同一账本。
   pro_max_calls_per_challenge: 8
 
@@ -62,9 +65,11 @@ download:
 runtime:
   # v12 教训（2026-11-21 正式赛第 2 题）：默认 4 个意图（1 triage + 3
   # followup）全被 gate 拒绝后无新意图，run 提前 idle 退出、整题零提交。
-  # 单题意图上限提高到 12：短 followup（2-3 轮）成本低，配合 best-effort
-  # 提交 + REJECTED 重开形成平台反馈循环；token/时间预算墙仍兑底。
-  max_intents_per_challenge: 12
+  # 单题意图上限提高到 50（2026-11-22 模拟赛：12 意图中段烧完后题进入
+  # 静默，剩余数小时无意图在途）：短 followup（2-3 轮）成本低，配合
+  # best-effort 提交 + REJECTED 重开 + endgame 冷却循环形成持续供给；
+  # token/时间预算墙仍兑底。
+  max_intents_per_challenge: 50
 
 submission:
   # best-effort 提交：gate 未确认（rejected/pending）但格式合法的候选仍

@@ -134,7 +134,7 @@ def test_endgame_revives_blocked_challenge():
         orch._scheduler = SimpleNamespace(has_waiting_work=lambda: False)
         orch._endgame_bonus = 1.0
         orch._endgame_min_seconds = 0
-        orch._endgame_granted = set()
+        orch._endgame_granted = {}  # cid -> 授权时刻（冷却循环）
         orch._endgame = {}
         orch._endgame_max_grants = 0
         orch._parallel_agents = 1
@@ -162,7 +162,7 @@ def test_endgame_still_skips_healthy_untouched_challenge():
         orch._scheduler = SimpleNamespace(has_waiting_work=lambda: False)
         orch._endgame_bonus = 1.0
         orch._endgame_min_seconds = 0
-        orch._endgame_granted = set()
+        orch._endgame_granted = {}  # cid -> 授权时刻（冷却循环）
         orch._endgame = {}
         orch._endgame_max_grants = 0
         orch._parallel_agents = 1
