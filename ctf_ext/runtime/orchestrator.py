@@ -720,9 +720,11 @@ class Orchestrator:
         except Exception:
             free = None
         if free is not None and free < self.disk_pressure_free_bytes:
-            # 水位告急：再强制清一轮（_cleanup_finished_workspaces 幂等）。
+            # 水位告急：force 清一轮，连 REJECTED 终态题也让位（v32）。
+            # 错旗续解/endgame 接力会丢 handouts，但磁盘耗尽杀掉的是整场；
+            # 重启后 _materialize_attachments 会重新下载，可恢复。
             self._board.append_event("disk_pressure", "", {"free_mb": int(free / 1e6)})
-            self._cleanup_finished_workspaces()
+            self._cleanup_finished_workspaces(force=True)
         if now - self._last_snapshot >= 10 * self.housekeeping_interval_seconds:
             self._last_snapshot = now
             snapshot = {"disk_free_mb": None, "rss_mb": None}
@@ -737,21 +739,28 @@ class Orchestrator:
                 pass
             self._board.append_event("resource_snapshot", "", snapshot)
 
-    def _cleanup_finished_workspaces(self) -> None:
+    def _cleanup_finished_workspaces(self, force: bool = False) -> None:
         """删除已终结题目的工作区（handouts + 工具产物），幂等。
 
-        三条件同时成立才回收：有 ACCEPTED 回执、无 DRAFT/SENDING 在途提交
-        （重派发需校验工作区内的声明与证据）、无 READY/RUNNING/
-        FAILED_RETRYABLE 意图（后续尝试还可能用到）。工作区路径是
-        workspace_root 下的 sha256 名目录，不存在路径穿越。
+        三条件同时成立才回收：有终态回执（默认仅 ACCEPTED；force 时含
+        REJECTED）、无 DRAFT/SENDING 在途提交（重派发需校验工作区内的
+        声明与证据）、无 READY/RUNNING/FAILED_RETRYABLE 意图（后续尝试
+        还可能用到）。工作区路径是 workspace_root 下的 sha256 名目录，
+        不存在路径穿越。
+
+        正常轮次保留 REJECTED（v31）：平台判 REJECTED 后错旗续解
+        （flagretry）与 endgame 接力还需要 handouts；只有磁盘水位告急
+        （force=True）时才牺牲它们换取整场存活——重启后附件会重新物化。
         """
         if self._state is None:
             return
         try:
             with self._board.read_view() as db:
+                status_sql = "('ACCEPTED','REJECTED')" if force else "('ACCEPTED')"
                 rows = db.execute(
-                    "SELECT DISTINCT challenge_id FROM submissions WHERE status='ACCEPTED'"
-                    " AND challenge_id NOT IN"
+                    "SELECT DISTINCT challenge_id FROM submissions WHERE status IN "
+                    + status_sql
+                    + " AND challenge_id NOT IN"
                     " (SELECT challenge_id FROM submissions WHERE status IN ('DRAFT','SENDING'))"
                 ).fetchall()
                 live = {r[0] for r in db.execute(
@@ -1003,7 +1012,12 @@ class Orchestrator:
             return False  # 剩余时间不够一轮有意义的尝试
         backfill = getattr(self._scheduler, "backfill_slots", None)
         if callable(backfill):
-            available = max(0, int(backfill()))
+            try:
+                available = max(0, int(backfill()))
+            except Exception:
+                # 槽位查询异常不能拖垮主循环（串行调用点在 try 之外）；
+                # 本轮不加时，等下一 poll 重试。
+                available = 0
         else:
             available = 0 if self._scheduler.has_waiting_work() else self._endgame_grant_limit()
         if available <= 0:

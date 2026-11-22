@@ -680,6 +680,31 @@ MISSING——toolchain.json 声明不等于安装，三个工具不在 deb 闭�
 
 教训：镜像工具验证必须 which + 实跑，不能只看 toolchain.json。
 
+## 第十二轮（v32，2026-11-22 提交前复审）：三处收口与复审结论
+
+v31 提交后复审收口（v31 镜像按工作树 rsync，已含 P1 兜底；v32 提交后 git 与镜像对齐）：
+
+1. **backfill_slots 异常兜底（P1）**（scheduler）：读查询失败退回 free_slots()
+   口径——串行主循环在 try 之外经 _grant_endgame 调用本方法，异常会直接拖垮
+   run 循环；monitor 线程有 try 但串行路径必须自兜底。测试补排队占槽 + 异常
+   回退两口径（test_scheduler_queries +1）。
+2. **磁盘水位 force 回收**（orchestrator）：正常轮次保留 REJECTED 终态题工作区
+   （v31 语义，错旗续解 flagretry 与 endgame 接力需要 handouts——旧测试断言
+   "REJECTED 即回收"与新语义冲突，已改断言对齐）；磁盘水位告急时 force=True
+   连 REJECTED 一起回收：磁盘耗尽杀掉的是整场，单题丢 handouts 可在重启后由
+   _materialize_attachments 重新下载恢复（幂等，缺了就补）。
+3. **逐行复审结论**：llm_worker 工具循环三分支（无工具纠错/轮次用尽收尾/
+   话痨截断）互不干扰，最终 JSON（stop=stop）不经截断分支；compact 修复
+   messages 整体替换、system 走独立请求参数不受影响、模板无裸花括号；
+   planner no_signal 链深 3；契约熔断 attempt_no≥2 转 blocked。全部无误。
+
+已知限制（维持）：串行 _run_serial 的 endgame 冷却空洞不修——实际比赛
+parallel_agents=3 走并行路径，监控线程每个 poll 调 _grant_endgame；4 小时
+真实长跑仍需实战验证（单测+镜像内全量只证明逻辑正确）。
+
+测试：test_framework_acceptance force 回收断言 +2；全量回归与镜像内 pytest
+见交付记录。
+
 ## 第十一轮（v31，2026-11-22 模拟赛长跑复盘）：并行度 3 拉满与资源不空转
 
 模拟赛日志复盘后的六处改动，目标：parallel=3 全程拉满、无空转、稳定跑满 4 小时：

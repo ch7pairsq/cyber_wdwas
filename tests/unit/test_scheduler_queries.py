@@ -82,3 +82,22 @@ def test_state_store_batch_load_matches_single_load():
         assert state.load_many(["c1"])["c1"][1]["steps"] == 2
         assert state.challenge_ids() == ["c1"]
     board.close()
+
+
+def test_backfill_slots_counts_queued_and_falls_back_on_query_error():
+    """槽位对齐：可领取的普通队列也占槽；读查询异常退回 free_slots 口径
+    （串行主循环在 try 之外调用，异常不得外抛——2026-11-22 审查 P1）。"""
+    board, _ = new_board()
+    for cid in ("c1", "c2"):
+        add_challenge(board, cid=cid)
+        board.add_intent(IntentDraft(cid, "misc.triage.auto", {}))
+    scheduler = Scheduler(board, max_project_workers=1, max_running_projects=2)
+    assert scheduler.backfill_slots() == 0  # 两题都可领取：没有空槽
+    board.claim_intent("w1", lease_seconds=60, challenge_ids=["c1"],
+                       max_project_workers=1, max_running_projects=2)
+    assert scheduler.backfill_slots() == 0  # 1 在跑 + 1 排队 = 2/2
+    scheduler.set_limits(max_running_projects=3)
+    assert scheduler.backfill_slots() == 1  # 3 − 1 在跑 − 1 排队
+    board.open_intent_summary = lambda: (_ for _ in ()).throw(RuntimeError("db down"))
+    assert scheduler.backfill_slots() == 3  # free_slots 查询失败口径，不外抛
+    board.close()

@@ -186,6 +186,12 @@ def test_resource_housekeeping_reclaims_finished_workspaces():
         assert not orch._state.workspace_path('c2').exists()
         assert orch._state.workspace_path('c1').exists()  # REJECTED 仍保留
         assert orch._state.workspace_path('c3').exists()  # SENDING 仍保留
+        # v32 磁盘告急 force：REJECTED 终态题也让位（整场存活 > 单题重试 handouts）
+        orch._cleanup_finished_workspaces(force=True)
+        assert not orch._state.workspace_path('c1').exists()
+        assert orch._state.workspace_path('c3').exists()  # SENDING 任何时候都保留
+        assert orch._board._db.execute(
+            "SELECT COUNT(*) FROM events WHERE event_type='workspace_reclaimed'").fetchone()[0] == 2
         # 水位守护：强制执行一遍不抛错，事件通道可用
         orch._housekeeping(force=True)
         assert orch._board._db.execute(

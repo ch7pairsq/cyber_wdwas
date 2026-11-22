@@ -55,26 +55,34 @@ class Scheduler:
         return {cid: state for cid, (_, state) in loaded.items()}
 
     def backfill_slots(self) -> int:
-        """空闲槽位扣除正在运行及可领取的普通队列，避免尾盘抢占。"""
-        summary = self._board.open_intent_summary()
-        solved = set(self._board.accepted_challenge_ids())
-        confirmed = set(self._board.confirmed_challenge_ids()) if self._state is not None else set()
-        states = self._states_for([row["challenge_id"] for row in summary])
-        running = {row["challenge_id"] for row in summary if int(row["running"] or 0)}
-        queued = set()
-        for row in summary:
-            cid = row["challenge_id"]
-            if cid in running or cid in solved or cid in confirmed:
-                continue
-            state = states.get(cid) or {}
-            if state.get("status") in ("confirmed", "stopped"):
-                continue
-            if self._step_policy is not None and self._step_policy.route(int(state.get("steps") or 0))["active_slots"] <= 0:
-                continue
-            if not int(row.get("ready", 0) or 0):
-                continue
-            queued.add(cid)
-        return max(0, self._max_running_projects - len(running) - len(queued))
+        """空闲槽位扣除正在运行及可领取的普通队列，避免尾盘抢占。
+
+        读查询异常退回 free_slots() 口径（同 free_slots：查询失败不阻断
+        加时）。串行主循环在 try 之外调用本方法，异常会直接拖垮 run 循环，
+        必须在此自兜底（2026-11-22 审查 P1）。
+        """
+        try:
+            summary = self._board.open_intent_summary()
+            solved = set(self._board.accepted_challenge_ids())
+            confirmed = set(self._board.confirmed_challenge_ids()) if self._state is not None else set()
+            states = self._states_for([row["challenge_id"] for row in summary])
+            running = {row["challenge_id"] for row in summary if int(row["running"] or 0)}
+            queued = set()
+            for row in summary:
+                cid = row["challenge_id"]
+                if cid in running or cid in solved or cid in confirmed:
+                    continue
+                state = states.get(cid) or {}
+                if state.get("status") in ("confirmed", "stopped"):
+                    continue
+                if self._step_policy is not None and self._step_policy.route(int(state.get("steps") or 0))["active_slots"] <= 0:
+                    continue
+                if not int(row.get("ready", 0) or 0):
+                    continue
+                queued.add(cid)
+            return max(0, self._max_running_projects - len(running) - len(queued))
+        except Exception:
+            return self.free_slots()
 
     def eligible_challenges(self) -> List[str]:
         """按并发题目数封顶 + 单题并发上限挑题（§5.4 背压）。
