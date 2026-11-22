@@ -177,3 +177,15 @@ def test_H_tool_env_passes_tunnel_proxy_without_credentials():
     assert tool_env['HTTPS_PROXY'] == 'http://10.55.0.9:18082'
     assert tool_env['NO_PROXY'] == 'localhost,model-proxy-x'
     assert 'BAIZHI_API_KEY' not in tool_env and 'ARENA_SOLVER_TOKEN' not in tool_env
+
+
+def test_H_tool_env_strips_svc_wildcard_from_no_proxy():
+    # 第三场实测（2026-11-22）：平台 NO_PROXY 含 .svc/.cluster.local 通配，
+    # requests 对靶机 svc 域名绕过代理直连（不可达）。工具子进程 env 内
+    # 剥除这两个通配项，其余条目（含 localhost 类）原样保留。
+    env = {'NO_PROXY': 'localhost,127.0.0.1,::1,.svc,.cluster.local,model-proxy-x',
+           'no_proxy': 'localhost,.svc'}
+    with patch.dict(os.environ, env):
+        tool_env = tool_environment()
+    assert tool_env['NO_PROXY'] == 'localhost,127.0.0.1,::1,model-proxy-x'
+    assert tool_env['no_proxy'] == 'localhost'

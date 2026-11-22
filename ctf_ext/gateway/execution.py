@@ -16,6 +16,17 @@ _TOOL_ENV_KEYS = ('ARENA_PROXY', 'ARENA_NETWORK_CIDR', 'ARENA_BASE_URL',
                   'HTTP_PROXY', 'http_proxy', 'HTTPS_PROXY', 'https_proxy',
                   'ALL_PROXY', 'all_proxy', 'NO_PROXY', 'no_proxy')
 
+# 平台预置的 NO_PROXY 含 .svc / .cluster.local 后缀通配：requests/httpx 对
+# 靶机 svc 域名会绕过代理直连（直连不可达，2026-11-22 第三场全部失败）。
+# 工具子进程 env 内剥掉这两个通配项，让"requests 默认走 HTTP_PROXY 隧道"
+# 成立（HTTP 明文转发实测可行）；localhost 类条目原样保留。
+_STRIP_NO_PROXY = ('.svc', '.cluster.local')
+
+
+def _strip_no_proxy(value: str) -> str:
+    return ','.join(item for item in value.split(',')
+                    if item.strip() and item.strip().lower() not in _STRIP_NO_PROXY)
+
 
 def tool_environment():
     """工具子进程环境：白名单精确到变量；代理值剥离 user:pass@。
@@ -29,6 +40,8 @@ def tool_environment():
         value = os.environ.get(key)
         if value is None:
             continue
+        if key.upper() == 'NO_PROXY':
+            value = _strip_no_proxy(value)
         if 'PROXY' in key.upper() and '@' in value:
             scheme, sep, rest = value.partition('://')
             if sep:

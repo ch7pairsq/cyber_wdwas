@@ -420,6 +420,10 @@ def test_env_note_guides_arena_http_with_container_addr(arena_url):
         assert "requests/httpx 默认走平台 HTTP_PROXY 隧道" in desc  # 2026-11-22 认知修正
         assert "手写 socket" in desc
         assert "允许访问的目标网段" in desc
+        # v35 小修（第三场实锤 HTTP 代理禁 CONNECT）：nc 类原始 TCP 题的
+        # 唯一通路是 ARENA_PROXY SOCKS5 手写握手，片段必须进模型可见面。
+        assert "原始 TCP" in desc and "ARENA_PROXY" in desc
+        assert "\\x05\\x01\\x00\\x03" in desc  # 可复制的 CONNECT 握手字节
     finally:
         if old is None:
             os.environ.pop("ARENA_NETWORK_CIDR", None)

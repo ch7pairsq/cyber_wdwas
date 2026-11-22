@@ -680,6 +680,34 @@ MISSING——toolchain.json 声明不等于安装，三个工具不在 deb 闭�
 
 教训：镜像工具验证必须 which + 实跑，不能只看 toolchain.json。
 
+## 第十六轮（v35.1，2026-11-22 第三场实时复盘）：60 轮预算 + NO_PROXY 剥离 + 原始 TCP 通路 + 守门收口
+
+第三场（2026-11-22 晚）日志实锤与修复：
+1. 40 轮 → 60 轮 + max_steps 120→150（official-arena.yaml 与 arena.yaml
+   同步）：8/8 intent 小步打满 40 轮被强制无工具收尾。评估拒绝 100：
+   外推上下文 250-450k chars ≈ 90-130k tokens 贴 DeepSeek 128K 窗口，
+   超窗是 400 硬错误、整个 intent 连收尾都没有（比 40 轮强制收尾更糟）；
+   60 轮 ≈ 40-70k tokens 余量安全。新增中途提示 ROUND_BUDGET_NUDGE：
+   剩 15 轮时注入一次敦促合并大步收束（限 1 次，消息历史持久）。
+2. 远程题守门收口：_is_remote_challenge 只认 container_addr 非空——
+   第三场全量题都带运行环境 note 与共享 help，旧判据恒真，离线题
+   （FlareCalc，start_info 非空但 container_addr=[]）也吃 arena_http
+   nudge，误导模型找不存在的靶机。
+3. 工具子进程 env 剥 NO_PROXY 的 .svc/.cluster.local 通配
+   （gateway/execution.py）：平台预置 NO_PROXY 让 requests/httpx 对靶机
+   svc 域名绕过代理直连（直连不可达，第三场全部失败），剥离后
+   "requests 默认走 HTTP_PROXY 隧道"才成立。
+4. env_note 补原始 TCP/SOCKS5 手写握手片段（ATYP=domain 直传 svc 域名）：
+   第三场实锤 HTTP 代理禁 CONNECT（Corrupted GI 结论原文），nc 类题唯一
+   通路是 ARENA_PROXY SOCKS5；PySocks 不在依赖清单，给可复制的握手
+   字节片段进模型可见面（gate on container_addr 非空）。
+5. 契约修复词强化（CONTRACT_COMPACT_REPAIR）：无 64 位 hex evidence_id
+   的 fact 直接删除（结论并入 summary），绝不出空 evidence_ids 数组——
+   空数组即契约失败，第三场两题因此白烧全部轮次。
+测试：FakeProvider 改 deepcopy 快照（引用共享让"注入前不存在"类断言
+失真，顺带修正 test_unreachable_…_refused_once 对 calls[0] 的错误依赖）；
+484 passed 4 skipped（+3 新用例）。
+
 ## 第十五轮（v35，2026-11-22 实时复盘）：start pending ≠ 就绪轮询 + 靶机网段动态授权
 
 别队复盘（用户提供）实锤同款事故：harness 拿到 start 的 pending/空地址响应

@@ -32,7 +32,7 @@ budget:
   # stopped 题无复活通道（v12 已修），并非时间盒本身——收紧后节奏变为
   # "首轮先易后难 → 中段攻坚新题 → 末段 endgame 复活跑到底"。
   per_challenge_seconds: 4500
-  # 单意图 30 分钟硬杀线（DeadlineGuard）：正常 attempt（max_tool_rounds=40）
+  # 单意图 30 分钟硬杀线（DeadlineGuard）：正常 attempt（max_tool_rounds=60）
   # 自然收尾在 10-20 分钟级，此线只防真卡死；触发后是可重试失败，同题
   # 续跑状态保留。旧值 3600 会让一个卡死意图吃掉大半个首窗口。
   claim_timeout_seconds: 1800
@@ -176,19 +176,22 @@ controller:
   # v11.5 教训（2026-11-21 正式赛 static_file_server）：心跳止损曾设在
   # 32 步——每轮 ≈2 步（1 模型预留 + 1 工具预留），16 轮即踩线，探索型
   # 题目首轮被 stage4（active_slots=0）硬杀。心跳线必须放到单个 attempt
-  # 的 max_tool_rounds=40（≈80-100 步）之外：96 步 ≈ 48 轮，attempt 能
+  # 的 max_tool_rounds=60（≈120-150 步）之外：96 步 ≈ 48 轮，attempt 能
   # 自然收尾；防死循环由 stall_steps/repeat_limit/预算三重兜底。
   thresholds:
   - 8
   - 16
   - 24
   - 96
-  # 步数硬上限需大于心跳阈值（96），否则步数墙先于心跳触发。
-  max_steps: 120
+  # 步数硬上限需大于心跳阈值（96）与 60 轮（≈120-150 步）自然收尾线，
+  # 否则步数墙先于两者触发（第三场 8/8 intent 打满 40 轮被砍，2026-11-22
+  # 评估：100 轮外推 90-130k tokens 会贴 DeepSeek 128K 窗口，超窗即 400
+  # 硬错误连收尾都没有；60 轮 ≈ 40-70k tokens 余量安全）。
+  max_steps: 150
   # 跨题并行 worker 数：对齐平台 3 环境上限（题内串行见 concurrency）。
   parallel_acceptance: true
   parallel_agents: 3
-  max_tool_rounds: 40
+  max_tool_rounds: 60
 
 harness:
   protocol: arena

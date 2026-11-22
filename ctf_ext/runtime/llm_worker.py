@@ -114,6 +114,9 @@ CONTRACT_COMPACT_REPAIR = (
     "无逐字证据支撑时置 null；facts/evidence_ids 只引用上一轮工具返回过的"
     "64 位 hex evidence_id（模拟赛实测模型编造 id 触发 unregistered 拒收），"
     "不确定的可省略该 fact 或用 summary 说明。"
+    "凡是没有 64 位 hex evidence_id 可引用的 fact，直接删除该 fact（其结论并入"
+    " summary 并注明无逐字证据），绝不要输出空 evidence_ids 数组——空数组即"
+    "契约失败、整个意图报废（第三场实测两题因此白烧全部 40 轮）。"
 )
 # 幻觉工具名的契约修复提示：in-claim 重写一轮用（限 1 次，见 work 主循环）。
 TOOL_NAME_CORRECTION = ("系统未提供该工具。只能调用系统提供的工具列表中的工具；"
@@ -137,6 +140,16 @@ REMOTE_NUDGE = ("本题需要访问远程靶机：优先改用 arena_http 工具
                 "（见题目描述与 arena_help）；python requests/httpx 默认走平台"
                 " HTTP_PROXY 隧道也可用，但手写 socket/禁用代理的直连不可达；"
                 "探测失败不代表靶机未启动。")
+# 轮次预算中途提示（2026-11-22 第三场：8/8 intent 小步打满 40 轮被强制
+# 无工具收尾，多个题在收尾时仍未产出结论）。剩 ROUND_BUDGET_NUDGE_LEFT
+# 轮时注入一次（限 1 次），敦促合并大步、收束产出；距离硬上限触发，
+# 不改变轮次上限本身。
+ROUND_BUDGET_NUDGE_LEFT = 15
+ROUND_BUDGET_NUDGE = ("轮次预算提醒：距工具轮次上限还剩 {left} 轮。"
+                      "请立即收束：合并剩余工作为少量大步骤（一次 python_exec 写"
+                      "完整脚本，不要一行一行试），把已获结论整理成最终 JSON；"
+                      "若核心目标未达成，优先产出最有价值的部分结论并如实标注"
+                      "失败原因。")
 # 不可达结论守卫（第二道）：远程题从未调用 arena_http 却在总结里声称
 # "靶机未启动/不可达"类结论时拒绝接收，要求先取得工具证据再下结论。
 # 限 1 次：二次仍坚持则放行（诚实原则——不无限阻塞，但日志留痕）。
@@ -303,11 +316,15 @@ class LlmWorker:
 
     @staticmethod
     def _is_remote_challenge(challenge: Dict[str, Any]) -> bool:
-        """是否远程/需要靶机交互的题：有 start_info、运行环境 note 或平台 help。"""
+        """是否远程/需要靶机交互的题：仅认真实靶机地址（container_addr 非空）。
+
+        2026-11-22 第三场实测：所有题目描述都追加 [Arena 运行环境] note，
+        help/start_info 全题共享（离线题 start_info 也非空，只是
+        container_addr=[]），旧判据恒真——FlareCalc 等纯离线逆向题也吃
+        arena_http nudge，误导模型寻找不存在的靶机。
+        """
         arena = (challenge.get("metadata") or {}).get("arena") or {}
-        if arena.get("start_info") or arena.get("help"):
-            return True
-        return "[Arena 运行环境]" in str(challenge.get("description") or "")
+        return bool((arena.get("start_info") or {}).get("container_addr"))
 
     # ------------------------------------------------------------------ public
     def _thinking_budget(self, claim: Claim) -> int:
@@ -408,6 +425,7 @@ class LlmWorker:
         arena_http_calls = 0
         remote_nudge_sent = False
         unreachable_guard_used = False
+        round_budget_nudged = False  # 轮次预算中途提示（限 1 次）
         # 协作式硬超时线（v21）：min(claim_timeout, claim 预算秒)。SIGALRM 只在
         # 主线程生效（watchdog.DeadlineGuard.supported），parallel 子线程里静默
         # 降级后卡死线程永远等不到 30 分钟硬杀——循环每轮开头自检墙钟补上这层
@@ -617,6 +635,13 @@ class LlmWorker:
                     })
                 messages.append({"role": "user", "content": result_blocks})
                 tool_rounds += 1
+                if (not round_budget_nudged
+                        and tool_rounds == self._max_tool_rounds - ROUND_BUDGET_NUDGE_LEFT):
+                    # 轮次预算中途提示：距上限剩 N 轮时拉响一次（第三场
+                    # 8/8 intent 小步打满被砍的教训），教模型合并大步收束。
+                    round_budget_nudged = True
+                    messages.append({"role": "user", "content": ROUND_BUDGET_NUDGE.format(
+                        left=ROUND_BUDGET_NUDGE_LEFT)})
                 if (self._is_remote_challenge(challenge) and arena_http_calls == 0
                         and tool_rounds == REMOTE_NUDGE_AT and not remote_nudge_sent):
                     # 第一道门：远程题前 N 轮从未用靶机工具，主动拉回 arena_http。
