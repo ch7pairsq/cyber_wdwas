@@ -680,6 +680,21 @@ MISSING——toolchain.json 声明不等于安装，三个工具不在 deb 闭�
 
 教训：镜像工具验证必须 which + 实跑，不能只看 toolchain.json。
 
+## 第十四轮（v34，2026-11-22 第二场实时复盘）：启动期附件下载误杀修复
+
+平台方信息实锤第二场"开头多花约 18 分钟"：harness 首次运行下载大附件时
+退出并重启。机制定位：`_materialize_attachments` 在 bootstrap 阶段逐个下载
+附件（每题上限 48MB、走平台隧道），期间从不刷新推进心跳（touch_progress
+只在结果落库时调用）——progress 文件跨重启持久，上轮留下的旧 mtime 使
+supervisor 的 progress-stale（600s）在下载超过阈值后判卡 SIGKILL；附件
+下载幂等（同名非空跳过）但整体耗时超过阈值就反复重启，直到附件全部落盘，
+累计浪费约 18 分钟。
+
+修复：每个附件成功落盘（`os.replace` 后）立即 `touch_progress()`——附件
+下载是解题前置的真实推进。单附件 48MB 正常隧道 <600s，逐文件刷新即可避免
+误杀。测试：tests/unit/test_progress_reaper.py::test_attachment_download_
+refreshes_progress（预置旧 mtime → 下载落盘 → 断言心跳刷新且无 .tmp 残留）。
+
 ## 第十三轮（v33，2026-11-22 第二场实时复盘）：环境槽位编排层统一管理
 
 第二场比赛日志（attempt 01a2029c，导出两次共 1539 次模型请求）实锤：平台

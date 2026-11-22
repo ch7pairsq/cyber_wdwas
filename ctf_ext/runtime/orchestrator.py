@@ -215,6 +215,11 @@ class Orchestrator:
             with open(tmp, "wb") as fh:
                 fh.write(bytes(data))
             _os.replace(tmp, dest)
+            # 附件落盘即刷新推进心跳（v34）：bootstrap 下载大附件可达数分钟，
+            # 期间 progress 文件是上次运行留下的旧 mtime，supervisor 的
+            # progress-stale（600s）会判卡杀进程——重启后重新下载（幂等跳过
+            # 已落盘的），循环至附件全部下完，实测浪费约 18 分钟。
+            touch_progress()
 
     def bootstrap(self) -> List[Dict]:
         """启动 Harness、读题并登记题目与种子 Intent；返回本轮题目清单。"""

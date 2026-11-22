@@ -7,6 +7,7 @@ v20 引入推进心跳（progress）与孤儿收割（subreaper）分别治"发�
 from __future__ import annotations
 
 import os
+import tempfile
 import time
 
 from ctf_ext.runtime.progress import ENV_NAME, progress_path, touch_progress
@@ -40,6 +41,39 @@ def test_touch_progress_invalid_dir_fails_silently(tmp_path, monkeypatch):
     # 目录不存在 → OSError → False（推进判定是运维信号，不能打断解题）
     monkeypatch.setenv(ENV_NAME, str(tmp_path / "no-such-dir" / "agent.progress"))
     assert touch_progress() is False
+
+
+def test_attachment_download_refreshes_progress(tmp_path, monkeypatch):
+    """v34：bootstrap 附件落盘即刷推进心跳。
+
+    2026-11-22 第二场实测：首次运行下载大附件（每题上限 48MB、走平台隧道）
+    期间 progress 文件停留在上次运行的旧 mtime，supervisor 的 progress-stale
+    （600s）判卡杀进程——附件下载幂等但整体耗时超过阈值就反复重启，实测
+    浪费约 18 分钟。每个附件成功落盘必须 touch_progress。"""
+    from types import SimpleNamespace
+
+    from ctf_ext.__main__ import build_runtime
+
+    path = str(tmp_path / "agent.progress")
+    monkeypatch.setenv(ENV_NAME, path)
+    with open(path, "w") as fh:
+        fh.write("1000.0")  # 跨重启持久的旧 mtime 场景
+    with tempfile.TemporaryDirectory() as root:
+        orch = build_runtime(root + "/run.db", root + "/evidence")
+
+        class _SlowHarness:
+            def read_attachment(self, ref, max_bytes=0):
+                return b"K" * 4096  # 模拟隧道慢速下载返回的大附件
+
+        orch._harness = _SlowHarness()
+        orch._materialize_attachments(SimpleNamespace(
+            challenge_id="ch-big", attachments=["/data/kernel.tar"]))
+        handout = orch._state.workspace_path("ch-big") / "handouts" / "kernel.tar"
+        assert handout.exists() and handout.stat().st_size == 4096
+        # 下载落盘后 progress 被刷新（> 旧时间戳 1000.0），supervisor 不判卡
+        assert float(open(path).read().strip()) > 1000.0
+        assert not os.path.exists(path + ".tmp")
+        orch._board.close()
 
 
 def test_heartbeat_age_is_supervisor_progress_input(tmp_path):
