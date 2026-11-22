@@ -482,6 +482,39 @@ build 中间层每轮 ~1.5GB，失败重试前必须 prune（本轮清理后 82%
 预算口径、平台环境数据问题都只在长跑暴露；supervisor 的"活性"与
 "推进"必须分开度量，存活不等于前进。
 
+## 第十四轮（v27，2026-11-22 四份归档对照定案）：非攻坚轮显式 thinking disabled
+
+用户提供 4 份平台归档（trajectory / attempt-archive 157MB / model-calls /
+11-19 对照场）逐条对照后定案。attempt 01a1fe63（11-21，20 题 5 解出，
+weightedScore 5000，tokensIn 40.25M）的 1568 次调用统计：
+
+- **95% 的"未下发 thinking"轮实际在思考**（1450 次里 1380 次 reasoning>0）
+  ——官方文档确认 thinking 默认 enabled 且默认 effort=high，不传参数
+  ≠ 关闭，thinking_by_stage 的 0 档形同虚设；
+- **58 次 finish_reason=length 截断里 54 次来自未下发轮**（enabled 轮仅
+  4 次）——v24 无响应侧拦截，每次截断报废一个 attempt；23:31:50 最后
+  一次响应即此形态（reasoning 7865/8192、python_exec args 截断于 data[）；
+- 1567 次 deepseek 调用零 400：官方文档称工具场景不回传 reasoning_content
+  会 400，实测未触发——按实际行为降为观察项。
+
+修复（6a822c1）：openai_compat 非 0 预算下发 enabled、0/未传显式
+`{"thinking":{"type":"disabled"}}`；公司网关通道（Anthropic 风格
+budget_tokens）不受影响。深度思考集中在 stage1/2 攻坚档（117 次 enabled
+轮照旧），侦察/收尾轮不再自主烧 mt——54 次截断的来源从源头消失；残余
+（enabled 轮 effort 非硬上限）由 v26-C 响应侧拦截兜成可恢复重试。
+
+风险声明：stage3/4 复盘轮偶尔确需推理，若下场比赛侦察质量下降（ruled_out
+变浅、路径多样性差），回退为 stage3 给低预算 enabled。验证指标：下场比赛
+agent.log `tool_calls truncated` 应个位数或零，非攻坚轮 reasoning_tokens
+应归零。
+
+镜像交付：competition-v26 push portus dev 对账三层一致（RootFS 40 层）
++ 远端复测 455 passed 后被 v27 覆盖；v27（FROM v26 只重跑 COPY 层）build
+→ 镜像内 pytest → push → 对账 → 复测同批完成。过程坑：devbox 磁盘两次
+耗尽（v24+镜像 6.2G×N 堆积），`docker image prune -af` 误删 overlay 基础
+镜像 v18/v24——从 portus dev 拉回 v24 改 FROM 续建；prune 前必须核对
+FROM 依赖链。
+
 ## 第十三轮（v26，2026-11-22 平台日志归因）：reasoning 截断卡死与重启循环
 
 平台侧数据还原故障链（23:30:57 → 23:42）：最后一次模型调用 stage2
