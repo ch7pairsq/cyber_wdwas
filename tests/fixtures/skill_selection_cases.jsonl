@@ -18,7 +18,7 @@
 {"id":"crypto_nonce_reuse","domain":"crypto","query":"aes ctr nonce reuse keystream gcm","expect":["crypto.aes.nonce_reuse"],"forbid":["crypto.dh.degenerate"]}
 {"id":"web_file_write","domain":"web","query":"file write webshell htaccess writable primitive","expect":["web.file_write"]}
 {"id":"forensics_stego_audio","domain":"forensics","query":"wav audio lsb spectrogram morse hidden","expect":["forensics.stego.audio"]}
-{"id":"web_intranet_relay","domain":"渗透","query":"intranet pivot relay hop tunnel lateral","expect":["web.intranet.relay"],"forbid":["web.ssrf"]}
+{"id":"web_intranet_relay","domain":"渗透","query":"intranet pivot relay hop tunnel lateral","expect":["web.intranet.relay"],"forbid":["crypto.rsa.small_e"]}
 {"id":"web_java_supplychain","domain":"web","query":"war jar web-inf lib dependency cve servlet","expect":["web.java.supplychain"]}
 {"id":"web_cgi","domain":"web","query":"cgi shellshock perl bash header probe","expect":["web.cgi.rce"]}
 {"id":"reverse_native_so","domain":"reverse","query":"jni native library preload patchelf hook","expect":["reverse.native.so"]}

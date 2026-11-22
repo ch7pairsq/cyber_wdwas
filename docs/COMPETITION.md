@@ -482,6 +482,34 @@ build 中间层每轮 ~1.5GB，失败重试前必须 prune（本轮清理后 82%
 预算口径、平台环境数据问题都只在长跑暴露；supervisor 的"活性"与
 "推进"必须分开度量，存活不等于前进。
 
+## 第十六轮（v29，2026-11-22 技能别名审计：泛词挤槽修复与中文触发词落地）
+
+**技能卡中文别名机制（63 卡 aliases + 域归一）审计落地**。打分链：题面
+抽 ASCII 词（≥3 字符、去重）给卡打分，域精确 +6、keywords +3、aliases
+反向扫题面 +7（每卡一次），≥5.0 入围。审计结论：边缘策略（ASCII 侧补
+词边界、中文侧不补，"Shiro反序列化" 粘连命中、"javascript" 不误伤
+"java"、"self" 不命中 "elf"）实测全对；主要缺陷是 **5 张卡配泛中文词
+alias 会跨域挤槽**——misc 纯中文题提"编码"→ crypto.encoding 排第 1
+挤掉 misc.unicode；pwn 题提"反汇编"→ reverse.elf.static 占第 2 槽。
+修复：
+
+- 删泛词 alias（编码/解码/静态分析/反汇编/压缩包/随机数/流量分析/数据包
+  及分类词"逆向"），保留窄专名；判定标准 = "aliases 回答'这题就是考这
+  个'"，泛过程词回答不了；
+- web.intranet.relay 的 domain "渗透"→"web"（打分归一无碍，但
+  index_text 目录按原始 domain 分组会分裂出独立"渗透"行）；
+- 评测集 web_intranet_relay 用例的 forbid web.ssrf→crypto.rsa.small_e：
+  relay 卡 trigger 本就是"SSRF 链"，同域 ssrf 作为第 2 候选正当——旧
+  约束是域分裂时代的产物（relay 域"渗透"时 ssrf 从不同入围）。该回归
+  由未提交的 alias 改动自带，首次全量（460）才暴露；
+- 新增 6 个回归测试：粘连命中、ASCII 边界不误伤、泛词不挤 misc/pwn 槽
+  （2 例）、整词 rust 合法命中、substring 防误伤改用纯 "trust" 验证
+  （原断言依赖零命中侥幸通过，alias "rust" 落地后必然翻车）。
+
+全量 460 passed 4 skipped。验证复核：misc 纯中文题提"编码"→
+crypto.encoding 落选、misc.unicode 第 1；pwn 题提"反汇编"→
+reverse.elf.static 落选。
+
 ## 第十五轮（v28，2026-11-22 终局吞吐对齐与大文件读取纪律）
 
 **endgame 授权按空闲槽位封顶**。11-21 复盘：剩 20 分钟时一次抬升 14 题，

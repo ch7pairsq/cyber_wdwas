@@ -22,6 +22,8 @@ _INDEX_TRIGGER_DENY = {
 }
 
 # 平台/题面常见分类名到技能域的归一；只做映射，不改变选择算法。
+# 中文分类是正式赛的常态（"逆向""杂项""综合渗透"），不映射就拿不到域分
+# （+6），而中文题面又抽不出英文词，结果是整题一张技能卡都选不出来。
 _DOMAIN_ALIASES = {
     "reversing": "reverse",
     "rev": "reverse",
@@ -30,7 +32,37 @@ _DOMAIN_ALIASES = {
     "steganography": "forensics",
     "pwnning": "pwn",
     "pwnable": "pwn",
+    # 中文分类
+    "逆向": "reverse",
+    "逆向工程": "reverse",
+    "逆向分析": "reverse",
+    "杂项": "misc",
+    "综合": "misc",
+    "其他": "misc",
+    "密码": "crypto",
+    "密码学": "crypto",
+    "编码": "crypto",
+    "二进制": "pwn",
+    "漏洞利用": "pwn",
+    "溢出": "pwn",
+    "exploit": "pwn",
+    "取证": "forensics",
+    "取证分析": "forensics",
+    "流量分析": "forensics",
+    "隐写": "forensics",
+    "电子取证": "forensics",
+    "渗透": "web",
+    "综合渗透": "web",
+    "渗透测试": "web",
+    "web安全": "web",
+    "网站": "web",
 }
+
+# 索引 aliases 字段（中英专有名词）的加分：必须高于"域精确命中 +6"。域分只
+# 回答"这题大概是哪一类"，aliases 回答"这题就是考这个"——两者同分时，域的
+# 兜底卡会把跨域的细节卡挤掉（实测："杂项/流量分析" 会选中 misc.unicode 而
+# 不是 forensics.pcap.triage）。每张卡最多加一次，不按命中词数累加。
+_ALIAS_SCORE = 7.0
 
 
 class SkillNotFound(Exception):
@@ -132,12 +164,24 @@ class SkillLoader:
         """词边界匹配：term 必须整词出现，不是更长词的子串。"""
         return r"(?<![a-z0-9])" + re.escape(term) + r"(?![a-z0-9])"
 
+    @staticmethod
+    def _alias_pattern(term: str) -> str:
+        """aliases 用的匹配式：只对有 ASCII 边缘补边界，中文边缘不加。
+
+        中文题面常把英文技术名和中文粘连（"Shiro反序列化"），若照搬
+        _word_pattern，前面的 "o" 会让左边界断言失败、整条失效；而 "java"
+        这类短词又必须挡住 "javascript"，所以按边缘字符分别决定。
+        """
+        left = r"(?<![a-z0-9])" if re.match(r"[a-z0-9]", term) else ""
+        right = r"(?![a-z0-9])" if re.search(r"[a-z0-9]$", term) else ""
+        return left + re.escape(term) + right
+
     def select(self, domain: Optional[str] = None, query: str = "",
                limit: int = 2) -> List[Dict[str, object]]:
         """按题目领域和关键词打分，只返回最相关的少量技能。
 
         打分规则（2026-11-20 收紧，正式赛 static_file_server 配 php 技能的
-        教训）：
+        教训；2026-11-22 补中文与兜底）：
         - 词边界匹配：term 必须整词出现（"file" 不命中 zip**file**、
           "app.py" 的碎片 "py" 不命中含 py 的关键词）；
         - 查询词去重：同一词多次出现只计一次分（词频不等于相关性）；
@@ -145,19 +189,28 @@ class SkillLoader:
         - 入围门槛 5.0：domain 精确命中（+6）直接入围；泛分类（如 ctf）
           需要两个不同实词命中（3+3）或 name+keyword 同词命中（2+3=5）。
           单关键词弱命中不入围——宁可不出技能，也不塞无关技巧占 prompt。
+        - aliases 反向扫题面（+7，每卡一次）：中文题面经 terms 抽不出任何
+          词，只能靠索引侧的中英专有名词（"反序列化"/"fastjson"/"栈溢出"）
+          反查，否则该题要么零技能、要么拿到同域字母序最靠前的无关卡；
+          加权高于域分，避免域兜底卡压掉跨域命中的细节卡；
+        - 同分优先 default：每个域标一张兜底卡，避免平票退化成名字典序。
         """
         limit = max(0, int(limit))
         if not limit:
             return []
+        haystack = (query or "").casefold()
         domain_text = (domain or "").strip().casefold()
         domain_text = _DOMAIN_ALIASES.get(domain_text, domain_text)
         terms = list(dict.fromkeys(
-            t for t in re.findall(r"[a-z0-9]+", (query or "").casefold())
+            t for t in re.findall(r"[a-z0-9]+", haystack)
             if len(t) >= 3))
-        scored: List[Tuple[float, int, Dict[str, object]]] = []
+        scored: List[Tuple[float, int, int, Dict[str, object]]] = []
         for meta in self._index:
             name = str(meta["name"]).casefold()
-            skill_domain = str(meta["domain"]).casefold()
+            raw_domain = str(meta["domain"]).casefold()
+            # 卡片域也过一遍归一：web.intranet.relay 的 domain 写作"渗透"，
+            # 与题面 category 归一后的 "web" 对不上，会永远拿不到域分。
+            skill_domain = _DOMAIN_ALIASES.get(raw_domain, raw_domain)
             keywords = " ".join(str(k) for k in (meta.get("keywords") or [])).casefold()
             score = 0.0
             if domain_text and skill_domain == domain_text:
@@ -170,13 +223,21 @@ class SkillLoader:
                     score += 2.0
                 elif keywords and re.search(self._word_pattern(term), keywords):
                     score += 3.0
+            aliases = meta.get("aliases") or []
+            if isinstance(aliases, (list, tuple)):
+                for alias in aliases:
+                    token = str(alias).strip().casefold()
+                    if token and re.search(self._alias_pattern(token), haystack):
+                        score += _ALIAS_SCORE
+                        break  # 每卡最多一次，避免多个别名叠加刷分
             if score < 5.0:
                 continue
             # 同等匹配优先更小、更低风险的章节，减少上下文占用。
             hint = int(meta.get("tokens_hint") or 0)
-            scored.append((-score, hint, meta))
-        scored.sort(key=lambda item: (item[0], item[1], str(item[2]["name"])))
-        return [dict(meta) for _, _, meta in scored[:limit]]
+            fallback = 0 if meta.get("default") else 1
+            scored.append((-score, fallback, hint, meta))
+        scored.sort(key=lambda item: (item[0], item[1], item[2], str(item[3]["name"])))
+        return [dict(item[3]) for item in scored[:limit]]
 
     def load_section(self, name: str, max_bytes: int = 20000) -> str:
         """按需加载单节正文；超限报错而非静默截断；重复读取走缓存。"""
