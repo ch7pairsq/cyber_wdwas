@@ -522,6 +522,19 @@
     "source": {"type": "internal"}
   },
   {
+    "name": "crypto.amm.root",
+    "domain": "crypto",
+    "trigger": "模开方/高次剩余：Tonelli-Shanks、AMM、Hensel 提升、离散对数",
+    "keywords": ["modular", "sqrt", "root", "nthroot", "tonelli", "amm", "discrete", "log", "hensel", "legendre"],
+    "aliases": ["模开方", "平方根", "二次剩余", "离散对数", "高次剩余", "sqrt", "sqrt163", "nthroot"],
+    "prerequisites": ["python_exec"],
+    "tokens_hint": 1100,
+    "risk": "compute",
+    "file": "crypto.amm.root.md",
+    "pivot": ["crypto.rsa.variants", "crypto.lattice.lll"],
+    "source": {"type": "internal"}
+  },
+  {
     "name": "reverse.antidebug",
     "domain": "reverse",
     "trigger": "反调试：定位探测点/静态优先/打桩绕过",

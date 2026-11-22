@@ -112,6 +112,54 @@ def test_unregistered_evidence_rejected():
     assert "unregistered" in result.failure_reason
 
 
+class FakeTools:
+    """最小工具注册表替身：工具循环只需 tool_definitions + execute_arguments。"""
+
+    def tool_definitions(self):
+        return [{"name": "python_exec", "description": "run python",
+                 "input_schema": {"type": "object", "properties": {}}}]
+
+    def execute_arguments(self, name, arguments, cwd=None, control=None):
+        from ctf_ext.gateway.tools import ToolResult
+        return ToolResult(status="ok", summary="done")
+
+
+def test_chatty_tool_text_truncated():
+    """工具轮附带长文本硬截断（2026-11-22 模拟赛日志：单轮 15337 chars 散文
+    直入上下文，40 轮滚到 112K chars）；工具仍正常执行，最终 JSON 不受影响。"""
+    board, ev, claim, sha = _setup()
+    chatty = ProviderResponse(text="解" * 8000,
+                              tool_calls=[{"id": "t1", "name": "python_exec", "input": {}}],
+                              stop_reason="tool_calls")
+    provider = FakeProvider([chatty, _resp(_payload(sha))])
+    result = LlmWorker(provider, evidence_check=ev.verify,
+                       tool_registry=FakeTools()).work(claim, {})
+    assert result.status == "completed"
+    assert len(provider.calls) == 2
+    assistant = [m for m in provider.calls[1]["messages"] if m.get("role") == "assistant"][0]
+    text_block = [b for b in assistant["content"] if b.get("type") == "text"][0]
+    assert len(text_block["text"]) <= 6000 + 60
+    assert "已截断" in text_block["text"]
+
+
+def test_contract_repair_uses_compact_context():
+    """契约修复轮轻量化（2026-11-22 模拟赛日志：旧路径全量重发 40 轮历史）：
+    第二次调用只带精简 user 消息（失败原因 + 上一轮输出），tools 置 None。"""
+    board, ev, claim, sha = _setup()
+    prose = "分析结论：附件含 flag。补充：解码方式为 base64。" * 40
+    provider = FakeProvider([ProviderResponse(text=prose, usage={"total_tokens": 10}),
+                             _resp(_payload(sha))])
+    result = LlmWorker(provider, evidence_check=ev.verify).work(claim, {})
+    assert result.status == "completed"
+    assert len(provider.calls) == 2
+    repair_messages = provider.calls[1]["messages"]
+    assert len(repair_messages) == 1 and repair_messages[0]["role"] == "user"
+    assert "上一轮输出" in repair_messages[0]["content"]
+    assert "解码方式为 base64" in repair_messages[0]["content"]
+    assert "response is not a JSON object" in repair_messages[0]["content"]
+    assert provider.calls[1]["kwargs"].get("tools") is None
+
+
 def test_timeout_and_rate_limit_are_reported_not_retried():
     board, ev, claim, sha = _setup()
     provider = FakeProvider([ProviderTimeout("slow")])

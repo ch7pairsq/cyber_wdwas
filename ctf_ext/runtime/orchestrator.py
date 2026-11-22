@@ -37,6 +37,12 @@ class Orchestrator:
     # empty model response 在同一 intent 上循环 20+ 次烧穿 endgame 预算，
     # 唯一挡板是单 intent 预算墙（远水救不了近火）。
     provider_error_max_attempts = 3
+    # 契约失败熔断阈值（2026-11-22 模拟赛日志）：同一 intent 第 2 次领取仍
+    # failed_contract 即 blocked。实测 misc.triage.auto.followup.2 因契约格式
+    # 失败被整轮重跑 3 次（40+17+13 轮、几十万 chars 全废）——work 内部的
+    # compact 修复已给过一次改写机会，整轮重跑只是换采样重来。blocked 后
+    # 仍可走 endgame 冷却再授权，不是死题。
+    contract_error_max_attempts = 2
     # deadline 后收尾宽限（秒）：真实平台提交回执往返可达 client_timeout=40s，
     # 只给 1s 会把在途回执关在门外——该题永远停在 SENDING，分数丢失且
     # 正式赛一次性窗口无重赛机会。排空即返回，happy path 无额外墙钟。
@@ -352,10 +358,19 @@ class Orchestrator:
             result.status = "blocked"
             result.failure_reason = "provider_error_exhausted ({} attempts): {}".format(
                 getattr(claim, "attempt_no", 0), result.failure_reason)
+        self._validate_contract(claim, result)
+        if self._should_break_contract_failures(claim, result):
+            self._board.append_event("contract_error_exhausted", claim.intent_id, {
+                "challenge_id": claim.challenge_id,
+                "attempts": int(getattr(claim, "attempt_no", 0) or 0),
+                "failure_reason": result.failure_reason,
+            })
+            result.status = "blocked"
+            result.failure_reason = "contract_error_exhausted ({} attempts): {}".format(
+                getattr(claim, "attempt_no", 0), result.failure_reason)
         print("[orch] result ch={} status={} outcome={} reason={}".format(
             claim.challenge_id, result.status, result.outcome,
             result.failure_reason or "-"), file=sys.stderr, flush=True)
-        self._validate_contract(claim, result)
         self._record_usage(result)
         # 结果落库也是真实推进：调度层完成一个 claim 的完整链路。
         touch_progress()
@@ -418,6 +433,18 @@ class Orchestrator:
         if str(result.failure_reason or "") not in ("ProviderError", "ProviderConfigError"):
             return False
         return int(getattr(claim, "attempt_no", 0) or 0) >= self.provider_error_max_attempts
+
+    def _should_break_contract_failures(self, claim, result) -> bool:
+        """契约失败熔断：同一 intent 第 2 次领取仍 failed_contract 即 blocked。
+
+        每次整轮重跑从零开始 40 轮；work 内部 compact 修复已给过一次改写
+        机会，继续重试只是换采样重来（2026-11-22 模拟赛日志三连实测）。
+        """
+        if result.status != "failed" or result.outcome != "error":
+            return False
+        if not str(result.failure_reason or "").startswith("failed_contract"):
+            return False
+        return int(getattr(claim, "attempt_no", 0) or 0) >= self.contract_error_max_attempts
 
     def _validate_contract(self, claim, result) -> None:
         """B.2 契约校验：不合格输出降级为可重试失败，清空候选答案与事实。"""
@@ -713,7 +740,7 @@ class Orchestrator:
     def _cleanup_finished_workspaces(self) -> None:
         """删除已终结题目的工作区（handouts + 工具产物），幂等。
 
-        三条件同时成立才回收：有提交记录、无 DRAFT/SENDING 在途提交
+        三条件同时成立才回收：有 ACCEPTED 回执、无 DRAFT/SENDING 在途提交
         （重派发需校验工作区内的声明与证据）、无 READY/RUNNING/
         FAILED_RETRYABLE 意图（后续尝试还可能用到）。工作区路径是
         workspace_root 下的 sha256 名目录，不存在路径穿越。
@@ -721,13 +748,15 @@ class Orchestrator:
         if self._state is None:
             return
         try:
-            rows = self._board._db.execute(
-                "SELECT DISTINCT challenge_id FROM submissions WHERE challenge_id NOT IN"
-                " (SELECT challenge_id FROM submissions WHERE status IN ('DRAFT','SENDING'))"
-            ).fetchall()
-            live = {r[0] for r in self._board._db.execute(
-                "SELECT DISTINCT challenge_id FROM intents_ext"
-                " WHERE status IN ('READY','RUNNING','FAILED_RETRYABLE')").fetchall()}
+            with self._board.read_view() as db:
+                rows = db.execute(
+                    "SELECT DISTINCT challenge_id FROM submissions WHERE status='ACCEPTED'"
+                    " AND challenge_id NOT IN"
+                    " (SELECT challenge_id FROM submissions WHERE status IN ('DRAFT','SENDING'))"
+                ).fetchall()
+                live = {r[0] for r in db.execute(
+                    "SELECT DISTINCT challenge_id FROM intents_ext"
+                    " WHERE status IN ('READY','RUNNING','FAILED_RETRYABLE')").fetchall()}
         except Exception as exc:
             self._board.append_event("cleanup_error", "", {"error": type(exc).__name__})
             return
@@ -972,8 +1001,13 @@ class Orchestrator:
             return False
         if deadline - self._clock() < self._endgame_min_seconds:
             return False  # 剩余时间不够一轮有意义的尝试
-        if self._scheduler.has_waiting_work():
-            return False  # 还有正常工作没做完，加时留给收尾阶段
+        backfill = getattr(self._scheduler, "backfill_slots", None)
+        if callable(backfill):
+            available = max(0, int(backfill()))
+        else:
+            available = 0 if self._scheduler.has_waiting_work() else self._endgame_grant_limit()
+        if available <= 0:
+            return False
         factory = getattr(self._worker, "_control_factory", None)
         if not callable(factory):
             return False
@@ -985,7 +1019,7 @@ class Orchestrator:
         blocked_cids = self._board.challenges_with_blocked_intents()  # v21 复活判定
         # tasks 元素是 ChallengeInput 对象（不可排序、不是 id），统一取 challenge_id。
         ids = sorted(getattr(t, "challenge_id", str(t)) for t in tasks)
-        limit = self._endgame_grant_limit()
+        limit = min(self._endgame_grant_limit(), available)
         if limit <= 0:
             # 没有空闲槽位：本轮不抬预算，等槽位回收后由监控线程重试。
             # 这里不写事件——监控线程每个 poll 都会调用本方法，写事件会刷爆表。
@@ -1001,7 +1035,7 @@ class Orchestrator:
                 # 保留更早的真实授权时刻），冷却期内不再重复授权。
                 self._endgame_granted.setdefault(cid, self._clock())
                 continue
-            grants[cid] = self._endgame_bonus
+            grants[cid] = float(grants.get(cid) or 0.0) + self._endgame_bonus
             self._endgame_granted[cid] = self._clock()
             # 授权必须复位会话：否则调度器把 stopped 的题永久排除，
             # pass2 意图永远 READY 无人认领（endgame 失效的根因）。
@@ -1033,16 +1067,27 @@ class Orchestrator:
                 pass
         return max(1, self._parallel_agents)  # 旧调度器/查询失败：退回线程数
 
-    def _endgame_candidates(self, ids, solved, blocked_cids) -> List[str]:
+    def _endgame_candidates(self, ids, solved, blocked_cids, ignore_cooldown=False) -> List[str]:
         """筛出可加时的题，按 points_hint 降序（同分按题号）。
 
         候选判定沿用原逻辑：已解/已授权的跳过；非 stopped 的题只有在
         blocked 或规划上限已打满时才纳入（否则让 planner 正常接手）。
         """
         out = []
+        solved = set(solved) | set(self._board.accepted_challenge_ids())
+        open_rows = {row["challenge_id"]: row for row in self._board.open_intent_summary()}
+        with self._board.read_view() as db:
+            pending = {row[0] for row in db.execute(
+                "SELECT DISTINCT challenge_id FROM submissions WHERE status IN ('DRAFT','SENDING')"
+            ).fetchall()}
         for cid in ids:
+            row = open_rows.get(cid) or {}
+            if int(row.get("running", 0) or 0) or cid in pending:
+                continue
             granted_at = self._endgame_granted.get(cid)
             if cid in solved or (
+                    not ignore_cooldown
+                    and
                     granted_at is not None
                     and self._clock() - granted_at < self._endgame_cooldown):
                 continue  # 已解，或授权后未过冷却期
@@ -1052,13 +1097,18 @@ class Orchestrator:
                 _, st = self._state.load(cid)
             except Exception:
                 continue
+            if st.get("status") == "confirmed":
+                continue
+            count = self._board.count_intents(cid)
+            # 已有历史、普通队列已耗尽：链深/停滞挡板不能把未解题永久遗留。
+            drained = count > 0 and not int(row.get("ready", 0) or 0)
             if st.get("status") != "stopped":
                 # v12 教训（2026-11-21 正式赛第 2 题）：gate 拒绝的题会话是
                 # ready（非 stopped），planner 上限打满后无新意图也不满足
                 # 加时条件 → run 提前退出、整题零提交。放行"规划上限已打
                 # 满"的未解题（剩余时间富余时），授权一次终局加时重试。
-                if cid not in blocked_cids \
-                        and self._board.count_intents(cid) < self._planner.max_intents_per_challenge:
+                if cid not in blocked_cids and not drained \
+                        and count < self._planner.max_intents_per_challenge:
                     continue  # 未耗尽预算且还有规划余量的题让 planner 正常接手
                 # v21：blocked 题（存在终态 FAILED intent）纳入授权——
                 # planner 对 blocked 不扩展、intents 又未打满，两边互相以为

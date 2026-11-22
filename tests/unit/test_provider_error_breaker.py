@@ -47,6 +47,32 @@ def test_breaker_ignores_transient_and_non_provider_failures():
     assert _breaker(attempt_no=3, outcome="no_signal") is False
 
 
+def _contract_breaker(attempt_no, reason="failed_contract: candidate_answer must look like flag{...}",
+                      outcome="error", status="failed"):
+    """契约失败熔断：同一 intent 第 2 次领取仍 failed_contract 即 blocked。"""
+    orch = Orchestrator.__new__(Orchestrator)
+    claim = type("ClaimStub", (), {"attempt_no": attempt_no})()
+    return orch._should_break_contract_failures(
+        claim, _failed_result(reason=reason, outcome=outcome, status=status))
+
+
+def test_second_contract_failure_blocks():
+    """2026-11-22 模拟赛日志：followup.2 因契约失败被整轮重跑 3 次
+    （40+17+13 轮全废）；compact 修复已给过一次改写机会，第 2 次领取
+    再失败即 blocked，blocked 后仍可走 endgame 冷却再授权。"""
+    assert _contract_breaker(attempt_no=2) is True
+
+
+def test_first_contract_failure_stays_retryable():
+    assert _contract_breaker(attempt_no=1) is False
+
+
+def test_contract_breaker_ignores_other_failures():
+    assert _contract_breaker(attempt_no=3, reason="ProviderError") is False
+    assert _contract_breaker(attempt_no=3, reason="budget_exceeded") is False
+    assert _contract_breaker(attempt_no=3, outcome="no_signal", status="completed") is False
+
+
 def test_parse_response_empty_includes_finish_reason_and_usage():
     data = {"model": ALLOWED_MODELS[0],
             "choices": [{"message": {"role": "assistant", "content": ""},

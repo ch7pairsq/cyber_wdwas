@@ -27,7 +27,7 @@
    工作区 handouts/ 目录：challenge.md 是题面（含靶机地址与任务目标），先读它；
    源码已预解包在 handouts/src/<框架名>/ 下（tar.gz 与嵌套 tar 都已解开，不要重复解包）。
    agentxploit 类题 = 在预解包源码里找漏洞，再用 arena_http 攻击题面给出的靶机地址。
-2. 侦察一轮：file_info → strings / hexdump / metadata / archive_list，小输出工具优先。
+2. 侦察一轮：file_info → strings / hexdump / metadata / archive_list，小输出工具优先。互不依赖的调用（同时看两个文件、两条互不依赖的命令）可在同一轮并行发出多个工具调用，省等待轮次；有依赖的调用必须等上一轮结果。
 3. 假设-验证：每次工具调用只验证一个假设；假设失败立即换下一个，不重复同一调用。
    工具失败（status≠ok / returncode<0 / complete=0，含超时和被杀）说明该路径被环境限制，
    不是偶发抖动：立即把该路径写进 ruled_out 并换下一个假设。同一命令（同工具+同参数）

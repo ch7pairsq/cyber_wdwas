@@ -86,7 +86,27 @@ DEFAULT_SYSTEM = (
     "有 DENY 诊断）；python requests/httpx 默认走平台 HTTP_PROXY 隧道，同样可达；"
     "手写 socket 或显式禁用代理的直连不可达；网络探测失败不等于靶机未启动。"
 )
-REPAIR_SUFFIX = "上一次输出不合格，原因如下：\n- {errors}\n只输出修正后的 JSON 对象，不要解释。"
+# 工具轮附带文本硬闸（2026-11-22 模拟赛日志）：模型单轮附带 15337 chars
+# 分析散文直入上下文，40 轮滚到 112K chars（P99 28.9s 的主成分）。工具轮
+# 超过阈值即截断进历史；stop=stop 的最终 JSON 输出不受此限。
+CHATTY_TOOL_TEXT_LIMIT = 6000
+
+# 契约修复轮轻量化（2026-11-22 模拟赛日志）：修复不再重发全部工具历史
+# （40 轮 chars=112K 全量重发，每题浪费 1-3 次全量调用）；只带失败原因与
+# 上一轮输出原文（已含全部结论）的精简上下文，tools 置 None。
+CONTRACT_COMPACT_MAX_CHARS = 12000
+CONTRACT_COMPACT_REPAIR = (
+    "你在上一轮已完成解题分析，但最终输出未通过契约校验。"
+    "基于下面给出的上一轮输出，直接改写为附录 B.2 的最终 JSON 对象；"
+    "本轮没有可用工具，不要再发起任何工具调用。\n"
+    "意图 ID：{intent_id}\n"
+    "契约失败原因：\n- {errors}\n\n"
+    "你的上一轮输出（原样）：\n{last_output}\n\n"
+    "只输出一个 JSON 对象。candidate_answer 逐字取自证据原文（前缀随平台），"
+    "无逐字证据支撑时置 null；facts/evidence_ids 只引用上一轮工具返回过的"
+    "64 位 hex evidence_id（模拟赛实测模型编造 id 触发 unregistered 拒收），"
+    "不确定的可省略该 fact 或用 summary 说明。"
+)
 # 幻觉工具名的契约修复提示：in-claim 重写一轮用（限 1 次，见 work 主循环）。
 TOOL_NAME_CORRECTION = ("系统未提供该工具。只能调用系统提供的工具列表中的工具；"
                         "不需要工具时直接输出附录 B.2 的最终 JSON 对象。")
@@ -538,7 +558,7 @@ class LlmWorker:
                     continue
                 if self._tools is None:
                     return self._failure(claim, "failed", OUTCOME_ERROR, "tool_unavailable", started, tokens, skills_loaded, tool_calls, skills_indexed)
-                if tool_rounds >= self._max_tool_rounds:
+                if not tools or tool_rounds >= self._max_tool_rounds:
                     if tools:
                         # 工具轮次用尽：不再直接弃赛（此前整轮证据作废、同题重跑更费
                         # 预算），改为追加收尾指令做最后一轮无工具总结，走正常契约
@@ -561,6 +581,14 @@ class LlmWorker:
                         continue
                     # 纠正后仍坚持工具调用：放弃，保留原失败码。
                     return self._failure(claim, "failed", OUTCOME_ERROR, "tool_round_limit", started, tokens, skills_loaded, tool_calls, skills_indexed)
+                if len(response.text or "") > CHATTY_TOOL_TEXT_LIMIT:
+                    # 话痨硬闸（2026-11-22 模拟赛日志）：单轮工具调用附带 15337
+                    # chars 散文直入上下文，40 轮滚到 112K chars。工具轮文本
+                    # 超阈值即截断；最终 JSON（stop=stop）不走本分支不截。
+                    print("[llm] chatty tool text truncated ({} chars)".format(
+                        len(response.text)), file=sys.stderr, flush=True)
+                    response.text = response.text[:CHATTY_TOOL_TEXT_LIMIT] + \
+                        "\n[此轮附带文本过长已截断；完整结论只写入最终 JSON]"
                 messages.append({"role": "assistant", "content": self._assistant_content(response)})
                 print("[llm] tools round={} names={}".format(
                     tool_rounds + 1,
@@ -626,9 +654,16 @@ class LlmWorker:
             contract_attempts += 1
             if contract_attempts >= self._max_attempts:
                 break
-            messages.append({"role": "assistant", "content": response.text})
-            messages.append({"role": "user", "content": REPAIR_SUFFIX.format(
-                errors="\n- ".join(errors[:8]))})
+            # 修复轮轻量化（2026-11-22 模拟赛日志）：旧路径把全部工具历史
+            # 原样重发（40 轮 chars=112K 全量重发，每题浪费 1-3 次全量调用）。
+            # 上一轮最终输出已含全部结论，只带失败原因 + 输出原文的精简上下文；
+            # tools 置 None 省 schema 重复上行，也保证修复轮不再进工具循环。
+            # max_attempts=2，本精简调用即唯一修复机会。
+            messages = [{"role": "user", "content": CONTRACT_COMPACT_REPAIR.format(
+                intent_id=claim.intent_id,
+                errors="\n- ".join(errors[:8]),
+                last_output=(response.text or "")[:CONTRACT_COMPACT_MAX_CHARS])}]
+            tools = None
         return self._failure(claim, "failed", OUTCOME_ERROR,
                              "failed_contract: " + "; ".join(errors[:5]), started, tokens,
                              skills_loaded, tool_calls, skills_indexed)

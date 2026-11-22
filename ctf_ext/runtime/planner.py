@@ -18,6 +18,11 @@ from ..store.lessons import sanitize_lesson_text
 REASON_GATE_REJECTED = "gate_rejected"
 REASON_GATE_PENDING = "gate_pending"
 REASON_NO_SIGNAL = "no_signal"
+# no_signal 链深上限（2026-11-22 模拟赛日志）：misc.endgame.pass2 连挂
+# 9 层 followup 全 no_signal，每层 8-16 轮 python_exec 空转零产出，意图
+# 上限放大到 50 后会吃满预算槽。链深达上限不再扩展，通道让给其他题；
+# 该题剩余机会走 endgame 冷却再授权。rejected/pending 有平台反馈，不受此限。
+NO_SIGNAL_CHAIN_LIMIT = 3
 
 
 class IntentPlanner:
@@ -55,6 +60,15 @@ class IntentPlanner:
         if getattr(result, "status", "") == "blocked":
             return None
         challenge_id = claim.challenge_id
+        if reason == REASON_NO_SIGNAL:
+            chain_depth = claim.strategy_key.count(".followup.")
+            if chain_depth >= NO_SIGNAL_CHAIN_LIMIT:
+                self._board.append_event("planner_no_signal_chain_capped", claim.intent_id, {
+                    "challenge_id": challenge_id,
+                    "strategy_key": claim.strategy_key,
+                    "chain_depth": chain_depth,
+                })
+                return None
         count = self._board.count_intents(challenge_id)
         if count >= self.max_intents_per_challenge:
             self._board.append_event("planner_cap_reached", claim.intent_id, {

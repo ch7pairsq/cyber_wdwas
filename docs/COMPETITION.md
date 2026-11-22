@@ -680,6 +680,43 @@ MISSING——toolchain.json 声明不等于安装，三个工具不在 deb 闭�
 
 教训：镜像工具验证必须 which + 实跑，不能只看 toolchain.json。
 
+## 第十一轮（v31，2026-11-22 模拟赛长跑复盘）：并行度 3 拉满与资源不空转
+
+模拟赛日志复盘后的六处改动，目标：parallel=3 全程拉满、无空转、稳定跑满 4 小时：
+
+1. **no_signal 链深限制**（planner）：NO_SIGNAL_CHAIN_LIMIT=3，无信号分支不再
+   无限延伸烧预算。
+2. **话痨截断**（llm_worker）：CHATTY_TOOL_TEXT_LIMIT=6000，工具轮附带长散文
+   硬截断进历史（实测单轮 15337 chars、40 轮滚到 112K，P99 28.9s 主成分）；
+   最终 JSON 输出不受限。
+3. **契约修复轮轻量化**（llm_worker）：CONTRACT_COMPACT_REPAIR 只带失败原因与
+   上一轮输出原文（12000 chars 上限），tools 置 None；不再全量重发 40 轮历史
+   （每题省 1-3 次全量调用）。附 evidence_id 只引真实返回的 64 位 hex 规则提示
+   （实测模型编造 id 触发 unregistered 拒收）。
+4. **收尾边界修复**（llm_worker）：`if not tools or tool_rounds >= max_tool_rounds`
+   ——无工具配置时也能进收尾路径。
+5. **契约错误熔断**（orchestrator）：contract_error_max_attempts=2，同题契约
+   连续失败熔断进 blocked，不再无限烧。
+6. **endgame 三修**（orchestrator+scheduler）：
+   - `backfill_slots()`（scheduler）：空闲槽位扣除可领取的普通队列，尾盘不抢占；
+   - `_grant_endgame` 授权额度累加 `grants[cid] += bonus`、`limit=min(grant_limit, available)`；
+   - `_endgame_candidates` 冷却循环 + drained 判定：pass2 消费完 + 冷却期满可
+     再次授权，普通队列耗尽的未解题不再永久静默（授权 1 次后 pass2 blocked
+     导致题数小时无意图的实测问题）。
+
+配套：worker.md 并行工具调用引导；新技能卡 crypto.amm.root.md（AMM 类密码题）
++ index.json（64 条）；`_cleanup_finished_workspaces` 仅在有 ACCEPTED 提交时
+删工作区（防误删未提交证据）。
+
+测试：test_planner +2、test_llm_worker +2（话痨截断/compact 修复）、
+test_provider_error_breaker +3（熔断）、test_concurrency endgame 冷却循环 +
+槽位封顶共 24 项针对性回归通过。
+
+已知限制：串行 `_run_serial` 的 endgame 冷却空洞未修（has_waiting_work=True
+时永不调 _grant_endgame）——实际比赛 parallel_agents=3 走并行路径，监控线程
+每个 poll 调 _grant_endgame，无此空洞；时间紧不修。镜像内 sympy/gmpy2 依赖
+只能在 devbox 构建链验证（macOS 无该环境）。
+
 ## 第十轮（v23，2026-11-22 工具包扩展）：只读工具 24→30 与技能 8 条
 
 实测复盘（pcap/EXE/流量题反复用 python_exec 手写 tshark/反汇编逻辑，40 轮磨满

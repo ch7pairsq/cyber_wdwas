@@ -62,6 +62,45 @@ def test_planner_skips_blocked_and_confirmed_results():
     board.close()
 
 
+def test_planner_caps_no_signal_chain_depth():
+    """no_signal 链深达上限不再扩展（2026-11-22 模拟赛日志：pass2 连挂 9 层
+    followup 全 no_signal 空转）；链深 2 仍正常扩展。"""
+    board, _ = new_board()
+    add_challenge(board)
+    board.add_intent(IntentDraft(
+        "c1", "misc.triage.auto.followup.1.followup.2.followup.3", {"phase": "followup"}))
+    claim = board.claim_intent("worker")
+    planner = IntentPlanner(board, max_intents_per_challenge=50)
+    assert planner.plan(claim, _no_signal(claim), attempt_id="a1") is None
+    types = [row["event_type"] for row in board.connection.execute(
+        "SELECT event_type FROM events ORDER BY id")]
+    assert "planner_no_signal_chain_capped" in types
+
+    board.add_intent(IntentDraft(
+        "c1", "web.recon.auto.followup.1.followup.2", {"phase": "followup"}))
+    claim2 = board.claim_intent("worker")
+    assert planner.plan(claim2, _no_signal(claim2), attempt_id="a2")
+    board.close()
+
+
+def test_planner_rejected_not_limited_by_chain_depth():
+    """Gate rejected（平台反馈）不受 no_signal 链深限制：错旗续解循环依赖它。"""
+    board, _ = new_board()
+    add_challenge(board)
+    board.add_intent(IntentDraft(
+        "c1", "misc.triage.auto.followup.1.followup.2.followup.3", {"phase": "followup"}))
+    claim = board.claim_intent("worker")
+    planner = IntentPlanner(board, max_intents_per_challenge=50)
+    decision = type("Decision", (), {"status": "rejected", "level": "L4"})()
+    next_intent = planner.plan(claim, _no_signal(claim), decision, attempt_id="a1")
+    assert next_intent
+    rows = [row for row in board.list_open() if row["id"] == next_intent]
+    # 序号取题内 intent 计数（现有语义）；关键断言：rejected 在链深 3 上仍扩展。
+    assert rows and rows[0]["strategy_key"].startswith(
+        "misc.triage.auto.followup.1.followup.2.followup.3.followup.")
+    board.close()
+
+
 def test_orchestrator_wires_planner_after_no_signal():
     with tempfile.TemporaryDirectory() as root:
         orch = build_runtime(root + "/run.db", root + "/evidence")

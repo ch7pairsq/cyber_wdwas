@@ -151,7 +151,8 @@ def test_resource_housekeeping_reclaims_finished_workspaces():
         # workspace_path 只读推导：不创建目录
         ghost = orch._state.workspace_path('ghost-cid')
         assert not ghost.exists()
-        # c1：REJECTED 终态、无在途意图 → 可回收
+        # c1：REJECTED 终态 → 保留（v31：仅 ACCEPTED 回收；endgame 冷却
+        #     接力可能重试 REJECTED 题，工作区删了重试就没有 handouts）
         # c2：ACCEPTED 但意图仍 RUNNING → 保留
         # c3：SENDING 在途提交 → 保留（重派发要校验工作区证据）
         orch._board.add_challenge(Challenge(id='c1', name='c1', category='misc'))
@@ -173,16 +174,17 @@ def test_resource_housekeeping_reclaims_finished_workspaces():
             blob.mkdir()
             (blob / 'big.bin').write_bytes(b'x' * 4096)
         orch._cleanup_finished_workspaces()
-        assert not orch._state.workspace_path('c1').exists()  # 终态 → 回收
+        assert orch._state.workspace_path('c1').exists()  # 仅 ACCEPTED 回收：REJECTED 保留
         assert orch._state.workspace_path('c2').exists()  # 意图在跑 → 保留
         assert orch._state.workspace_path('c3').exists()  # 在途提交 → 保留
         assert orch._board._db.execute(
-            "SELECT COUNT(*) FROM events WHERE event_type='workspace_reclaimed'").fetchone()[0] == 1
-        # c2 意图终结后，下一轮回收
+            "SELECT COUNT(*) FROM events WHERE event_type='workspace_reclaimed'").fetchone()[0] == 0
+        # c2 意图终结后，下一轮回收（ACCEPTED 且无活意图）
         orch._board._db.execute("UPDATE intents_ext SET status='COMPLETED' WHERE challenge_id='c2'")
         orch._board._db.commit()
         orch._cleanup_finished_workspaces()
         assert not orch._state.workspace_path('c2').exists()
+        assert orch._state.workspace_path('c1').exists()  # REJECTED 仍保留
         assert orch._state.workspace_path('c3').exists()  # SENDING 仍保留
         # 水位守护：强制执行一遍不抛错，事件通道可用
         orch._housekeeping(force=True)
