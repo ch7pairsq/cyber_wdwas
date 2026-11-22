@@ -680,6 +680,44 @@ MISSING——toolchain.json 声明不等于安装，三个工具不在 deb 闭�
 
 教训：镜像工具验证必须 which + 实跑，不能只看 toolchain.json。
 
+## 第十五轮（v35，2026-11-22 实时复盘）：start pending ≠ 就绪轮询 + 靶机网段动态授权
+
+别队复盘（用户提供）实锤同款事故：harness 拿到 start 的 pending/空地址响应
+即记"已启动"、不再轮询 → 平台拉起（实测 40-80s）完成后模型仍拿旧空地址撞墙
+→ 误判"靶机未启动"；复活题用 _started 缓存旧地址 → DENY/timeout。对照自查：
+我们的实现完全相同（`_ensure_started` 拿响应即记账 `_started`，唯一"等待"
+是提示词让模型等 30-60s 重试；`ensure_environment` already=True 直接返回
+缓存旧 start_info，无人重新查询）。
+
+修复（arena.py）：
+1. `_env_ready`：就绪判定 = container_status ∈ {available, running}，或
+   状态缺失但地址非空；平台实测形状（addr 恒 []，status 两态）以 status
+   为准。完全无环境字段的旧形状（如 {"started": true}）视为就绪不阻塞。
+2. `_await_environment_ready`：未就绪时轮询重复 POST start 幂等探测
+   （pending 时 worker 尚未打靶，重置无副作用；已就绪绝不重复 start），
+   409 duplicate 继续等、environment_limit 上抛交回让位逻辑；默认预算
+   100s（覆盖 40-80s 拉起）× 间隔 8s，配置 ready_wait/poll_seconds 可调；
+   预算耗尽返回最后 info（提示词兜底仍在）。
+3. duplicate 收编填无字段标记（{"started": True}）——环境在跑但拿不到
+   信息时不进轮询白等。
+4. 就绪轮询在 DeadlineGuard（只包 worker）之外，不占 claim 超时预算。
+
+**第三场 attempt 日志（01a202ff，804 请求体）二次实锤更致命问题**：本
+attempt 平台把靶机放到了 172.20.x.x，而授权网段仍是上一场写死的
+10.201.0.0/16 → arena_http 对全部靶机 DENY（日志 666 次 DENY：svc 域名
+"host must be an IP" + 解析后 172.20 "target outside attempt network"），
+模型靠自己发现"python requests 走 HTTP_PROXY 可达"才没全堵死，但烧掉
+海量轮次。修复（arena_http.py + 两份 yaml）：
+5. 域名 host 支持：svc 域名本地解析仅用于授权校验，SOCKS5 CONNECT 本就
+   ATYP=domain 按域名直传（隧道侧内网 DNS）；解析失败明确 DENY。
+6. 授权网段扩为全部 RFC1918（10/8 + 172.16/12 + 192.168/16）——平台
+   attempt 网段每场可能不同，靶场为隔离网络，防再次换段全瘫。
+7. 提示词同步：host 直接填地址里的主机名（svc 域名或 IP 都支持）。
+
+测试：test_arena_harness 轮询至就绪（stub 序列 pending→available）/ 就绪
+不重复 start / 预算耗尽保 pending / duplicate 收编不轮询；
+test_framework_safety 域名解析入网段放行 / 出网段 DENY / 假域名明确报错。
+
 ## 第十四轮（v34，2026-11-22 第二场实时复盘）：启动期附件下载误杀修复
 
 平台方信息实锤第二场"开头多花约 18 分钟"：harness 首次运行下载大附件时

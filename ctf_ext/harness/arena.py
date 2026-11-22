@@ -574,17 +574,25 @@ class ArenaHarnessAdapter(HarnessAdapter):
                  client_timeout: float = 30.0,
                  env_policy: str = "prewarm",
                  startup_retry_attempts: int = 20,
-                 startup_retry_seconds: float = 30.0):
+                 startup_retry_seconds: float = 30.0,
+                 ready_wait_seconds: float = 100.0,
+                 ready_poll_seconds: float = 8.0):
         """端点路径均可覆盖；env_policy 决定 prewarm / on_demand 两种环境策略。
 
         startup_retry_*：startup 阶段对平台 5xx（未就绪/过载）的退避重试；
         默认 20 次 × 30s ≈ 10 分钟，supervisor 3 次重启合计约 30 分钟容错，
         避免平台短暂不可用就烧光尝试窗口。
+        ready_wait/poll_*：start 返回 pending（容器拉起中）时就绪轮询的
+        总预算与间隔。平台拉起容器实测 40-80s（2026-11-22 别队复盘同款
+        事故：拿到 pending/空地址即记"已启动"不再轮询 → 模型拿空地址撞墙
+        → 误判"靶机未启动"）。
         """
         self._client = ArenaClient(base_url, token, timeout=client_timeout,
                                    proxy=proxy, token_source=token_source)
         self._startup_retry_attempts = max(1, int(startup_retry_attempts))
         self._startup_retry_seconds = max(0.0, float(startup_retry_seconds))
+        self._ready_wait = max(0.0, float(ready_wait_seconds))
+        self._ready_poll = max(0.5, float(ready_poll_seconds))
         self._base_source = base_source
         self._paths = {"help": help_path, "list": list_path, "start": start_path,
                        "files": files_path, "submit": submit_path, "finish": finish_path,
@@ -783,8 +791,9 @@ class ArenaHarnessAdapter(HarnessAdapter):
         parts = []
         if addr:
             parts.append("题目服务地址: http://" + addr
-                         + "（优先用 arena_http 工具访问，host 填 IP 部分，"
-                           "有 DENY 诊断最可靠；" + tunnel_fact + "）")
+                         + "（优先用 arena_http 工具访问，host 直接填地址里的"
+                           "主机名即可（svc 域名或 IP 都支持），有 DENY 诊断"
+                           "最可靠；" + tunnel_fact + "）")
         else:
             parts.append("平台未返回靶机地址（container_addr 为空）：若题目需要远程服务，"
                          "从题目描述（如 ${challenge_host}:${challenge_port} 占位符）/"
@@ -851,6 +860,10 @@ class ArenaHarnessAdapter(HarnessAdapter):
                 if "duplicate" in text.lower() or "already" in text.lower():
                     with self._env_lock:
                         self._started.add(unique_code)  # 已有环境在跑，幂等收编
+                        # duplicate = 环境在跑但平台未回环境信息：填无字段标记
+                        # （_env_ready 对旧形状视为就绪），不进入就绪轮询白等。
+                        self._start_info.setdefault(unique_code, {"started": True})
+                        self._started_at.setdefault(unique_code, time.time())
                 else:
                     raise
         with self._env_lock:
@@ -858,7 +871,76 @@ class ArenaHarnessAdapter(HarnessAdapter):
                 # 并发发起者失败落地：本次按"未启动"返回，意图会快速失败重试。
                 return None
             info = self._start_info.get(unique_code) or {}
+        # v35：start 返回 pending/空地址 ≠ 就绪（平台拉起实测 40-80s）。轮询
+        # 重新 start 幂等探测直到就绪——此前把 pending 记成已启动后永不回头，
+        # 环境就绪后的真实地址模型永远看不到（缓存旧空地址 → 撞墙误判）。
+        if not self._env_ready(info):
+            info = self._await_environment_ready(unique_code, info)
         self._refresh_description(unique_code, info)
+        return info
+
+    @staticmethod
+    def _env_ready(info: Dict[str, Any]) -> bool:
+        """start 响应判定环境是否已就绪（兼容旧响应形状：无状态字段但有地址）。
+
+        2026-11-22 实测平台响应 keys 恒含 container_addr（可为 []）与
+        container_status（available/pending）；轮询只对这种新形状生效。
+        完全没有环境字段的旧形状（如 {"started": true}）无从判定，视为
+        就绪不阻塞——提示词兜底。
+        """
+        if not isinstance(info, dict) or not info:
+            return False
+        has_env_fields = ("container_status" in info or "container_addr" in info)
+        if not has_env_fields:
+            return True
+        status = str(info.get("container_status") or "").strip().lower()
+        raw_addr = info.get("container_addr")
+        if isinstance(raw_addr, (list, tuple)):
+            addr = ",".join(str(a) for a in raw_addr if a).strip()
+        else:
+            addr = str(raw_addr or "").strip()
+        if status in ("available", "running"):
+            return True
+        if not status and addr:
+            return True
+        return False
+
+    def _await_environment_ready(self, unique_code: str, info: Any) -> Any:
+        """就绪轮询：重复 POST start 幂等探测，直到拿到就绪响应或预算耗尽。
+
+        只对不可用状态（pending/空地址）的题轮询——此时 worker 尚未开始打靶，
+        平台重置环境无副作用；已就绪的题绝不重复 start（防平台重建容器断靶）。
+        409 duplicate = 环境仍在跑（地址拿不到就靠提示词兜底）；409
+        environment_limit = 槽位被夺，交回编排层让位逻辑。预算耗尽返回最后
+        一次 info（模型可见面已有"拉起中，等 30-60s 重试"的提示）。
+        """
+        deadline = time.monotonic() + self._ready_wait
+        attempt = 0
+        while time.monotonic() < deadline:
+            time.sleep(self._ready_poll)
+            attempt += 1
+            try:
+                resp = self._client.request("POST", self._paths["start"],
+                                            query={"unique_code": unique_code})
+            except ArenaProtocolError as exc:
+                text = str(exc).lower()
+                if "duplicate" in text or "already" in text:
+                    continue  # 环境在跑但平台不给地址：等下一轮
+                raise
+            if isinstance(resp, dict) and resp:
+                with self._env_lock:
+                    self._start_info[unique_code] = resp
+                    self._started.add(unique_code)
+                    self._started_at.setdefault(unique_code, time.time())
+                info = resp
+                addr = resp.get("container_addr")
+                print("[arena] start-poll {} attempt={} addr={!r} status={!r}".format(
+                    unique_code, attempt, addr, resp.get("container_status")),
+                    file=sys.stderr, flush=True)
+                if self._env_ready(info):
+                    print("[arena] env {} ready after {} polls".format(
+                        unique_code, attempt), file=sys.stderr, flush=True)
+                    break
         return info
 
     def max_envs(self) -> int:

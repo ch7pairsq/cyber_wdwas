@@ -32,6 +32,10 @@ class _StubArena(BaseHTTPRequestHandler):
     legacy_submit: set = set()
     # start 响应可配置：测试 env_note 的 container_addr 有/无两种分支。
     start_payload: dict = {"started": True}
+    # v35 就绪轮询：start 响应序列（dict = 恒定响应；list = 按调用次序弹出，
+    # 耗尽后停留最后一项）；start_calls 记录调用次序供断言。
+    start_payloads: list = []
+    start_calls: list = []
 
     def log_message(self, *args):  # 静默
         pass
@@ -85,6 +89,13 @@ class _StubArena(BaseHTTPRequestHandler):
             code = self.path.split("unique_code=")[-1].split("&")[0]
             if code == "CH-LIMIT":
                 return self._json({"error": "environment_limit"}, 409)
+            if _StubArena.start_payloads:
+                # v35 就绪轮询模拟：平台 start 幂等，按调用次序返回序列
+                # （第一响 pending → 后续拉起完成后返回就绪/新地址）。
+                _StubArena.start_calls.append(code)
+                idx = min(len(_StubArena.start_calls) - 1,
+                          len(_StubArena.start_payloads) - 1)
+                return self._json(dict(_StubArena.start_payloads[idx]))
             if code in _StubArena.started:
                 return self._json({"error": "duplicate"}, 409)
             _StubArena.started.add(code)
@@ -308,9 +319,10 @@ def test_ensure_environment_tolerates_duplicate_409(arena_url):
     second = _adapter(arena_url, env_policy="on_demand")
     second.startup()
     second.read_tasks()
-    # duplicate 被收编，不抛；返回本进程已知的 start_info（可能为空 dict），
-    # 描述同步刷新（无地址时写明"平台未返回靶机地址"，不误报已启动）。
-    assert second.ensure_environment("CH-1") == {}
+    # duplicate 被收编，不抛；返回无环境字段标记（{"started": True}）——
+    # v35 语义：duplicate = 环境在跑但平台未回环境信息，无从判定就绪，
+    # 不进入就绪轮询白等，提示词兜底（描述写明"平台未返回靶机地址"）。
+    assert second.ensure_environment("CH-1") == {"started": True}
 
 
 def test_ensure_environment_raises_on_environment_limit(arena_url):
@@ -425,7 +437,8 @@ def test_env_note_pending_status_warns_not_ready(arena_url):
     _StubArena.start_payload = payload
     os.environ["ARENA_NETWORK_CIDR"] = "10.201.0.0/16"
     try:
-        ad = _adapter(arena_url, env_policy="on_demand")
+        ad = _adapter(arena_url, env_policy="on_demand",
+                      ready_wait_seconds=0.4, ready_poll_seconds=0.2)
         ad.startup()
         ad.read_tasks()
         ad.ensure_environment("CH-1")
@@ -436,6 +449,72 @@ def test_env_note_pending_status_warns_not_ready(arena_url):
         assert "容器租期至" not in desc  # expires_at=None 不写租期节
     finally:
         os.environ.pop("ARENA_NETWORK_CIDR", None)
+
+
+def test_ensure_environment_polls_until_ready(arena_url):
+    """v35（2026-11-22 别队复盘借鉴）：start 返回 pending ≠ 就绪，平台拉起
+    实测 40-80s。此前拿到 pending 即记"已启动"不再轮询 → 环境就绪后的真实
+    地址模型永远看不到（缓存旧空地址 → 撞墙误判"靶机未启动"）。修复后
+    ensure_environment 轮询重新 start 幂等探测直到就绪。"""
+    pending = dict(golden_response("start_no_addr"), container_status="pending",
+                   container_addr=[], expires_at=None)
+    ready = dict(golden_response("start_no_addr"), container_status="available",
+                 container_addr=["10.201.0.201:3000"],
+                 expires_at="2026-11-22T20:30:00+08:00")
+    _StubArena.start_payloads = [pending, ready]
+    try:
+        ad = _adapter(arena_url, env_policy="on_demand",
+                      ready_wait_seconds=5.0, ready_poll_seconds=0.2)
+        ad.startup()
+        ad.read_tasks()
+        info = ad.ensure_environment("CH-1")
+        assert info.get("container_status") == "available"
+        assert info.get("container_addr") == ["10.201.0.201:3000"]
+        assert _StubArena.start_calls == ["CH-1", "CH-1"]  # 首响 + 一探即就绪
+        desc = ad.task_description("CH-1")
+        assert "10.201.0.201:3000" in desc  # 最新地址已刷进模型可见面
+        assert "尚未就绪" not in desc
+    finally:
+        _StubArena.start_payloads = []
+        _StubArena.start_calls = []
+
+
+def test_ensure_environment_no_poll_when_already_ready(arena_url):
+    """就绪态（available）绝不重复 start——防平台重建容器断靶。"""
+    ready = dict(golden_response("start_no_addr"), container_status="available",
+                 container_addr=[], expires_at=None)
+    _StubArena.start_payloads = [ready]
+    try:
+        ad = _adapter(arena_url, env_policy="on_demand")
+        ad.startup()
+        ad.read_tasks()
+        info = ad.ensure_environment("CH-1")
+        assert _StubArena.start_calls == ["CH-1"]  # 只发一次 start
+        assert info.get("container_status") == "available"
+    finally:
+        _StubArena.start_payloads = []
+        _StubArena.start_calls = []
+
+
+def test_ensure_environment_ready_poll_budget_keeps_pending(arena_url):
+    """预算耗尽：平台持续 pending（或 start 恒 409 duplicate 拿不到地址）时
+    返回最后 info 不阻塞解题——提示词"拉起中等 30-60s 重试"兜底仍可达模型。"""
+    pending = dict(golden_response("start_no_addr"), container_status="pending",
+                   container_addr=[], expires_at=None)
+    _StubArena.start_payloads = [pending]
+    try:
+        ad = _adapter(arena_url, env_policy="on_demand",
+                      ready_wait_seconds=0.5, ready_poll_seconds=0.2)
+        ad.startup()
+        ad.read_tasks()
+        info = ad.ensure_environment("CH-1")
+        assert info.get("container_status") == "pending"
+        assert len(_StubArena.start_calls) >= 2  # 预算内多次探测
+        desc = ad.task_description("CH-1")
+        assert "容器状态: pending" in desc
+    finally:
+        _StubArena.start_payloads = []
+        _StubArena.start_calls = []
 
 
 def test_env_note_expires_at_warns_lease(arena_url):

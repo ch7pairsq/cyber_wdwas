@@ -154,6 +154,11 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
                         ("help_path", "list_path", "start_path", "files_path",
                          "submit_path", "finish_path", "close_path", "download_template")
                         if arena_cfg.get(k)}
+        # v35：就绪轮询（start pending ≠ 就绪，平台拉起实测 40-80s）。
+        arena_kwargs["ready_wait_seconds"] = float(
+            arena_cfg.get("ready_wait_seconds") or 100.0)
+        arena_kwargs["ready_poll_seconds"] = float(
+            arena_cfg.get("ready_poll_seconds") or 8.0)
         # v33：并发环境上限从配置接入（此前配置字段存在但从未传入，适配器
         # 恒用默认 3）；让位策略以适配器 max_envs() 为准。
         arena_kwargs["max_envs"] = max(1, int(arena_cfg.get("max_envs") or 3))

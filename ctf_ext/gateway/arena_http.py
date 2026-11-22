@@ -87,10 +87,7 @@ def main():
         sys.exit("DENY: method not allowed")
     if not 1 <= args.port <= 65535:
         sys.exit("DENY: bad port")
-    try:
-        ip = ipaddress.ip_address(args.host)
-    except ValueError:
-        sys.exit("DENY: host must be an IP inside ARENA_NETWORK_CIDR")
+    host_raw = args.host.strip()
     cidr_raw = os.environ.get("ARENA_NETWORK_CIDR", "")
     if not cidr_raw:
         sys.exit("DENY: ARENA_NETWORK_CIDR is required")
@@ -99,7 +96,26 @@ def main():
         nets = [ipaddress.ip_network(c.strip()) for c in cidr_raw.split(",") if c.strip()]
     except ValueError:
         sys.exit("DENY: ARENA_NETWORK_CIDR invalid")
-    if not nets or not any(ip in net for net in nets):
+    # v35：支持域名 host——平台 start 响应给的是 svc 域名
+    # （docker-xxx.arena-tr-<attempt>.svc，2026-11-22 第三场实测解析到
+    # 172.20.x），此前只收 IP 字面量导致 arena_http 对全部靶机 DENY。
+    # 本地解析仅用于授权校验；SOCKS5 CONNECT 本就按域名编码（ATYP=domain），
+    # 隧道侧用内网 DNS 解析，host 原样直传。
+    try:
+        resolved_ips = [ipaddress.ip_address(host_raw)]
+    except ValueError:
+        try:
+            infos = socket.getaddrinfo(host_raw, None)
+        except OSError:
+            sys.exit("DENY: cannot resolve host; pass an IP inside ARENA_NETWORK_CIDR")
+        resolved_ips = []
+        for i in infos:
+            try:
+                resolved_ips.append(ipaddress.ip_address(i[4][0]))
+            except ValueError:
+                continue
+    if not resolved_ips or not any(
+            any(ip_ in net for net in nets) for ip_ in resolved_ips):
         sys.exit("DENY: target outside attempt network")
     # 平台 API 对模型工具只读：submit 走网关（gate/幂等/对账治理），
     # start/finish 属管理操作由 harness 适配器执行。防止模型绕过治理
@@ -112,7 +128,8 @@ def main():
             platform_port = parsed.port or (443 if parsed.scheme == "https" else 80)
         except ValueError:
             platform_ip, platform_port = None, None
-        if platform_ip is not None and ip == platform_ip and args.port == platform_port \
+        if platform_ip is not None and args.port == platform_port \
+                and any(ip_ == platform_ip for ip_ in resolved_ips) \
                 and args.method not in ("GET", "HEAD", "OPTIONS"):
             sys.exit("DENY: platform API is read-only for tools "
                      "(submit via gateway; start/finish via harness adapter)")

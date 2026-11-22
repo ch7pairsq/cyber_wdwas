@@ -105,7 +105,11 @@ policy:
   - jwt_tool
   - jdwp-shellifier
   authorized_arena_targets:
-  - 10.201.0.0/16
+  # v35：平台 attempt 网段每场可能不同（第三场实测 172.20.x）——放行全部
+  # RFC1918 私有段；比赛靶场为隔离网络，防再次换段导致 arena_http 全 DENY。
+  - 10.0.0.0/8
+  - 172.16.0.0/12
+  - 192.168.0.0/16
 model:
   # 2026-11-20 切换 DeepSeek 官方 API（OpenAI Chat Completions 兼容，api.deepseek.com）。
   provider: deepseek_official_openai

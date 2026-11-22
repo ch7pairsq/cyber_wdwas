@@ -66,6 +66,35 @@ def test_H_arena_http_denies_platform_writes_but_allows_reads():
     assert 'platform API is read-only' not in (other.stdout + other.stderr)
 
 
+def test_H2_arena_http_accepts_svc_hostname_resolved_into_cidr():
+    """v35（第三场实测）：平台 start 给的是 svc 域名（解析到 172.20.x），
+    此前只收 IP 字面量 → arena_http 全 DENY。域名解析后在授权网段即放行，
+    host 原样直传 SOCKS5（ATYP=domain，隧道侧解析）。"""
+    script = str(Path(__file__).resolve().parents[2] / 'ctf_ext' / 'gateway' / 'arena_http.py')
+    base_env = {**os.environ, 'ARENA_PROXY': 'socks5://127.0.0.1:1080',
+                'ARENA_BASE_URL': ''}
+    # 域名解析（localhost→127.0.0.1，模拟 svc 域名→容器 IP）落在授权网段
+    # → 通过网段校验，卡在 socks5 连接（本地无代理），而不是网段 DENY。
+    env = {**base_env, 'ARENA_NETWORK_CIDR': '127.0.0.0/8,172.16.0.0/12'}
+    ok = subprocess.run([sys.executable, script, '--host', 'localhost',
+                         '--port', '1337', '--timeout', '1'],
+                        capture_output=True, text=True, timeout=10, env=env)
+    assert 'outside attempt network' not in (ok.stdout + ok.stderr)
+    assert 'must be an IP' not in (ok.stdout + ok.stderr)
+    assert 'socks5' in (ok.stdout + ok.stderr)
+    # 解析结果不在授权网段 → 网段 DENY（模拟上一场 10.201/16 撞上 172.20 靶机）。
+    env_bad = {**base_env, 'ARENA_NETWORK_CIDR': '10.201.0.0/16'}
+    deny = subprocess.run([sys.executable, script, '--host', 'localhost',
+                           '--port', '8080', '--timeout', '1'],
+                          capture_output=True, text=True, timeout=10, env=env_bad)
+    assert 'target outside attempt network' in (deny.stdout + deny.stderr)
+    # 假域名解析失败 → 明确 DENY，不再误报"must be an IP"。
+    fail = subprocess.run([sys.executable, script, '--host', 'no-such-host.invalid',
+                           '--port', '80', '--timeout', '1'],
+                          capture_output=True, text=True, timeout=15, env=env)
+    assert 'cannot resolve host' in (fail.stdout + fail.stderr)
+
+
 def test_E03_heartbeat_renews_live_lease_and_allows_final_write():
     with fixture() as store:
         store.board.add_intent(IntentDraft('c1', 'misc.heartbeat.test'))
