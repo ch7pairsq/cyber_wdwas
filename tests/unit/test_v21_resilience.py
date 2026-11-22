@@ -136,6 +136,9 @@ def test_endgame_revives_blocked_challenge():
         orch._endgame_min_seconds = 0
         orch._endgame_granted = set()
         orch._endgame = {}
+        orch._endgame_max_grants = 0
+        orch._parallel_agents = 1
+        orch._challenges = {}
         orch._metrics = Metrics()
         orch._clock = time.time
         factory = lambda cid: None  # noqa: E731 — 授权目标容器
@@ -161,6 +164,9 @@ def test_endgame_still_skips_healthy_untouched_challenge():
         orch._endgame_min_seconds = 0
         orch._endgame_granted = set()
         orch._endgame = {}
+        orch._endgame_max_grants = 0
+        orch._parallel_agents = 1
+        orch._challenges = {}
         orch._metrics = Metrics()
         orch._clock = time.time
         factory = lambda cid: None  # noqa: E731

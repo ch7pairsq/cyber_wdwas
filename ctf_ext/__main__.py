@@ -347,6 +347,7 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
                         best_effort_submit=best_effort_submit,
                         parallel_agents=int((cfg.get("controller") or {}).get("parallel_agents") or 1),
                         endgame_token_bonus=float(budget.get("endgame_token_bonus") or 0),
+                        endgame_max_grants=int(budget.get("endgame_max_grants") or 0),
                         reviewer_factory=(lambda cid: ProviderReviewer(pro_provider or provider, control_factory(cid))) if mode == "llm" else None)
     if hot is not None:
         orch.apply_config(hot.config)

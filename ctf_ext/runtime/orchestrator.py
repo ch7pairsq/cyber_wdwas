@@ -56,7 +56,8 @@ class Orchestrator:
                  retry_backoff_seconds: float = 0.0, poll_seconds: float = 0.1,
                  planner=None, max_intents_per_challenge: int = 4,
                  parallel_agents: int = 1, endgame_token_bonus: float = 0.0,
-                 endgame_min_seconds: float = 300.0, best_effort_submit: bool = False):
+                 endgame_min_seconds: float = 300.0, endgame_max_grants: int = 0,
+                 best_effort_submit: bool = False):
         """编排器装配：持有黑板/调度器/Worker/Harness 及门控与提交网关。
 
         parallel_agents 决定 step() 循环线程数（题内互斥由调度器保证）；
@@ -97,6 +98,9 @@ class Orchestrator:
         # 全局预算仍兜底；每题每轮运行只授权一次（_endgame_granted）。
         self._endgame_bonus = max(0.0, float(endgame_token_bonus))
         self._endgame_min_seconds = max(0.0, float(endgame_min_seconds))
+        # 每轮加时最多授权几道题：0 = 自动（= 调度器空闲槽位）。终局槽位有限，
+        # 一次抬升十几题等于白抬；显式配置用于压测/回滚到旧的全量授权行为。
+        self._endgame_max_grants = max(0, int(endgame_max_grants))
         self._endgame: Dict[str, float] = {}
         self._endgame_granted: set = set()
         # 平台 REJECTED 后的重试序号：strategy_key 唯一化（misc.flagretry.N），
@@ -133,6 +137,8 @@ class Orchestrator:
             self._claim_timeout = max(0.0, float(budget["claim_timeout_seconds"]))
         if budget.get("endgame_token_bonus") is not None:
             self._endgame_bonus = max(0.0, float(budget["endgame_token_bonus"]))
+        if budget.get("endgame_max_grants") is not None:
+            self._endgame_max_grants = max(0, int(budget["endgame_max_grants"]))
         controller = cfg.get("controller") or {}
         if controller.get("parallel_agents"):
             self._parallel_agents = max(1, int(controller["parallel_agents"]))
@@ -208,6 +214,9 @@ class Orchestrator:
                 "challenge_id": task.challenge_id, "name": task.name,
                 "category": task.category, "description": task.description,
                 "attachments": list(task.attachments), "difficulty_level": task.difficulty_level,
+                # 终局授权按分值排序取候选（_endgame_candidates）；漏了这个键
+                # 排序会静默退化成 challengeId 字典序（v29 审计修复）。
+                "points_hint": task.points_hint,
             }
             self._materialize_attachments(task)
             try:
@@ -969,6 +978,59 @@ class Orchestrator:
         blocked_cids = self._board.challenges_with_blocked_intents()  # v21 复活判定
         # tasks 元素是 ChallengeInput 对象（不可排序、不是 id），统一取 challenge_id。
         ids = sorted(getattr(t, "challenge_id", str(t)) for t in tasks)
+        limit = self._endgame_grant_limit()
+        if limit <= 0:
+            # 没有空闲槽位：本轮不抬预算，等槽位回收后由监控线程重试。
+            # 这里不写事件——监控线程每个 poll 都会调用本方法，写事件会刷爆表。
+            return False
+        candidates = self._endgame_candidates(ids, solved, blocked_cids)[:limit]
+        for cid in candidates:
+            try:
+                self._board.add_intent(IntentDraft(
+                    challenge_id=cid, strategy_key="misc.endgame.pass2",
+                    params={"phase": "endgame"}, est_tokens=2000))
+            except DuplicateStrategy:
+                self._endgame_granted.add(cid)  # 已有终局意图在排队，不再重复授权
+                continue
+            grants[cid] = self._endgame_bonus
+            self._endgame_granted.add(cid)
+            # 授权必须复位会话：否则调度器把 stopped 的题永久排除，
+            # pass2 意图永远 READY 无人认领（endgame 失效的根因）。
+            try:
+                from .control import reset_intent_window
+                reset_intent_window(self._state, cid, revive_stopped=True)
+            except Exception:
+                pass
+            self._board.append_event("endgame_grant", cid, {
+                "token_bonus": self._endgame_bonus,
+                "remaining_seconds": int(deadline - self._clock()),
+                "grant_limit": limit})
+            self._metrics.incr("endgame.grants")
+            granted = True
+        return granted
+
+    def _endgame_grant_limit(self) -> int:
+        """本轮最多授权几道题：显式配置优先，否则取调度器空闲槽位。
+
+        0 表示当前没有空槽（不授权，等槽位回收）；不是"无限授权"。
+        """
+        if self._endgame_max_grants > 0:
+            return self._endgame_max_grants
+        free = getattr(self._scheduler, "free_slots", None)
+        if callable(free):
+            try:
+                return max(0, int(free()))
+            except Exception:
+                pass
+        return max(1, self._parallel_agents)  # 旧调度器/查询失败：退回线程数
+
+    def _endgame_candidates(self, ids, solved, blocked_cids) -> List[str]:
+        """筛出可加时的题，按 points_hint 降序（同分按题号）。
+
+        候选判定沿用原逻辑：已解/已授权的跳过；非 stopped 的题只有在
+        blocked 或规划上限已打满时才纳入（否则让 planner 正常接手）。
+        """
+        out = []
         for cid in ids:
             if cid in solved or cid in self._endgame_granted:
                 continue
@@ -988,28 +1050,10 @@ class Orchestrator:
                 # planner 对 blocked 不扩展、intents 又未打满，两边互相以为
                 # 对方会接手 → 永久據置死锁（19 题赛 3 个平台问题题就此
                 # 丢弃，剩余时间空转）。环境事后可能恢复，给一次重试机会。
-            try:
-                self._board.add_intent(IntentDraft(
-                    challenge_id=cid, strategy_key="misc.endgame.pass2",
-                    params={"phase": "endgame"}, est_tokens=2000))
-            except DuplicateStrategy:
-                self._endgame_granted.add(cid)  # 已有终局意图在排队，不再重复授权
-                continue
-            grants[cid] = self._endgame_bonus
-            self._endgame_granted.add(cid)
-            # 授权必须复位会话：否则调度器把 stopped 的题永久排除，
-            # pass2 意图永远 READY 无人认领（endgame 失效的根因）。
-            try:
-                from .control import reset_intent_window
-                reset_intent_window(self._state, cid, revive_stopped=True)
-            except Exception:
-                pass
-            self._board.append_event("endgame_grant", cid, {
-                "token_bonus": self._endgame_bonus,
-                "remaining_seconds": int(deadline - self._clock())})
-            self._metrics.incr("endgame.grants")
-            granted = True
-        return granted
+            points = float((self._challenges.get(cid) or {}).get("points_hint") or 0.0)
+            out.append((-points, str(cid)))
+        out.sort()
+        return [cid for _, cid in out]
 
     def _touch_heartbeat(self) -> None:
         """刷新进程心跳文件（供外部 supervisor 判活；未配置时为 no-op）。"""

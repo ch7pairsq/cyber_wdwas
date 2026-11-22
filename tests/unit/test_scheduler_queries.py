@@ -52,6 +52,22 @@ def test_named_queries_cover_scheduler_and_runtime_needs():
     board.close()
 
 
+def test_free_slots_excludes_challenges_with_running_intents():
+    """终局授权限流：空槽位 = max_running_projects − 有在跑意图的题数。"""
+    board, _ = new_board()
+    for cid in ("c1", "c2"):
+        add_challenge(board, cid=cid)
+        board.add_intent(IntentDraft(cid, "misc.triage.auto", {}))
+    scheduler = Scheduler(board, max_project_workers=1, max_running_projects=2)
+    assert scheduler.free_slots() == 2  # 只有 READY，没有在跑
+    assert board.claim_intent("w1", lease_seconds=60, challenge_ids=["c1"],
+                              max_project_workers=1, max_running_projects=2) is not None
+    assert scheduler.free_slots() == 1  # c1 占住一个槽
+    scheduler.set_limits(max_running_projects=1)
+    assert scheduler.free_slots() == 0  # 槽位上限收紧后没有空位
+    board.close()
+
+
 def test_state_store_batch_load_matches_single_load():
     board, _ = new_board()
     add_challenge(board, cid="c1")

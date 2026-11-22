@@ -482,6 +482,33 @@ build 中间层每轮 ~1.5GB，失败重试前必须 prune（本轮清理后 82%
 预算口径、平台环境数据问题都只在长跑暴露；supervisor 的"活性"与
 "推进"必须分开度量，存活不等于前进。
 
+## 第十五轮（v28，2026-11-22 终局吞吐对齐与大文件读取纪律）
+
+**endgame 授权按空闲槽位封顶**。11-21 复盘：剩 20 分钟时一次抬升 14 题，
+实际并发只有 3——11 题的预算抬升等于没发生，还占住槽位让长跑线无法正常
+收尾。改动：
+
+- Orchestrator._grant_endgame 拆为 _endgame_grant_limit（显式配置
+  budget.endgame_max_grants 优先；0=自动取调度器空闲槽位 free_slots()=
+  max_running_projects − 有在跑意图的题数；查询失败退回线程数 fail-open）
+  与 _endgame_candidates（候选判定沿用 v12/v21 语义，新增 points_hint
+  降序——同分按题号）；
+- 无空槽时本轮不授权（返回 False 不写事件——监控线程每 poll 调用，写
+  事件会刷爆表），槽位回收后由下一轮 poll 补授；
+- 审计修复：bootstrap 的 _challenges 缓存此前没有 points_hint 键，候选
+  排序会静默退化成 challengeId 字典序——高分优先在生产不生效（测试手动
+  塞键所以绿）。补键修复。
+
+**大文件读取策略入 Worker 提示词**。事实层：单次工具输出只有前 4000 字节
+进上下文（与 max_tool_result_bytes 一致，测试锁死防漂移），完整原文只在
+证据库。纪律层：先定位再取值（python_exec 匹配只 print 命中行）、反汇编
+走 symbols→按地址区间读 hex→disasm_bytes 取片段（disassemble 全量输出
+注定截断）、strings/hexdump 先收窄、同一文件不重复读且结论立刻落 facts。
+不含 shell 教唆（环境无 shell）。
+
+测试：free_slots 三态、授权封顶+高分优先+幂等补授、显式配置覆盖、提示词
+预算一致性；全量 455 passed 4 skipped。
+
 ## 第十四轮（v27，2026-11-22 四份归档对照定案）：非攻坚轮显式 thinking disabled
 
 用户提供 4 份平台归档（trajectory / attempt-archive 157MB / model-calls /

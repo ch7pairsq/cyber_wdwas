@@ -37,6 +37,9 @@ budget:
   # 耗尽（stopped）的题授权一次追加额度——token/工具上限 ×(1+bonus)、
   # 会话有效期延到运行截止。0 = 关闭。累计账本不清零，硬停止语义保留。
   endgame_token_bonus: 2.0
+  # 每轮加时最多授权几道题：0 = 自动取调度器空闲槽位（= max_running_projects
+  # 减在跑题数）。终局槽位有限，一次抬升十几题等于白抬（11-21 复盘）。
+  endgame_max_grants: 0
   # Pro（换挡模型）每题调用硬上限：防烧穿全局预算；Pro/Flash 走同一账本。
   pro_max_calls_per_challenge: 8
 download:

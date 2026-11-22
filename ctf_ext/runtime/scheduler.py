@@ -33,6 +33,21 @@ class Scheduler:
         if retry_backoff_seconds is not None:
             self._retry_backoff = max(0.0, float(retry_backoff_seconds))
 
+    def free_slots(self) -> int:
+        """当前还能再开几道题：max_running_projects 减去已有在跑意图的题数。
+
+        只给终局加时限流用（见 Orchestrator._grant_endgame）：空槽位决定这一轮
+        最多追加几个 pass2 意图，避免一次把十几道题的预算抬上去、实际只有
+        3 个槽位能跑（11-21 复盘：14 题同时抬升 = 11 题白抬）。只读黑板已有
+        聚合查询，不改变调度语义，也不引入新的写路径。
+        """
+        try:
+            summary = self._board.open_intent_summary()
+            running = {row["challenge_id"] for row in summary if int(row["running"] or 0)}
+        except Exception:
+            return max(1, self._max_running_projects)  # 查询失败时退回全槽位，不阻断加时
+        return max(0, self._max_running_projects - len(running))
+
     def _states_for(self, challenge_ids):
         if self._state is None:
             return {}

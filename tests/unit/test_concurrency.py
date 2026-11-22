@@ -242,3 +242,40 @@ def test_endgame_grant_boosts_caps_once_and_runs_pass2(two_challenge_orch):
     assert row is not None
     assert row["status"] in ("COMPLETED", "CONFIRMED")
     assert orch._state.load(cid)[1]["status"] != "stopped"
+
+
+def test_endgame_grants_capped_by_free_slots_and_handed_to_best_score(two_challenge_orch):
+    """终局授权按空闲槽位封顶：只有 1 个空槽时只授 1 题，且是分值更高的那题。
+
+    11-21 复盘：20 分钟剩余时一次抬升 14 题，实际并发只有 3，11 题白抬。
+    """
+    from ctf_ext.runtime.control import SessionControl
+    orch = two_challenge_orch
+    orch.bootstrap()
+    factory = orch._worker._control_factory
+    factory.deadline = orch._clock() + 1000
+    orch._endgame_bonus = 0.5
+    orch._endgame_min_seconds = 10
+    orch._scheduler.set_limits(max_project_workers=1, max_running_projects=1)
+    cids = ["ch-mock-1", "ch-mock-2"]
+    for cid in cids:
+        SessionControl(orch._state, cid)  # 建立会话状态
+        orch._state.patch(cid, lambda s: s.update(status="stopped"))  # 模拟预算耗尽
+        orch._challenges.setdefault(cid, {})["points_hint"] = 100.0
+    orch._challenges["ch-mock-2"]["points_hint"] = 500.0  # 高分题应优先拿到槽位
+    with orch._board.transaction() as db:
+        db.execute("UPDATE intents_ext SET status='FAILED' "
+                   "WHERE status IN ('READY','FAILED_RETRYABLE')")
+    tasks = {cid: {"challenge_id": cid} for cid in cids}
+
+    assert orch._endgame_grant_limit() == 1  # 空槽位 = 1
+    assert orch._grant_endgame(tasks, set(), orch._clock() + 1000) is True
+    granted = [r[0] for r in orch._board._db.execute(
+        "SELECT entity_id FROM events WHERE event_type='endgame_grant'").fetchall()]
+    assert granted == ["ch-mock-2"]
+    assert factory.endgame == {"ch-mock-2": 0.5}  # 只有被授权的题抬了上限
+    # 已有一道 pass2 在排队 → 本轮不再追加，授权节奏与真实吞吐对齐
+    assert orch._grant_endgame(tasks, set(), orch._clock() + 1000) is False
+    # 显式配置可覆盖自动槽位（0 = 自动）
+    orch._endgame_max_grants = 2
+    assert orch._endgame_grant_limit() == 2
