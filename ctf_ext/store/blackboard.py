@@ -342,7 +342,20 @@ class Blackboard:
             rows = db.execute(
                 "SELECT DISTINCT challenge_id FROM submissions WHERE status='ACCEPTED'"
             ).fetchall()
-        return {row["challenge_id"] for row in rows}
+            return {row["challenge_id"] for row in rows}
+
+    def running_intent_challenge_ids(self) -> set:
+        """当前 RUNNING 且租约未过期的题目集合（v33 环境让位保护判定）。
+
+        只保护真正在跑的意图：READY/退避中的意图拿到 worker 时会经
+        ensure_environment 重新拉起环境，不需要占用槽位——否则 27 题大多
+        有排队意图，让位永远找不到候选。"""
+        with self.read_view() as db:
+            rows = db.execute(
+                "SELECT DISTINCT challenge_id FROM intents_ext"
+                " WHERE status='RUNNING' AND lease_until>?", (time.time(),)
+            ).fetchall()
+        return {r["challenge_id"] for r in rows}
 
     def confirmed_challenge_ids(self) -> set:
         """已过三门确认且平台未判错的题（调度器排除，不空转重解）。

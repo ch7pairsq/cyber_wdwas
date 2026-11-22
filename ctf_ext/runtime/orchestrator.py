@@ -16,7 +16,7 @@ import threading
 import time
 from typing import Dict, List, Optional
 
-from ..domain.models import Challenge
+from ..domain.models import OUTCOME_ERROR, Challenge
 from ..harness.contract import ContractViolation, validate_worker_output
 from ..harness.schema import RunSummary
 from ..store import lessons as lesson_store
@@ -51,6 +51,13 @@ class Orchestrator:
     housekeeping_interval_seconds = 60.0
     # 临时盘剩余低于该值记 disk_pressure 事件并强制回收一轮（平台 10GiB）。
     disk_pressure_free_bytes = 1.5 * 1024 * 1024 * 1024
+
+    # 平台并发环境上限（与 arena 适配器 max_envs 一致；仅在适配器不暴露
+    # max_envs() 时作为兑底参与让位判定）。
+    platform_max_envs = 3
+    # v33 环境快速失败的标准化结果见 _environment_unavailable_result；
+    # 平台 409 environment_limit 不再放进 worker 野跑——实测模型会自己
+    # 读 token、close 别题环境、start 自己题（互相踩踏，_started 记账失控）。
 
     def __init__(self, harness, board, scheduler, worker,
                  evidence=None, metrics: Optional[Metrics] = None,
@@ -313,21 +320,82 @@ class Orchestrator:
                             "model_tokens": 0, "tool_calls": 0},
         )
 
-    def _ensure_environment(self, challenge_id) -> None:
-        """按需拉起题目环境（env_policy=on_demand 时真正生效；其他适配器为 no-op）。
+    def _release_env_slots(self, incoming_cid: str) -> None:
+        """v33：start 新题前主动让位——回收无在途工作的环境槽位。
 
-        失败只记事件不阻塞调度：意图会带着"环境不可用"快速失败，槽位回收后
-        下一个重试意图会再次尝试拉起。
+        平台按并发上限（3）异步回收超额环境，且不区分 attempt 在途与否
+        （2026-11-22 实测：漏洞利用4 环境被停时其 attempt 仍在跑，靶机断联
+        整轮 no_signal；更糟的是 worker 模型会自己调 start/close 互相踩踏）。
+        这里按黑板调度状态精准释放：只回收无 RUNNING intent、无 SENDING/UNKNOWN
+        提交的题；已 ACCEPTED 的题平台自动释放，close 幂等无害，最优先。
         """
+        stop_env = getattr(self._harness, "stop_environment", None)
+        started_envs = getattr(self._harness, "started_envs", None)
+        max_envs = getattr(self._harness, "max_envs", None)
+        if not (callable(stop_env) and callable(started_envs) and callable(max_envs)):
+            return
+        try:
+            started = started_envs()
+            limit = int(max_envs())
+        except Exception:
+            return
+        if incoming_cid in started or len(started) < max(1, limit):
+            return  # 本题已有环境，或槽位未满：无需让位
+        try:
+            running = self._board.running_intent_challenge_ids()
+            accepted = self._board.accepted_challenge_ids()
+        except Exception:
+            return  # 黑板不可读时宁可不让位，交给平台 409 原路径
+        candidates = []
+        for cid, started_at in started.items():
+            if cid == incoming_cid or cid in running:
+                continue
+            try:
+                sub = self._board.latest_submission(cid)
+                if sub and sub.get("status") in ("SENDING", "UNKNOWN"):
+                    continue  # 在途提交保护
+            except Exception:
+                continue
+            # 优先级：已解题（平台侧已自动释放）> 启动最早。
+            candidates.append((0 if cid in accepted else 1,
+                               float(started_at), cid))
+        if not candidates:
+            self._board.append_event("environment_no_candidate", incoming_cid,
+                                     {"started": len(started), "limit": limit})
+            return
+        candidates.sort()
+        victim = candidates[0][2]
+        try:
+            if stop_env(victim):
+                self._board.append_event("environment_evicted", victim, {
+                    "for": incoming_cid,
+                    "accepted": victim in accepted,
+                    "started_at": started.get(victim),
+                })
+                self._metrics.incr("environments.evicted")
+        except Exception as exc:
+            self._board.append_event("environment_evict_failed", victim,
+                                     {"error": type(exc).__name__})
+
+    def _ensure_environment(self, challenge_id) -> Optional[dict]:
+        """按需拉起题目环境（env_policy=on_demand 时真正生效；其他适配器为空）。
+
+        返回 start_info（新建/已在跑时）、{}（无环境管理能力）或 None
+        （环境不可用：编排层让位后仍失败，意图应快速失败而非带病入 worker
+        ——v32 实测 worker 模型拿到 environment_limit 后会自己调平台
+        start/close API，与其他 worker 互相踩踏环境）。失败只记事件。
+        """
+        self._release_env_slots(challenge_id)
         hook = getattr(self._harness, "ensure_environment", None)
         if hook is None:
-            return
+            return {}
         try:
             info = hook(challenge_id)
         except Exception as exc:
             self._board.append_event("environment_failed", challenge_id,
                                      {"error": type(exc).__name__, "detail": str(exc)[:160]})
-            return
+            self._metrics.incr("environments.failed")
+            return None
         # 新启动的环境带出 container_addr：同步进编排层缓存的题目描述（模型唯一可读面）。
         describe = getattr(self._harness, "task_description", None)
         if isinstance(info, dict) and describe is not None:
@@ -339,16 +407,36 @@ class Orchestrator:
             except Exception as exc:
                 self._board.append_event("description_refresh_failed", challenge_id,
                                          {"error": type(exc).__name__})
+        return info if isinstance(info, dict) else {}
+
+    def _environment_unavailable_result(self, claim, started: float) -> WorkerResult:
+        """环境槽位不可用的标准化失败结果：意图快速失败等待重试，不入 worker。"""
+        return WorkerResult(
+            claim.intent_id, self._worker_name, claim.attempt_no, claim.challenge_id,
+            claim.strategy_key, "failed",
+            summary=["平台环境槽位不可用（409 environment_limit），已快速失败等待槽位回收重试；"
+                     "不要自行调用平台 start/close 管理接口"],
+            outcome=OUTCOME_ERROR, failure_reason="environment_unavailable",
+            preconditions=[], actions=["申请题目环境"], ruled_out=[],
+            next_best_action="等待其他题目释放环境槽位后由调度层重试",
+            resource_usage={"wall_seconds": round(max(0.0, self._clock() - started), 3),
+                            "model_tokens": 0, "tool_calls": 0},
+        )
 
     def _execute_claim(self, claim):
         """执行一个已领取 Intent；拆成执行/契约/校验/落库/后处理五段。"""
         print("[orch] claim ch={} intent={} strategy={}".format(
             claim.challenge_id, claim.intent_id, claim.strategy_key),
             file=sys.stderr, flush=True)
-        self._ensure_environment(claim.challenge_id)
-        challenge = self._challenge_context(claim)
         started = self._clock()
-        result = self._run_worker(claim, challenge, started)
+        env_info = self._ensure_environment(claim.challenge_id)
+        challenge = self._challenge_context(claim)
+        if env_info is None:
+            # v33：环境不可用不入 worker（防模型自行调平台 start/close 互相
+            # 踩踏）；意图快速失败回退 READY，槽位回收后自然重试。
+            result = self._environment_unavailable_result(claim, started)
+        else:
+            result = self._run_worker(claim, challenge, started)
         if self._should_break_provider_errors(claim, result):
             self._board.append_event("provider_error_exhausted", claim.intent_id, {
                 "challenge_id": claim.challenge_id,

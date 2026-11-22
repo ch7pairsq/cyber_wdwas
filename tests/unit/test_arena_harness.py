@@ -110,6 +110,13 @@ class _StubArena(BaseHTTPRequestHandler):
                 return self._json(receipt)
             return self._json(dict(golden_response("submit_wrong"),
                                    cumulative_score=100))
+        if self.path.startswith("/openapi/v1/challenges/close"):
+            # v33：平台 help 明确的释放环境端点；未启动返回 404。
+            code = self.path.split("unique_code=")[-1].split("&")[0]
+            if code in _StubArena.started:
+                _StubArena.started.discard(code)
+                return self._json({"closed": True})
+            return self._json({"error": "challenge_not_started"}, 404)
         if self.path.startswith("/openapi/v1/challenges/finish"):
             _StubArena.finished.append(payload)
             return self._json({"finished": True})
@@ -542,3 +549,31 @@ def test_ensure_environment_refreshes_note_after_start_returns_addr(arena_url):
             os.environ.pop("ARENA_NETWORK_CIDR", None)
         else:
             os.environ["ARENA_NETWORK_CIDR"] = old
+
+
+def test_stop_environment_releases_slot_and_accounting(arena_url):
+    # v33：close 端点释放槽位——平台侧与本地记账同步摘除，随后可重新 start。
+    ad = _adapter(arena_url, env_policy="on_demand")
+    ad.startup()
+    ad.read_tasks()
+    assert ad.ensure_environment("CH-1").get("started") is True
+    snap = ad.started_envs()
+    assert snap.get("CH-1", 0) > 0
+    assert ad.max_envs() == 3
+    assert ad.stop_environment("CH-1") is True
+    assert "CH-1" not in ad.started_envs()
+    assert "CH-1" not in _StubArena.started
+    # 释放后可重新拉起（让位→重试闭环）
+    assert ad.ensure_environment("CH-1").get("started") is True
+    # 未记账的环境不发 close 请求：返回 False
+    assert ad.stop_environment("CH-999") is False
+
+
+def test_stop_environment_tolerates_already_released_404(arena_url):
+    # 平台侧已释放（404 not started）→ 视为已释放，记账照样摘除（幂等）。
+    ad = _adapter(arena_url, env_policy="on_demand")
+    ad.startup()
+    ad._started.add("CH-GONE")  # 记账有、平台无：模拟重启后平台已回收
+    ad._started_at["CH-GONE"] = 1.0
+    assert ad.stop_environment("CH-GONE") is True
+    assert "CH-GONE" not in ad.started_envs()

@@ -680,6 +680,35 @@ MISSING——toolchain.json 声明不等于安装，三个工具不在 deb 闭�
 
 教训：镜像工具验证必须 which + 实跑，不能只看 toolchain.json。
 
+## 第十三轮（v33，2026-11-22 第二场实时复盘）：环境槽位编排层统一管理
+
+第二场比赛日志（attempt 01a2029c，导出两次共 1539 次模型请求）实锤：平台
+**不主动回收环境，也没有 30s 超时杀环境**——审计里全部“停止环境”都是我们
+agent 自己发的：worker 模型遇 409 environment_limit 后自行读 token、调
+/challenges/close 释放别题环境、start 自己题（50+ 次重复循环），三个 worker
+互相踩踏（close 掉别的 worker 正在用的靶机，在途 attempt 断靶整轮
+no_signal）。四层修复：
+
+1. **编排层主动让位**（orchestrator._release_env_slots）：start 新题前若
+   槽位满，按黑板调度状态 close 无 RUNNING intent（租约内）、无
+   SENDING/UNKNOWN 提交的题；已 ACCEPTED 最优先（平台自动释放，close 幂等）。
+   事件 environment_evicted / environment_no_candidate 落库。
+2. **环境不可用不入 worker**（orchestrator._ensure_environment 返回 None →
+   _environment_unavailable_result）：409 environment_limit 时意图快速失败
+   （FAILED_RETRYABLE，不 blocked），杜绝“带病入 worker → 模型野路子管理
+   平台 API”这条失控链。
+3. **适配器 close 端点**（arena.stop_environment/started_envs/max_envs）：
+   POST /challenges/close?unique_code=X&wait=0（help 原文确认）；404/
+   duplicate/not started 幂等摘账；_started_at 记账支持最旧优先让位；
+   blackboard 补 running_intent_challenge_ids；__main__ 装配补传
+   max_envs/close_path（此前配置字段存在但从未接入，适配器恒用默认值）。
+4. **提示词纪律**（llm_worker.DEFAULT_SYSTEM）：禁止模型调平台管理 API
+   （start/close/submit 等），环境不可用写 environment_unavailable 结束意图，
+   由系统重试。
+
+测试：tests/unit/test_env_lifecycle.py（让位优先级 / RUNNING+SENDING 保护 /
+快速失败不入 worker）+ test_arena_harness close 幂等 2 例。
+
 ## 第十二轮（v32，2026-11-22 提交前复审）：三处收口与复审结论
 
 v31 提交后复审收口（v31 镜像按工作树 rsync，已含 P1 兜底；v32 提交后 git 与镜像对齐）：

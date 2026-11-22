@@ -152,8 +152,11 @@ def build_runtime(db_path: str, evidence_root: str, mode: str = "mock",
                     base_source, token_source))
         arena_kwargs = {k: arena_cfg[k] for k in
                         ("help_path", "list_path", "start_path", "files_path",
-                         "submit_path", "finish_path", "download_template")
+                         "submit_path", "finish_path", "close_path", "download_template")
                         if arena_cfg.get(k)}
+        # v33：并发环境上限从配置接入（此前配置字段存在但从未传入，适配器
+        # 恒用默认 3）；让位策略以适配器 max_envs() 为准。
+        arena_kwargs["max_envs"] = max(1, int(arena_cfg.get("max_envs") or 3))
         # startup 阶段对平台 5xx 的退避重试：默认 20 次 × 30s，可在配置覆盖。
         arena_kwargs["startup_retry_attempts"] = int(
             arena_cfg.get("startup_retry_attempts") or 20)

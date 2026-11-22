@@ -37,6 +37,11 @@ DEFAULT_START_PATH = "/openapi/v1/challenges/start"
 DEFAULT_FILES_PATH = "/openapi/v1/challenges/files"
 DEFAULT_SUBMIT_PATH = "/openapi/v1/challenges/submit"
 DEFAULT_FINISH_PATH = "/openapi/v1/challenges/finish"
+# v33：平台 help 明确 "Release an environment you no longer need"（wait=0 立即
+# 返回）。编排层据此在 start 新题前主动让位，把环境回收权从平台随机抢占
+# （不区分 attempt 在途，实测漏洞利用4 环境被停时其 attempt 仍在跑）变成
+# 按调度状态精准释放。
+DEFAULT_CLOSE_PATH = "/openapi/v1/challenges/close"
 DEFAULT_DOWNLOAD_TEMPLATE = ("/openapi/v1/challenges/files"
                              "?unique_code={unique_code}&path={path}")
 ARENA_REF_SCHEME = "arena://"
@@ -561,6 +566,7 @@ class ArenaHarnessAdapter(HarnessAdapter):
                  files_path: str = DEFAULT_FILES_PATH,
                  submit_path: str = DEFAULT_SUBMIT_PATH,
                  finish_path: str = DEFAULT_FINISH_PATH,
+                 close_path: str = DEFAULT_CLOSE_PATH,
                  download_template: str = DEFAULT_DOWNLOAD_TEMPLATE,
                  auto_start: bool = True,
                  auto_finish: bool = False,
@@ -581,7 +587,8 @@ class ArenaHarnessAdapter(HarnessAdapter):
         self._startup_retry_seconds = max(0.0, float(startup_retry_seconds))
         self._base_source = base_source
         self._paths = {"help": help_path, "list": list_path, "start": start_path,
-                       "files": files_path, "submit": submit_path, "finish": finish_path}
+                       "files": files_path, "submit": submit_path, "finish": finish_path,
+                       "close": close_path}
         self._download_template = download_template
         self._auto_start = auto_start
         self._auto_finish = auto_finish
@@ -595,6 +602,8 @@ class ArenaHarnessAdapter(HarnessAdapter):
         self._receipts: Dict[str, SubmitReceipt] = {}
         self._started: set = set()
         self._start_info: Dict[str, Any] = {}
+        # v33：环境启动时刻（编排层让位时按“最旧优先”回收无在途工作的环境）。
+        self._started_at: Dict[str, float] = {}
         # 并发 worker 各自触发 ensure_environment：started/start_info 的
         # 记账用短锁保护；同题并发发起用 in-flight 事件去重（不持锁做 HTTP，
         # 不同题的 start 仍然并行）。
@@ -852,6 +861,46 @@ class ArenaHarnessAdapter(HarnessAdapter):
         self._refresh_description(unique_code, info)
         return info
 
+    def max_envs(self) -> int:
+        """平台并发环境上限（v33 让位判定用；配置可覆盖，默认 3）。"""
+        return int(self._max_envs)
+
+    def started_envs(self) -> Dict[str, float]:
+        """已启动环境的 unique_code -> 启动时刻快照（让位策略的记账源）。"""
+        with self._env_lock:
+            return dict(self._started_at)
+
+    def stop_environment(self, unique_code: str, wait: int = 0) -> bool:
+        """主动释放平台环境槽位（v33）：编排层对无在途工作的题调用 close。
+
+        close 端点无返回体约定；wait=0 立即返回避免占用 worker 墙钟。
+        409 duplicate / 404 / not started / already closed 一律视为已释放
+        （幂等）：记账摘除后返回 True。其余错误向上抛，由编排层记事件。
+        """
+        with self._env_lock:
+            if unique_code not in self._started:
+                return False
+        try:
+            self._client.request("POST", self._paths["close"],
+                                 query={"unique_code": unique_code, "wait": int(wait)})
+        except ArenaProtocolError as exc:
+            text = str(exc).lower()
+            status = getattr(exc, "status", None)
+            settled = ("not_started" in text or "not started" in text
+                       or "already" in text or "duplicate" in text or "closed" in text
+                       or status == 404)
+            if not settled:
+                raise
+            print("[arena] close {} -> treated as released: {}".format(
+                unique_code, exc), file=sys.stderr, flush=True)
+        with self._env_lock:
+            self._started.discard(unique_code)
+            self._started_at.pop(unique_code, None)
+            self._start_info.pop(unique_code, None)
+        print("[arena] close {} -> slot released (wait={})".format(
+            unique_code, wait), file=sys.stderr, flush=True)
+        return True
+
     def task_description(self, challenge_id: str):
         """返回该题最新描述（含运行环境附注）；未知题返回 None。"""
         for task in self._tasks:
@@ -880,6 +929,7 @@ class ArenaHarnessAdapter(HarnessAdapter):
                     ev.set()
         with self._env_lock:
             self._started.add(unique_code)
+            self._started_at[unique_code] = time.time()
             # start 响应可能携带环境/服务地址等材料信息，原样保留供 worker 查阅。
             self._start_info[unique_code] = resp
             if resp:
