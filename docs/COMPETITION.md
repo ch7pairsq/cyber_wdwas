@@ -680,6 +680,41 @@ MISSING——toolchain.json 声明不等于安装，三个工具不在 deb 闭�
 
 教训：镜像工具验证必须 which + 实跑，不能只看 toolchain.json。
 
+## 第十七轮（v36，2026-11-23 第五场复盘）：409 重试风暴止血 + HTTP 明文降级 + 关键点日志
+
+第五场 attempt 01a20649（12M/322 条模型日志）判因：不是平台整体故障，而是
+引擎自身对某题 POST /openapi/v1/challenges/start 的 409 造成重试风暴——失败
+意图回 READY 后立即被重领，retry_backoff_seconds=0.0，日志可见
+"claim → start 409 (107B) → failed" 以 0.15-1.7s 间隔循环数百次；同期
+arena_http 对已 available 靶机的 7 次请求全 DENY（SOCKS5 REP=2），而
+requests 走 HTTP_PROXY 明文绝对 URI 可达（jqi /api/search 与 penguin-login
+首页均 200 实证）。
+
+1. **环境失败按题退避**（orchestrator + scheduler）：defer_challenge 让该题在
+   10s→20s→…→300s 内不参与领取（硬上限 1h），其他题与并行线程照常；失败次数/
+   下次可试时刻进事件与 stderr。has_waiting_work 把退避中的题仍算待办，主循环
+   不会提前退出。
+2. **409 响应体落日志**（arena.py）：_send 对 ≥400 打印 "HTTP <code> body=<截断
+   脱敏>"；_ensure_started / _await_environment_ready 的异常分支打印完整原因——
+   此前只有 "-> 409 (107B)" 状态码，无法判定 environment_limit 还是 duplicate。
+3. **无地址题释放槽位**（orchestrator）：start 返回 container_addr=[] 且
+   container_status=available 即判离线题，主动 close 归还并发槽并记住不再 start
+   （第五场多道离线题白占槽位，其它题 start 直接撞 409）。
+4. **arena_http HTTP 代理降级**（gateway/arena_http.py）：SOCKS5 CONNECT 非 0
+   时改连 HTTP_PROXY，用绝对 URI 请求行明文转发（平台禁 CONNECT），输出 JSON
+   增 route 字段（socks5 / http-proxy）；两路都不通才 DENY（诊断含 REP 语义）。
+5. **bootstrap 后台心跳**（orchestrator）：读题/多附件物化期间每 30s 续心跳，
+   bootstrap 结束立即停止——避免 supervisor --stale-seconds 180 判卡重启后从头
+   重下附件（第二场实测整轮浪费约 18 分钟）。
+6. env_note 补一句：arena_http 的 SOCKS5 被拒时会自动降级，无需手写代理。
+
+测试：新增 tests/unit/test_env_backoff.py ×5、test_arena_http_fallback.py ×3
+（假 SOCKS5 REP=2 + 假 HTTP 代理验证绝对 URI 与 409 body 日志）。
+
+平台侧未解：SOCKS5 172.20.x:18081 对已 available 靶机一律 REP=2（两次 attempt、
+两个代理 IP 复现），原始 TCP（nc 类 pwn）仍不可达，需裁判组修复；该题 start
+恒 409 的具体 body 待本版日志取证。
+
 ## 第十六轮（v35.1，2026-11-22 第三场实时复盘）：60 轮预算 + NO_PROXY 剥离 + 原始 TCP 通路 + 守门收口
 
 第三场（2026-11-22 晚）日志实锤与修复：

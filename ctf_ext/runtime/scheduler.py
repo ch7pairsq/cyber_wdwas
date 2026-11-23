@@ -22,6 +22,10 @@ class Scheduler:
         self._retry_backoff = max(0.0, float(retry_backoff_seconds))
         self._started = clock()
         self._state_cache = {}
+        # 外部故障（平台 start 恒 409 等）按题退避：cid -> 可再领取的时刻。
+        # 只影响该题的领取，跨题并行与黑板全局 retry_backoff 语义不变；
+        # 到期自动清除，因此题在平台恢复后能自然回到调度队列。
+        self._deferred: dict = {}
 
     def set_limits(self, max_project_workers=None, max_running_projects=None,
                    retry_backoff_seconds=None) -> None:
@@ -32,6 +36,24 @@ class Scheduler:
             self._max_running_projects = max(1, int(max_running_projects))
         if retry_backoff_seconds is not None:
             self._retry_backoff = max(0.0, float(retry_backoff_seconds))
+
+    def defer_challenge(self, challenge_id: str, seconds: float) -> None:
+        """让某题在 seconds 内不参与领取（环境不可用的按题退避）。
+
+        第五场根因：409 快速失败把意图回退 READY 后立即被重新领取，
+        backoff=0 时形成 2-5 次/秒的 start 风暴。退避只作用于该题，
+        其他题（含并行线程）照常调度。
+        """
+        seconds = max(0.0, min(3600.0, float(seconds)))
+        if seconds <= 0:
+            return
+        self._deferred[str(challenge_id)] = self._clock() + seconds
+
+    def _prune_deferred(self) -> None:
+        now = self._clock()
+        for cid, until in list(self._deferred.items()):
+            if until <= now:
+                self._deferred.pop(cid, None)
 
     def free_slots(self) -> int:
         """当前还能再开几道题：max_running_projects 减去已有在跑意图的题数。
@@ -100,6 +122,10 @@ class Scheduler:
         if len(running) >= self._max_running_projects:
             eligible = [c for c in eligible if c in running]
 
+        self._prune_deferred()
+        if self._deferred:
+            eligible = [c for c in eligible if c not in self._deferred]
+
         states = self._states_for(eligible)
         challenges = self._board.get_challenges(eligible)
         confirmed = self._board.confirmed_challenge_ids() if self._state is not None else set()
@@ -165,8 +191,14 @@ class Scheduler:
             return False
         if self._state is None:
             return True
+        self._prune_deferred()
         states = self._states_for(candidates)
+        deferred_open = False
         for cid in candidates:
+            if cid in self._deferred:
+                # 退避中的题仍是"待办"，不能据此判定本轮已无可做工作而退出。
+                deferred_open = True
+                continue
             state = states.get(cid) or {}
             if state.get("status") in ("confirmed", "stopped"):
                 continue
@@ -174,4 +206,4 @@ class Scheduler:
                     int(state.get("steps") or 0))["active_slots"] <= 0:
                 continue
             return True
-        return False
+        return deferred_open

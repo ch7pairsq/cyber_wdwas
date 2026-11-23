@@ -474,6 +474,15 @@ class ArenaClient:
                 print("[arena] {} {} -> {} ({}B, {:.2f}s, {})".format(
                     method, path, code, len(body), time.monotonic() - started_at,
                     self._route_name(route)), file=sys.stderr, flush=True)
+                if code >= 400:
+                    # 409 的响应体是判因唯一证据（environment_limit / duplicate /
+                    # 状态冲突）。第五场 409 风暴里只打了状态码，无法定责，这里
+                    # 把被截断的 body 打全（脱敏后 400 字符）。
+                    snippet = (body.decode("utf-8", "replace")
+                               if isinstance(body, (bytes, bytearray)) else str(body))
+                    print("[arena] {} {} -> HTTP {} body={}".format(
+                        method, path, code, _redact(snippet[:400])),
+                        file=sys.stderr, flush=True)
                 return code, body
         if last_http is not None:
             return last_http
@@ -787,7 +796,9 @@ class ArenaHarnessAdapter(HarnessAdapter):
             raw_addr = ",".join(str(a) for a in raw_addr if a)
         addr = str(raw_addr or "").strip()
         tunnel_fact = ("python requests/httpx 默认走平台 HTTP_PROXY 隧道，同样可达；"
-                       "手写 socket 或显式禁用代理的直连不可达，不要用")
+                       "手写 socket 或显式禁用代理的直连不可达，不要用；"
+                       "arena_http 的 SOCKS5 被平台拒绝（DENY: socks5 connect failed "
+                       "rep=0x02）时会自动降级到 HTTP 代理明文转发，无需手写代理")
         parts = []
         if addr:
             parts.append("题目服务地址: http://" + addr
@@ -946,7 +957,14 @@ class ArenaHarnessAdapter(HarnessAdapter):
             except ArenaProtocolError as exc:
                 text = str(exc).lower()
                 if "duplicate" in text or "already" in text:
-                    continue  # 环境在跑但平台不给地址：等下一轮
+                    # 环境在跑但平台不给地址：等下一轮（记日志便于判 409 原因）。
+                    print("[arena] start-poll {} attempt={} duplicate: {}".format(
+                        unique_code, attempt, _redact(str(exc))[:300]),
+                        file=sys.stderr, flush=True)
+                    continue
+                print("[arena] start-poll {} attempt={} failed: {}".format(
+                    unique_code, attempt, _redact(str(exc))[:400]),
+                    file=sys.stderr, flush=True)
                 raise
             if isinstance(resp, dict) and resp:
                 with self._env_lock:
@@ -1025,6 +1043,11 @@ class ArenaHarnessAdapter(HarnessAdapter):
             # start 接口无返回体约定；失败即抛，绝不当作已启动。
             resp = self._client.request("POST", self._paths["start"],
                                         query={"unique_code": unique_code})
+        except Exception as exc:
+            # 失败必须带响应体落日志：编排层要按题退避/跳过，日志是第一证据。
+            print("[arena] start {} failed: {}".format(
+                unique_code, _redact(str(exc))[:600]), file=sys.stderr, flush=True)
+            raise
         finally:
             with self._env_lock:
                 ev = self._inflight.pop(unique_code, None)

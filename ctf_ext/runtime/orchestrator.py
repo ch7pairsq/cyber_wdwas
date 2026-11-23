@@ -98,6 +98,14 @@ class Orchestrator:
         self._max_consecutive_errors = max(1, int(max_consecutive_errors))
         self._retry_backoff = max(0.0, float(retry_backoff_seconds))
         self._poll_seconds = max(0.01, float(poll_seconds))
+        # v36 环境失败按题退避：平台 start 恒 409 时（第五场 attempt
+        # 01a20649），失败意图回 READY 后被立即重领，backoff=0 → 2-5 次/秒
+        # 的 start 风暴。这里按题指数退避并封顶，跨题并行不受影响。
+        self._env_failures: Dict[str, int] = {}
+        self._env_backoff_base = 10.0
+        self._env_backoff_max = 300.0
+        # 平台明确返回"无靶机地址"的题（离线题）：释放槽位后不再 start。
+        self._no_env: set = set()
         self._planner = planner or IntentPlanner(
             board, max_intents_per_challenge=max_intents_per_challenge)
         # 并发执行（跨题并行、题内串行）：题内互斥由调度器 max_project_workers
@@ -367,11 +375,17 @@ class Orchestrator:
         if not candidates:
             self._board.append_event("environment_no_candidate", incoming_cid,
                                      {"started": len(started), "limit": limit})
+            print("[orch] env slots full started={} limit={} for={} "
+                  "but no evictable candidate".format(len(started), limit, incoming_cid),
+                  file=sys.stderr, flush=True)
             return
         candidates.sort()
         victim = candidates[0][2]
         try:
             if stop_env(victim):
+                print("[orch] env evict victim={} for={} accepted={}".format(
+                    victim, incoming_cid, victim in accepted),
+                    file=sys.stderr, flush=True)
                 self._board.append_event("environment_evicted", victim, {
                     "for": incoming_cid,
                     "accepted": victim in accepted,
@@ -391,16 +405,43 @@ class Orchestrator:
         start/close API，与其他 worker 互相踩踏环境）。失败只记事件。
         """
         self._release_env_slots(challenge_id)
+        if challenge_id in self._no_env:
+            return {}
         hook = getattr(self._harness, "ensure_environment", None)
         if hook is None:
             return {}
         try:
             info = hook(challenge_id)
         except Exception as exc:
+            detail = str(exc)[:400]
+            failures = int(self._env_failures.get(challenge_id) or 0) + 1
+            self._env_failures[challenge_id] = failures
+            delay = min(self._env_backoff_max,
+                        self._env_backoff_base * (2 ** (failures - 1)))
+            defer = getattr(self._scheduler, "defer_challenge", None)
+            if callable(defer):
+                defer(challenge_id, delay)
+            # 关键点日志：409 的响应体、失败次数、下次可试时刻，一次看全。
+            print("[orch] env failed ch={} failures={} retry_in={:.0f}s error={} detail={}"
+                  .format(challenge_id, failures, delay, type(exc).__name__, detail),
+                  file=sys.stderr, flush=True)
             self._board.append_event("environment_failed", challenge_id,
-                                     {"error": type(exc).__name__, "detail": str(exc)[:160]})
+                                     {"error": type(exc).__name__, "detail": detail,
+                                      "failures": failures, "retry_in": round(delay, 1)})
             self._metrics.incr("environments.failed")
+            if self._looks_offline(challenge_id):
+                # 离线题（纯附件逆向/取证）本就不需要靶机：start 失败不该
+                # 让整题饿死（第五场 back-to-the-past 类题一次都没跑起来）。
+                print("[orch] env failed but ch={} declares no remote service "
+                      "-> run without env".format(challenge_id),
+                      file=sys.stderr, flush=True)
+                self._board.append_event("environment_skipped_offline", challenge_id,
+                                         {"failures": failures})
+                return {}
             return None
+        self._env_failures.pop(challenge_id, None)
+        if self._env_is_empty(challenge_id, info):
+            return {}
         # 新启动的环境带出 container_addr：同步进编排层缓存的题目描述（模型唯一可读面）。
         describe = getattr(self._harness, "task_description", None)
         if isinstance(info, dict) and describe is not None:
@@ -413,6 +454,64 @@ class Orchestrator:
                 self._board.append_event("description_refresh_failed", challenge_id,
                                          {"error": type(exc).__name__})
         return info if isinstance(info, dict) else {}
+
+    _OFFLINE_PHRASES = ("no network service", "no remote service", "offline",
+                        "无远程服务", "不需要远程", "无需远程", "纯离线", "本地运行")
+
+    def _looks_offline(self, challenge_id) -> bool:
+        """题目描述是否明说"无远程服务"（纯离线逆向/取证/密码题）。
+
+        只用于 start 失败后的兜底：判成离线的题不因拿不到靶机而整题饿死。
+        判据必须是显式措辞——"描述里没有 URL"之类的弱信号会把普通题目
+        误判成离线（test_env_lifecycle 的"环境不可用不得入 worker"契约）。
+        平台明确给出"无地址"的题由 _env_is_empty 处理（强信号）。
+        """
+        challenge = self._challenges.get(challenge_id) or {}
+        desc = str(challenge.get("description") or "")
+        marker = "\n\n[Arena 运行环境]"
+        if marker in desc:
+            desc = desc.split(marker)[0]
+        if not desc.strip():
+            return False
+        low = desc.lower()
+        return any(p in low for p in self._OFFLINE_PHRASES)
+
+    def _env_is_empty(self, challenge_id, info) -> bool:
+        """start 响应是否"状态就绪但无靶机地址"（离线题）→ 释放槽位并记账。
+
+        第五场槽位压力根因之一：离线题（container_addr=[]、state=available）
+        也占着 3 个并发槽位，其它题 start 直接 409；而它们有 RUNNING 意图，
+        让位逻辑也不肯回收。这里主动 close 这类环境，并记住不再 start。
+        pending（拉起中）不算，避免把正在拉起的题误当离线。
+        """
+        if challenge_id in self._no_env:
+            return True
+        if not isinstance(info, dict) or "container_addr" not in info:
+            return False
+        raw = info.get("container_addr")
+        if isinstance(raw, (list, tuple)):
+            addr = ",".join(str(a) for a in raw if a).strip()
+        else:
+            addr = str(raw or "").strip()
+        if addr:
+            return False
+        status = str(info.get("container_status") or "").strip().lower()
+        if status not in ("available", "running", ""):
+            return False
+        self._no_env.add(challenge_id)
+        released = False
+        stop = getattr(self._harness, "stop_environment", None)
+        if callable(stop):
+            try:
+                released = bool(stop(challenge_id))
+            except Exception as exc:
+                self._board.append_event("environment_release_failed", challenge_id,
+                                         {"error": type(exc).__name__})
+        print("[orch] env no-address ch={} status={!r} -> released={} run without env"
+              .format(challenge_id, status, released), file=sys.stderr, flush=True)
+        self._board.append_event("environment_no_address", challenge_id,
+                                 {"status": status, "released": released})
+        return True
 
     def _environment_unavailable_result(self, claim, started: float) -> WorkerResult:
         """环境槽位不可用的标准化失败结果：意图快速失败等待重试，不入 worker。"""
@@ -439,6 +538,9 @@ class Orchestrator:
         if env_info is None:
             # v33：环境不可用不入 worker（防模型自行调平台 start/close 互相
             # 踩踏）；意图快速失败回退 READY，槽位回收后自然重试。
+            print("[orch] env unavailable ch={} failures={} (intent fast-failed)".format(
+                claim.challenge_id, self._env_failures.get(claim.challenge_id, 0)),
+                file=sys.stderr, flush=True)
             result = self._environment_unavailable_result(claim, started)
         else:
             result = self._run_worker(claim, challenge, started)
@@ -902,7 +1004,14 @@ class Orchestrator:
                   self._worker_name, max_seconds, self._parallel_agents,
                   self._claim_timeout, self._retry_backoff),
               file=sys.stderr, flush=True)
-        tasks = self.bootstrap()
+        # bootstrap（读题 + 多个大附件物化）可能远超 supervisor 的 180s
+        # stale-seconds：期间后台续心跳，bootstrap 结束立即停止（真卡死仍可被发现）。
+        bootstrap_hb = self._start_bootstrap_heartbeat()
+        try:
+            tasks = self.bootstrap()
+        finally:
+            if bootstrap_hb is not None:
+                bootstrap_hb.set()
         try:
             recover_expired_leases(self._board)  # 启动即恢复未完成租约（§17.4）
         except Exception as exc:
@@ -1230,3 +1339,25 @@ class Orchestrator:
         """刷新进程心跳文件（供外部 supervisor 判活；未配置时为 no-op）。"""
         if self._heartbeat is not None:
             self._heartbeat.touch()
+
+    def _start_bootstrap_heartbeat(self):
+        """bootstrap 期间后台续心跳（v36）；返回停止信号或 None。
+
+        第五场 supervisor 以 stale-seconds=180 判活：附件下载/物化期间主线程
+        忙在 bootstrap，心跳文件长时间不更新会被判卡重启，重启后又从头下载
+        （实测整轮浪费约 18 分钟）。线程只在 bootstrap 窗口存活。
+        """
+        if self._heartbeat is None:
+            return None
+        stop = threading.Event()
+        heartbeat = self._heartbeat
+
+        def _loop():
+            while not stop.wait(30.0):
+                try:
+                    heartbeat.touch()
+                except Exception:
+                    return
+
+        threading.Thread(target=_loop, name="bootstrap-heartbeat", daemon=True).start()
+        return stop
